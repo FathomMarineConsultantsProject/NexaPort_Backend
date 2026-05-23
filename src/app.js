@@ -3,6 +3,8 @@ import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
 import testRoutes from "./routes/testRoutes.js";
+import expertRoutes from "./routes/expertRoutes.js";
+import masterRoutes from "./routes/masterRoutes.js";
 
 const app = express();
 
@@ -22,5 +24,9 @@ app.get("/health", (req, res) => {
   res.json({ success: true, status: "OK" });
 });
 app.use("/api", testRoutes);
+
+//Main APIs
+app.use("/api/experts", expertRoutes);
+app.use("/api/master", masterRoutes);
 
 export default app;
