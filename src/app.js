@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
+import testRoutes from "./routes/testRoutes.js";
 
 const app = express();
 
@@ -20,5 +21,6 @@ app.get("/", (req, res) => {
 app.get("/health", (req, res) => {
   res.json({ success: true, status: "OK" });
 });
+app.use("/api", testRoutes);
 
 export default app;
