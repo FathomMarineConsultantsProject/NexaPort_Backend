@@ -6,6 +6,7 @@ import testRoutes from "./routes/testRoutes.js";
 import expertRoutes from "./routes/expertRoutes.js";
 import masterRoutes from "./routes/masterRoutes.js";
 import vesselRoutes from "./routes/vesselRoutes.js";
+import portRoutes from "./routes/portRoutes.js";
 
 const app = express();
 
@@ -30,5 +31,6 @@ app.use("/api", testRoutes);
 app.use("/api/experts", expertRoutes);
 app.use("/api/master", masterRoutes);
 app.use("/api/vessels", vesselRoutes);
+app.use("/api/ports", portRoutes);
 
 export default app;
