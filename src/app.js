@@ -6,6 +6,10 @@ import testRoutes from "./routes/testRoutes.js";
 import expertRoutes from "./routes/expertRoutes.js";
 import masterRoutes from "./routes/masterRoutes.js";
 import vesselRoutes from "./routes/vesselRoutes.js";
+import portRoutes from "./routes/portRoutes.js";
+import serviceRequestRoutes from "./routes/serviceRequestRoutes.js";
+import quotationRoutes from "./routes/quotationRoutes.js";
+import expertReviewRoutes from "./routes/expertReviewRoutes.js";
 
 const app = express();
 
@@ -30,5 +34,9 @@ app.use("/api", testRoutes);
 app.use("/api/experts", expertRoutes);
 app.use("/api/master", masterRoutes);
 app.use("/api/vessels", vesselRoutes);
+app.use("/api/ports", portRoutes);
+app.use("/api/service-requests", serviceRequestRoutes);
+app.use("/api/quotations", quotationRoutes);
+app.use("/api/experts", expertReviewRoutes);
 
 export default app;
