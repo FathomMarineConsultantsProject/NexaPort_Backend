@@ -99,6 +99,8 @@ export const getExpertById = async (req, res) => {
 };
 
 export const createExpert = async (req, res) => {
+  const client = await pool.connect();
+
   try {
     const {
       full_name,
@@ -109,6 +111,11 @@ export const createExpert = async (req, res) => {
       years_experience,
       availability,
       is_premium,
+      specialty_ids = [],
+      certification_ids = [],
+      vessel_type_ids = [],
+      ports = [],
+      languages = [],
     } = req.body;
 
     if (!full_name) {
@@ -118,7 +125,9 @@ export const createExpert = async (req, res) => {
       });
     }
 
-    const result = await pool.query(
+    await client.query("BEGIN");
+
+    const expertResult = await client.query(
       `
       INSERT INTO experts (
         full_name,
@@ -145,17 +154,60 @@ export const createExpert = async (req, res) => {
       ]
     );
 
+    const expert = expertResult.rows[0];
+
+    for (const specialtyId of specialty_ids) {
+      await client.query(
+        `INSERT INTO expert_specialties (expert_id, specialty_id) VALUES ($1, $2)`,
+        [expert.id, specialtyId]
+      );
+    }
+
+    for (const certificationId of certification_ids) {
+      await client.query(
+        `INSERT INTO expert_certifications (expert_id, certification_id) VALUES ($1, $2)`,
+        [expert.id, certificationId]
+      );
+    }
+
+    for (const vesselTypeId of vessel_type_ids) {
+      await client.query(
+        `INSERT INTO expert_vessel_types (expert_id, vessel_type_id) VALUES ($1, $2)`,
+        [expert.id, vesselTypeId]
+      );
+    }
+
+    for (const portName of ports) {
+      await client.query(
+        `INSERT INTO expert_ports (expert_id, port_name) VALUES ($1, $2)`,
+        [expert.id, portName]
+      );
+    }
+
+    for (const languageName of languages) {
+      await client.query(
+        `INSERT INTO expert_languages (expert_id, language_name) VALUES ($1, $2)`,
+        [expert.id, languageName]
+      );
+    }
+
+    await client.query("COMMIT");
+
     res.status(201).json({
       success: true,
       message: "Expert created successfully",
-      data: result.rows[0],
+      data: expert,
     });
   } catch (error) {
+    await client.query("ROLLBACK");
+
     res.status(500).json({
       success: false,
       message: "Failed to create expert",
       error: error.message,
     });
+  } finally {
+    client.release();
   }
 };
 
