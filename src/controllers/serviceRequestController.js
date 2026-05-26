@@ -319,10 +319,10 @@ export const updateServiceRequest = async (req, res) => {
 
         if (portName && country) {
             const port = await findOrCreatePort({
-  port_name: portName,
-  country,
-  region: locationSummary || null,
-});
+                port_name: portName,
+                country,
+                region: locationSummary || null,
+            });
 
             portId = port.id;
         }
