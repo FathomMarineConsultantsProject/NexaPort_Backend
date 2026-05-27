@@ -3,6 +3,7 @@ import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
 import testRoutes from "./routes/testRoutes.js";
+import authRoutes from "./routes/authRoutes.js";
 import expertRoutes from "./routes/expertRoutes.js";
 import masterRoutes from "./routes/masterRoutes.js";
 import vesselRoutes from "./routes/vesselRoutes.js";
@@ -30,6 +31,8 @@ app.get("/health", (req, res) => {
   res.json({ success: true, status: "OK" });
 });
 app.use("/api", testRoutes);
+
+app.use("/api/auth", authRoutes);
 
 //Main APIs
 app.use("/api/experts", expertRoutes);
