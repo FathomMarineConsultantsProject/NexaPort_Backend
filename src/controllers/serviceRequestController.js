@@ -2,88 +2,104 @@ import { pool } from "../config/db.js";
 import { findOrCreatePort } from "../utils/findOrCreatePort.js";
 
 const mapRequestRow = (row) => ({
-    id: row.id,
-    serviceType: row.service_type,
-    serviceCategory: row.service_category,
-    title: row.title,
-    scopeOfWork: row.scope_of_work,
-    urgency: row.urgency,
-    budgetUsd: Number(row.budget_usd || 0),
-    requiredBy: row.required_by,
-    requesterName: row.requester_name,
-    status: row.status,
-    quotationCount: Number(row.quotation_count || 0),
+  id: row.id,
+  serviceType: row.service_type,
+  serviceCategory: row.service_category,
+  title: row.title,
+  scopeOfWork: row.scope_of_work,
+  urgency: row.urgency,
+  budgetUsd: Number(row.budget_usd || 0),
+  requiredBy: row.required_by,
+  requesterName: row.requester_name,
+  requesterUserId: row.requester_user_id,
+  status: row.status,
+  quotationCount: Number(row.quotation_count || 0),
 
-    vessel: {
-        name: row.vessel_name,
-        imoNumber: row.imo_number,
-        type: row.vessel_type,
-        flagState: row.flag_state,
-    },
+  vessel: {
+    name: row.vessel_name,
+    imoNumber: row.imo_number,
+    type: row.vessel_type,
+    flagState: row.flag_state,
+  },
 
-    port: {
-        id: row.port_id,
-        name: row.port_name,
-        country: row.country,
-        eta: row.eta,
-        locationSummary: row.location_summary,
-    },
+  port: {
+    id: row.port_id,
+    name: row.port_name,
+    country: row.country,
+    eta: row.eta,
+    locationSummary: row.location_summary,
+  },
 
-    requiredCertification: row.required_certification,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+  requiredCertification: row.required_certification,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
 });
 
+const canAccessRequest = (user, request) => {
+  const roleId = Number(user.role_id);
+
+  if (roleId === 1) return true;
+
+  if (roleId === 2) {
+    return ["open", "pending", "active"].includes(
+      String(request.status || "").toLowerCase()
+    );
+  }
+
+  if (roleId === 3) {
+    return Number(request.requester_user_id) === Number(user.id);
+  }
+
+  return false;
+};
+
 export const createServiceRequest = async (req, res) => {
-    const client = await pool.connect();
+  const client = await pool.connect();
 
-    try {
-        const {
-            serviceType,
-            serviceCategory,
-            title,
-            scopeOfWork,
-            urgency,
-            budgetUsd,
-            requiredBy,
-            requesterName,
+  try {
+    const {
+      serviceType,
+      serviceCategory,
+      title,
+      scopeOfWork,
+      urgency,
+      budgetUsd,
+      requiredBy,
+      requesterName,
+      vesselName,
+      imoNumber,
+      vesselType,
+      flagState,
+      portName,
+      country,
+      eta,
+      locationSummary,
+      requiredCertification,
+    } = req.body;
 
-            vesselName,
-            imoNumber,
-            vesselType,
-            flagState,
+    if (!serviceType || !serviceCategory || !title || !scopeOfWork) {
+      return res.status(400).json({
+        success: false,
+        message: "serviceType, serviceCategory, title and scopeOfWork are required",
+      });
+    }
 
-            portName,
-            country,
-            eta,
-            locationSummary,
+    await client.query("BEGIN");
 
-            requiredCertification,
-        } = req.body;
+    let portId = null;
 
-        if (!serviceType || !serviceCategory || !title || !scopeOfWork) {
-            return res.status(400).json({
-                success: false,
-                message: "serviceType, serviceCategory, title and scopeOfWork are required",
-            });
-        }
+    if (portName && country) {
+      const port = await findOrCreatePort({
+        port_name: portName,
+        country,
+        region: locationSummary || null,
+      });
 
-        await client.query("BEGIN");
+      portId = port.id;
+    }
 
-        let portId = null;
-
-        if (portName && country) {
-            const port = await findOrCreatePort({
-                port_name: portName,
-                country,
-                region: locationSummary || null,
-            });
-
-            portId = port.id;
-        }
-
-        const result = await client.query(
-            `
+    const result = await client.query(
+      `
       INSERT INTO service_requests (
         service_type,
         service_category,
@@ -102,92 +118,104 @@ export const createServiceRequest = async (req, res) => {
         country,
         eta,
         location_summary,
-        required_certification
+        required_certification,
+        requester_user_id
       )
       VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,
-        $9,$10,$11,$12,$13,$14,$15,$16,$17,$18
+        $9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19
       )
       RETURNING *
       `,
-            [
-                serviceType,
-                serviceCategory,
-                title,
-                scopeOfWork,
-                urgency || "routine",
-                budgetUsd || null,
-                requiredBy || null,
-                requesterName || null,
-                vesselName || null,
-                imoNumber || null,
-                vesselType || null,
-                flagState || null,
-                portId,
-                portName || null,
-                country || null,
-                eta || null,
-                locationSummary || null,
-                requiredCertification || null,
-            ]
-        );
+      [
+        serviceType,
+        serviceCategory,
+        title,
+        scopeOfWork,
+        urgency || "routine",
+        budgetUsd || null,
+        requiredBy || null,
+        requesterName || req.user.full_name || null,
+        vesselName || null,
+        imoNumber || null,
+        vesselType || null,
+        flagState || null,
+        portId,
+        portName || null,
+        country || null,
+        eta || null,
+        locationSummary || null,
+        requiredCertification || null,
+        req.user.id,
+      ]
+    );
 
-        await client.query("COMMIT");
+    await client.query("COMMIT");
 
-        res.status(201).json({
-            success: true,
-            message: "Service request created successfully",
-            data: mapRequestRow(result.rows[0]),
-        });
-    } catch (error) {
-        await client.query("ROLLBACK");
-        console.error("Create service request error:", error);
+    res.status(201).json({
+      success: true,
+      message: "Service request created successfully",
+      data: mapRequestRow(result.rows[0]),
+    });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("Create service request error:", error);
 
-        res.status(500).json({
-            success: false,
-            message: "Failed to create service request",
-        });
-    } finally {
-        client.release();
-    }
+    res.status(500).json({
+      success: false,
+      message: "Failed to create service request",
+      error: error.message,
+    });
+  } finally {
+    client.release();
+  }
 };
 
 export const getServiceRequests = async (req, res) => {
-    try {
-        const { search, type, status, urgency } = req.query;
+  try {
+    const { search, type, status, urgency } = req.query;
 
-        const conditions = [];
-        const values = [];
+    const conditions = [];
+    const values = [];
 
-        if (search) {
-            values.push(`%${search}%`);
-            conditions.push(`(
+    if (search) {
+      values.push(`%${search}%`);
+      conditions.push(`(
         sr.title ILIKE $${values.length}
         OR sr.port_name ILIKE $${values.length}
         OR sr.vessel_name ILIKE $${values.length}
         OR sr.service_category ILIKE $${values.length}
       )`);
-        }
+    }
 
-        if (type && type !== "all") {
-            values.push(type);
-            conditions.push(`LOWER(sr.service_type) = LOWER($${values.length})`);
-        }
+    if (type && type !== "all") {
+      values.push(type);
+      conditions.push(`LOWER(sr.service_type) = LOWER($${values.length})`);
+    }
 
-        if (status && status !== "all") {
-            values.push(status);
-            conditions.push(`LOWER(sr.status) = LOWER($${values.length})`);
-        }
+    if (status && status !== "all") {
+      values.push(status);
+      conditions.push(`LOWER(sr.status) = LOWER($${values.length})`);
+    }
 
-        if (urgency && urgency !== "all") {
-            values.push(urgency);
-            conditions.push(`LOWER(sr.urgency) = LOWER($${values.length})`);
-        }
+    if (urgency && urgency !== "all") {
+      values.push(urgency);
+      conditions.push(`LOWER(sr.urgency) = LOWER($${values.length})`);
+    }
 
-        const whereSql = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    if (Number(req.user.role_id) === 3) {
+      values.push(req.user.id);
+      conditions.push(`sr.requester_user_id = $${values.length}`);
+    }
 
-        const result = await pool.query(
-            `
+    if (Number(req.user.role_id) === 2) {
+      conditions.push(`LOWER(sr.status) IN ('open', 'pending', 'active')`);
+    }
+
+    const whereSql = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    const result = await pool.query(
+      `
       SELECT 
         sr.*,
         COUNT(q.id) AS quotation_count
@@ -197,29 +225,30 @@ export const getServiceRequests = async (req, res) => {
       GROUP BY sr.id
       ORDER BY sr.created_at DESC
       `,
-            values
-        );
+      values
+    );
 
-        res.json({
-            success: true,
-            data: result.rows.map(mapRequestRow),
-        });
-    } catch (error) {
-        console.error("Get service requests error:", error);
+    res.json({
+      success: true,
+      data: result.rows.map(mapRequestRow),
+    });
+  } catch (error) {
+    console.error("Get service requests error:", error);
 
-        res.status(500).json({
-            success: false,
-            message: "Failed to fetch service requests",
-        });
-    }
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch service requests",
+      error: error.message,
+    });
+  }
 };
 
 export const getServiceRequestById = async (req, res) => {
-    try {
-        const { id } = req.params;
+  try {
+    const { id } = req.params;
 
-        const requestResult = await pool.query(
-            `
+    const requestResult = await pool.query(
+      `
       SELECT 
         sr.*,
         COUNT(q.id) AS quotation_count
@@ -228,18 +257,27 @@ export const getServiceRequestById = async (req, res) => {
       WHERE sr.id = $1
       GROUP BY sr.id
       `,
-            [id]
-        );
+      [id]
+    );
 
-        if (!requestResult.rows.length) {
-            return res.status(404).json({
-                success: false,
-                message: "Service request not found",
-            });
-        }
+    if (!requestResult.rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: "Service request not found",
+      });
+    }
 
-        const quotationResult = await pool.query(
-            `
+    const requestRow = requestResult.rows[0];
+
+    if (!canAccessRequest(req.user, requestRow)) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied for this service request",
+      });
+    }
+
+    const quotationResult = await pool.query(
+      `
       SELECT 
         q.*,
         e.full_name AS expert_name,
@@ -250,85 +288,110 @@ export const getServiceRequestById = async (req, res) => {
       WHERE q.service_request_id = $1
       ORDER BY q.created_at DESC
       `,
-            [id]
-        );
+      [id]
+    );
 
-        const requestData = mapRequestRow(requestResult.rows[0]);
+    const requestData = mapRequestRow(requestRow);
 
-        requestData.quotations = quotationResult.rows.map((row) => ({
-            id: row.id,
-            expertId: row.expert_id,
-            expertName: row.expert_name,
-            expertRating: Number(row.expert_rating || 0),
-            expertLocation: row.expert_location,
-            totalQuoteUsd: Number(row.total_quote_usd || 0),
-            attendanceDays: row.attendance_days,
-            travelCost: Number(row.travel_cost || 0),
-            accommodationCost: Number(row.accommodation_cost || 0),
-            reportFee: Number(row.report_fee || 0),
-            urgencySurcharge: Number(row.urgency_surcharge || 0),
-            coverLetter: row.cover_letter,
-            status: row.status,
-            createdAt: row.created_at,
-        }));
+    requestData.quotations = quotationResult.rows.map((row) => ({
+      id: row.id,
+      expertId: row.expert_id,
+      expertName: row.expert_name,
+      expertRating: Number(row.expert_rating || 0),
+      expertLocation: row.expert_location,
+      totalQuoteUsd: Number(row.total_quote_usd || 0),
+      attendanceDays: row.attendance_days,
+      travelCost: Number(row.travel_cost || 0),
+      accommodationCost: Number(row.accommodation_cost || 0),
+      reportFee: Number(row.report_fee || 0),
+      urgencySurcharge: Number(row.urgency_surcharge || 0),
+      coverLetter: row.cover_letter,
+      status: row.status,
+      createdAt: row.created_at,
+    }));
 
-        res.json({
-            success: true,
-            data: requestData,
-        });
-    } catch (error) {
-        console.error("Get service request by id error:", error);
+    res.json({
+      success: true,
+      data: requestData,
+    });
+  } catch (error) {
+    console.error("Get service request by id error:", error);
 
-        res.status(500).json({
-            success: false,
-            message: "Failed to fetch service request",
-        });
-    }
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch service request",
+      error: error.message,
+    });
+  }
 };
 
 export const updateServiceRequest = async (req, res) => {
-    const client = await pool.connect();
+  const client = await pool.connect();
 
-    try {
-        const { id } = req.params;
+  try {
+    const { id } = req.params;
 
-        const {
-            serviceType,
-            serviceCategory,
-            title,
-            scopeOfWork,
-            urgency,
-            budgetUsd,
-            requiredBy,
-            requesterName,
-            vesselName,
-            imoNumber,
-            vesselType,
-            flagState,
-            portName,
-            country,
-            eta,
-            locationSummary,
-            requiredCertification,
-            status,
-        } = req.body;
+    const existing = await client.query(
+      `SELECT * FROM service_requests WHERE id = $1`,
+      [id]
+    );
 
-        await client.query("BEGIN");
+    if (!existing.rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: "Service request not found",
+      });
+    }
 
-        let portId = null;
+    const existingRequest = existing.rows[0];
 
-        if (portName && country) {
-            const port = await findOrCreatePort({
-                port_name: portName,
-                country,
-                region: locationSummary || null,
-            });
+    if (
+      Number(req.user.role_id) !== 1 &&
+      Number(existingRequest.requester_user_id) !== Number(req.user.id)
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "Only the request owner or admin can update this request",
+      });
+    }
 
-            portId = port.id;
-        }
+    const {
+      serviceType,
+      serviceCategory,
+      title,
+      scopeOfWork,
+      urgency,
+      budgetUsd,
+      requiredBy,
+      requesterName,
+      vesselName,
+      imoNumber,
+      vesselType,
+      flagState,
+      portName,
+      country,
+      eta,
+      locationSummary,
+      requiredCertification,
+      status,
+    } = req.body;
 
-        const result = await client.query(
-            `
+    await client.query("BEGIN");
+
+    let portId = null;
+
+    if (portName && country) {
+      const port = await findOrCreatePort({
+        port_name: portName,
+        country,
+        region: locationSummary || null,
+      });
+
+      portId = port.id;
+    }
+
+    const result = await client.query(
+      `
       UPDATE service_requests
       SET
         service_type = COALESCE($1, service_type),
@@ -354,88 +417,87 @@ export const updateServiceRequest = async (req, res) => {
       WHERE id = $20
       RETURNING *
       `,
-            [
-                serviceType || null,
-                serviceCategory || null,
-                title || null,
-                scopeOfWork || null,
-                urgency || null,
-                budgetUsd || null,
-                requiredBy || null,
-                requesterName || null,
-                vesselName || null,
-                imoNumber || null,
-                vesselType || null,
-                flagState || null,
-                portId,
-                portName || null,
-                country || null,
-                eta || null,
-                locationSummary || null,
-                requiredCertification || null,
-                status || null,
-                id,
-            ]
-        );
+      [
+        serviceType || null,
+        serviceCategory || null,
+        title || null,
+        scopeOfWork || null,
+        urgency || null,
+        budgetUsd || null,
+        requiredBy || null,
+        requesterName || null,
+        vesselName || null,
+        imoNumber || null,
+        vesselType || null,
+        flagState || null,
+        portId,
+        portName || null,
+        country || null,
+        eta || null,
+        locationSummary || null,
+        requiredCertification || null,
+        status || null,
+        id,
+      ]
+    );
 
-        if (!result.rows.length) {
-            await client.query("ROLLBACK");
+    await client.query("COMMIT");
 
-            return res.status(404).json({
-                success: false,
-                message: "Service request not found",
-            });
-        }
+    res.json({
+      success: true,
+      message: "Service request updated successfully",
+      data: mapRequestRow(result.rows[0]),
+    });
+  } catch (error) {
+    await client.query("ROLLBACK");
 
-        await client.query("COMMIT");
-
-        res.json({
-            success: true,
-            message: "Service request updated successfully",
-            data: mapRequestRow(result.rows[0]),
-        });
-    } catch (error) {
-        await client.query("ROLLBACK");
-
-        res.status(500).json({
-            success: false,
-            message: "Failed to update service request",
-            error: error.message,
-        });
-    } finally {
-        client.release();
-    }
+    res.status(500).json({
+      success: false,
+      message: "Failed to update service request",
+      error: error.message,
+    });
+  } finally {
+    client.release();
+  }
 };
 
 export const deleteServiceRequest = async (req, res) => {
-    try {
-        const { id } = req.params;
+  try {
+    const { id } = req.params;
 
-        const result = await pool.query(
-            `
-      DELETE FROM service_requests
-      WHERE id = $1
-      RETURNING id
-      `,
-            [id]
-        );
+    const existing = await pool.query(
+      `SELECT id, requester_user_id FROM service_requests WHERE id = $1`,
+      [id]
+    );
 
-        if (!result.rows.length) {
-            return res.status(404).json({
-                success: false,
-                message: "Service request not found",
-            });
-        }
-
-        res.json({
-            success: true,
-            message: "Service request deleted successfully",
-        });
-    } catch (error) {
-        res.status(500).json({
-            success: false,
-            message: "Failed to delete service request",
-            error: error.message,
-        });
+    if (!existing.rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: "Service request not found",
+      });
     }
+
+    if (
+      Number(req.user.role_id) !== 1 &&
+      Number(existing.rows[0].requester_user_id) !== Number(req.user.id)
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "Only the request owner or admin can delete this request",
+      });
+    }
+
+    await pool.query(`DELETE FROM service_requests WHERE id = $1`, [id]);
+
+    res.json({
+      success: true,
+      message: "Service request deleted successfully",
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Failed to delete service request",
+      error: error.message,
+    });
+  }
 };
