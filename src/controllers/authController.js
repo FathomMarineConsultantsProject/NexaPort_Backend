@@ -26,11 +26,19 @@ export const register = async (req, res) => {
         message: "full_name, email, username and password are required",
       });
     }
+    const requestedRoleId = Number(role_id) || 3;
 
-    if (![2, 3].includes(Number(role_id))) {
+    if (![1, 2, 3].includes(requestedRoleId)) {
       return res.status(400).json({
         success: false,
-        message: "role_id must be 2 for expert or 3 for client",
+        message: "role_id must be 1, 2 or 3",
+      });
+    }
+
+    if (requestedRoleId === 1 && req.body.admin_secret !== process.env.ADMIN_REGISTRATION_SECRET) {
+      return res.status(403).json({
+        success: false,
+        message: "Invalid admin registration secret",
       });
     }
 
@@ -66,7 +74,7 @@ export const register = async (req, res) => {
         email.toLowerCase(),
         username,
         passwordHash,
-        Number(role_id),
+        requestedRoleId,
         phone || null,
       ]
     );
