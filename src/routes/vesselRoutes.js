@@ -6,13 +6,14 @@ import {
   updateVessel,
   deleteVessel,
 } from "../controllers/vesselController.js";
+import { requireAuth, allowRoles } from "../middlewares/authMiddleware.js";
 
 const router = express.Router();
 
-router.post("/", createVessel);
-router.get("/", getVessels);
-router.get("/:id", getVesselById);
-router.patch("/:id", updateVessel);
-router.delete("/:id", deleteVessel);
+router.post("/", requireAuth, allowRoles(1, 3), createVessel);
+router.get("/", requireAuth, getVessels);
+router.get("/:id", requireAuth, getVesselById);
+router.patch("/:id", requireAuth, allowRoles(1, 3), updateVessel);
+router.delete("/:id", requireAuth, allowRoles(1, 3), deleteVessel);
 
 export default router;

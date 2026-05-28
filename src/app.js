@@ -12,6 +12,7 @@ import serviceRequestRoutes from "./routes/serviceRequestRoutes.js";
 import quotationRoutes from "./routes/quotationRoutes.js";
 import expertReviewRoutes from "./routes/expertReviewRoutes.js";
 import dashboardRoutes from "./routes/dashboardRoutes.js";
+import userRoutes from "./routes/userRoutes.js";
 
 const app = express();
 
@@ -35,6 +36,7 @@ app.use("/api", testRoutes);
 app.use("/api/auth", authRoutes);
 
 //Main APIs
+app.use("/api/users", userRoutes);
 app.use("/api/experts", expertRoutes);
 app.use("/api/master", masterRoutes);
 app.use("/api/vessels", vesselRoutes);
