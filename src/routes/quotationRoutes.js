@@ -4,17 +4,16 @@ import {
   getQuotations,
   getQuotationById,
   updateQuotation,
-  updateQuotationStatus,
   deleteQuotation,
 } from "../controllers/quotationController.js";
+import { requireAuth, allowRoles } from "../middlewares/authMiddleware.js";
 
 const router = express.Router();
 
-router.get("/", getQuotations);
-router.get("/:id", getQuotationById);
-router.post("/", createQuotation);
-router.put("/:id", updateQuotation);
-router.patch("/:id/status", updateQuotationStatus);
-router.delete("/:id", deleteQuotation);
+router.get("/", requireAuth, getQuotations);
+router.get("/:id", requireAuth, getQuotationById);
+router.post("/", requireAuth, allowRoles(1, 2), createQuotation);
+router.put("/:id", requireAuth, allowRoles(1, 2), updateQuotation);
+router.delete("/:id", requireAuth, allowRoles(1, 2), deleteQuotation);
 
 export default router;

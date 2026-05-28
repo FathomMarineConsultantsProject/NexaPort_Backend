@@ -4,6 +4,7 @@ const mapQuotationRow = (row) => ({
   id: row.id,
   serviceRequestId: row.service_request_id,
   expertId: row.expert_id,
+  expertUserId: row.expert_user_id,
   expertName: row.expert_name,
   expertRating: Number(row.expert_rating || 0),
   expertLocation: row.expert_location,
@@ -18,6 +19,16 @@ const mapQuotationRow = (row) => ({
   createdAt: row.created_at,
   updatedAt: row.updated_at,
 });
+
+const canAccessQuotation = (user, row) => {
+  const roleId = Number(user.role_id);
+
+  if (roleId === 1) return true;
+  if (roleId === 2) return Number(row.expert_user_id) === Number(user.id);
+  if (roleId === 3) return Number(row.requester_user_id) === Number(user.id);
+
+  return false;
+};
 
 export const getQuotations = async (req, res) => {
   try {
@@ -41,16 +52,30 @@ export const getQuotations = async (req, res) => {
       conditions.push(`LOWER(q.status) = LOWER($${values.length})`);
     }
 
-    const whereSql = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    if (Number(req.user.role_id) === 2) {
+      values.push(req.user.id);
+      conditions.push(`q.expert_user_id = $${values.length}`);
+    }
+
+    if (Number(req.user.role_id) === 3) {
+      values.push(req.user.id);
+      conditions.push(`sr.requester_user_id = $${values.length}`);
+    }
+
+    const whereSql = conditions.length
+      ? `WHERE ${conditions.join(" AND ")}`
+      : "";
 
     const result = await pool.query(
       `
       SELECT
         q.*,
+        sr.requester_user_id,
         e.full_name AS expert_name,
         e.rating AS expert_rating,
         e.base_location AS expert_location
       FROM quotations q
+      LEFT JOIN service_requests sr ON sr.id = q.service_request_id
       LEFT JOIN experts e ON e.id = q.expert_id
       ${whereSql}
       ORDER BY q.created_at DESC
@@ -80,10 +105,12 @@ export const getQuotationById = async (req, res) => {
       `
       SELECT
         q.*,
+        sr.requester_user_id,
         e.full_name AS expert_name,
         e.rating AS expert_rating,
         e.base_location AS expert_location
       FROM quotations q
+      LEFT JOIN service_requests sr ON sr.id = q.service_request_id
       LEFT JOIN experts e ON e.id = q.expert_id
       WHERE q.id = $1
       `,
@@ -94,6 +121,13 @@ export const getQuotationById = async (req, res) => {
       return res.status(404).json({
         success: false,
         message: "Quotation not found",
+      });
+    }
+
+    if (!canAccessQuotation(req.user, result.rows[0])) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied for this quotation",
       });
     }
 
@@ -114,7 +148,6 @@ export const createQuotation = async (req, res) => {
   try {
     const {
       serviceRequestId,
-      expertId,
       totalQuoteUsd,
       attendanceDays,
       travelCost,
@@ -132,7 +165,11 @@ export const createQuotation = async (req, res) => {
     }
 
     const requestCheck = await pool.query(
-      `SELECT id FROM service_requests WHERE id = $1`,
+      `
+      SELECT id, status
+      FROM service_requests
+      WHERE id = $1
+      `,
       [serviceRequestId]
     );
 
@@ -143,11 +180,31 @@ export const createQuotation = async (req, res) => {
       });
     }
 
+    const expertCheck = await pool.query(
+      `
+      SELECT id
+      FROM experts
+      WHERE user_id = $1
+      `,
+      [req.user.id]
+    );
+
+    if (Number(req.user.role_id) === 2 && !expertCheck.rows.length) {
+      return res.status(400).json({
+        success: false,
+        message: "Expert profile is required before submitting quotation",
+      });
+    }
+
+    const expertId =
+      Number(req.user.role_id) === 2 ? expertCheck.rows[0].id : req.body.expertId;
+
     const result = await pool.query(
       `
       INSERT INTO quotations (
         service_request_id,
         expert_id,
+        expert_user_id,
         total_quote_usd,
         attendance_days,
         travel_cost,
@@ -156,12 +213,13 @@ export const createQuotation = async (req, res) => {
         urgency_surcharge,
         cover_letter
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
       RETURNING *
       `,
       [
         serviceRequestId,
         expertId || null,
+        req.user.id,
         totalQuoteUsd,
         attendanceDays || null,
         travelCost || 0,
@@ -190,8 +248,33 @@ export const updateQuotation = async (req, res) => {
   try {
     const { id } = req.params;
 
+    const existing = await pool.query(
+      `
+      SELECT
+        q.*,
+        sr.requester_user_id
+      FROM quotations q
+      LEFT JOIN service_requests sr ON sr.id = q.service_request_id
+      WHERE q.id = $1
+      `,
+      [id]
+    );
+
+    if (!existing.rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: "Quotation not found",
+      });
+    }
+
+    if (!canAccessQuotation(req.user, existing.rows[0])) {
+      return res.status(403).json({
+        success: false,
+        message: "Only admin or quotation owner can update this quotation",
+      });
+    }
+
     const {
-      expertId,
       totalQuoteUsd,
       attendanceDays,
       travelCost,
@@ -206,21 +289,19 @@ export const updateQuotation = async (req, res) => {
       `
       UPDATE quotations
       SET
-        expert_id = COALESCE($1, expert_id),
-        total_quote_usd = COALESCE($2, total_quote_usd),
-        attendance_days = COALESCE($3, attendance_days),
-        travel_cost = COALESCE($4, travel_cost),
-        accommodation_cost = COALESCE($5, accommodation_cost),
-        report_fee = COALESCE($6, report_fee),
-        urgency_surcharge = COALESCE($7, urgency_surcharge),
-        cover_letter = COALESCE($8, cover_letter),
-        status = COALESCE($9, status),
+        total_quote_usd = COALESCE($1, total_quote_usd),
+        attendance_days = COALESCE($2, attendance_days),
+        travel_cost = COALESCE($3, travel_cost),
+        accommodation_cost = COALESCE($4, accommodation_cost),
+        report_fee = COALESCE($5, report_fee),
+        urgency_surcharge = COALESCE($6, urgency_surcharge),
+        cover_letter = COALESCE($7, cover_letter),
+        status = COALESCE($8, status),
         updated_at = CURRENT_TIMESTAMP
-      WHERE id = $10
+      WHERE id = $9
       RETURNING *
       `,
       [
-        expertId || null,
         totalQuoteUsd || null,
         attendanceDays || null,
         travelCost || null,
@@ -232,13 +313,6 @@ export const updateQuotation = async (req, res) => {
         id,
       ]
     );
-
-    if (!result.rows.length) {
-      return res.status(404).json({
-        success: false,
-        message: "Quotation not found",
-      });
-    }
 
     res.json({
       success: true,
@@ -254,68 +328,37 @@ export const updateQuotation = async (req, res) => {
   }
 };
 
-export const updateQuotationStatus = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { status } = req.body;
-
-    if (!["accepted", "rejected", "pending"].includes(status)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid quotation status",
-      });
-    }
-
-    const result = await pool.query(
-      `
-      UPDATE quotations
-      SET status = $1, updated_at = CURRENT_TIMESTAMP
-      WHERE id = $2
-      RETURNING *
-      `,
-      [status, id]
-    );
-
-    if (!result.rows.length) {
-      return res.status(404).json({
-        success: false,
-        message: "Quotation not found",
-      });
-    }
-
-    res.json({
-      success: true,
-      message: `Quotation ${status} successfully`,
-      data: mapQuotationRow(result.rows[0]),
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Failed to update quotation status",
-      error: error.message,
-    });
-  }
-};
-
 export const deleteQuotation = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const result = await pool.query(
+    const existing = await pool.query(
       `
-      DELETE FROM quotations
-      WHERE id = $1
-      RETURNING id
+      SELECT
+        q.*,
+        sr.requester_user_id
+      FROM quotations q
+      LEFT JOIN service_requests sr ON sr.id = q.service_request_id
+      WHERE q.id = $1
       `,
       [id]
     );
 
-    if (!result.rows.length) {
+    if (!existing.rows.length) {
       return res.status(404).json({
         success: false,
         message: "Quotation not found",
       });
     }
+
+    if (!canAccessQuotation(req.user, existing.rows[0])) {
+      return res.status(403).json({
+        success: false,
+        message: "Only admin or quotation owner can delete this quotation",
+      });
+    }
+
+    await pool.query(`DELETE FROM quotations WHERE id = $1`, [id]);
 
     res.json({
       success: true,
