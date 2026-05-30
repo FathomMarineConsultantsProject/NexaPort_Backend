@@ -5,6 +5,7 @@ import {
   getQuotationById,
   updateQuotation,
   deleteQuotation,
+  acceptQuotation,
 } from "../controllers/quotationController.js";
 import { requireAuth, allowRoles } from "../middlewares/authMiddleware.js";
 
