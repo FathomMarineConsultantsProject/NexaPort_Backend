@@ -15,5 +15,6 @@ router.get("/:id", requireAuth, getQuotationById);
 router.post("/", requireAuth, allowRoles(1, 2), createQuotation);
 router.put("/:id", requireAuth, allowRoles(1, 2), updateQuotation);
 router.delete("/:id", requireAuth, allowRoles(1, 2), deleteQuotation);
+router.patch("/:id/accept", requireAuth, allowRoles(1), acceptQuotation);
 
 export default router;

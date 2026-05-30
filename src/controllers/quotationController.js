@@ -372,3 +372,80 @@ export const deleteQuotation = async (req, res) => {
     });
   }
 };
+
+export const acceptQuotation = async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    const { id } = req.params;
+
+    await client.query("BEGIN");
+
+    const quoteResult = await client.query(
+      `
+      SELECT id, service_request_id, expert_id
+      FROM quotations
+      WHERE id = $1
+      `,
+      [id]
+    );
+
+    if (!quoteResult.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({
+        success: false,
+        message: "Quotation not found",
+      });
+    }
+
+    const quote = quoteResult.rows[0];
+
+    await client.query(
+      `
+      UPDATE quotations
+      SET status = 'rejected', updated_at = CURRENT_TIMESTAMP
+      WHERE service_request_id = $1
+      `,
+      [quote.service_request_id]
+    );
+
+    await client.query(
+      `
+      UPDATE quotations
+      SET status = 'accepted', updated_at = CURRENT_TIMESTAMP
+      WHERE id = $1
+      `,
+      [id]
+    );
+
+    await client.query(
+      `
+      UPDATE service_requests
+      SET
+        accepted_quotation_id = $1,
+        accepted_expert_id = $2,
+        status = 'assigned',
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = $3
+      `,
+      [quote.id, quote.expert_id, quote.service_request_id]
+    );
+
+    await client.query("COMMIT");
+
+    res.json({
+      success: true,
+      message: "Quotation accepted successfully",
+    });
+  } catch (error) {
+    await client.query("ROLLBACK");
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to accept quotation",
+      error: error.message,
+    });
+  } finally {
+    client.release();
+  }
+};
