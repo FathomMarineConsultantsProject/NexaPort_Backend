@@ -378,14 +378,19 @@ export const acceptQuotation = async (req, res) => {
 
   try {
     const { id } = req.params;
+    const { adminMarkupUsd = 0 } = req.body;
 
     await client.query("BEGIN");
 
     const quoteResult = await client.query(
       `
-      SELECT id, service_request_id, expert_id
-      FROM quotations
-      WHERE id = $1
+      SELECT 
+        q.id,
+        q.service_request_id,
+        q.expert_id,
+        q.total_quote_usd
+      FROM quotations q
+      WHERE q.id = $1
       `,
       [id]
     );
@@ -400,22 +405,35 @@ export const acceptQuotation = async (req, res) => {
 
     const quote = quoteResult.rows[0];
 
+    const expertQuoteUsd = Number(quote.total_quote_usd || 0);
+    const markupUsd = Number(adminMarkupUsd || 0);
+    const clientTotalUsd = expertQuoteUsd + markupUsd;
+
     await client.query(
       `
       UPDATE quotations
-      SET status = 'rejected', updated_at = CURRENT_TIMESTAMP
+      SET 
+        status = 'rejected',
+        updated_at = CURRENT_TIMESTAMP
       WHERE service_request_id = $1
       `,
       [quote.service_request_id]
     );
 
-    await client.query(
+    const acceptedQuote = await client.query(
       `
       UPDATE quotations
-      SET status = 'accepted', updated_at = CURRENT_TIMESTAMP
-      WHERE id = $1
+      SET 
+        status = 'accepted',
+        admin_markup_usd = $1,
+        client_total_usd = $2,
+        accepted_by_user_id = $3,
+        accepted_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = $4
+      RETURNING *
       `,
-      [id]
+      [markupUsd, clientTotalUsd, req.user.id, id]
     );
 
     await client.query(
@@ -424,18 +442,20 @@ export const acceptQuotation = async (req, res) => {
       SET
         accepted_quotation_id = $1,
         accepted_expert_id = $2,
+        budget_usd = $3,
         status = 'assigned',
         updated_at = CURRENT_TIMESTAMP
-      WHERE id = $3
+      WHERE id = $4
       `,
-      [quote.id, quote.expert_id, quote.service_request_id]
+      [quote.id, quote.expert_id, clientTotalUsd, quote.service_request_id]
     );
 
     await client.query("COMMIT");
 
     res.json({
       success: true,
-      message: "Quotation accepted successfully",
+      message: "Quotation accepted and client price finalized",
+      data: acceptedQuote.rows[0],
     });
   } catch (error) {
     await client.query("ROLLBACK");
