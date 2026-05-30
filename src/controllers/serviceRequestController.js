@@ -35,19 +35,28 @@ const mapRequestRow = (row) => ({
   updatedAt: row.updated_at,
 });
 
-const canAccessRequest = (user, request) => {
+const canAccessRequest = async (user, request) => {
   const roleId = Number(user.role_id);
 
   if (roleId === 1) return true;
 
-  if (roleId === 2) {
-    return ["open", "pending", "active"].includes(
-      String(request.status || "").toLowerCase()
-    );
-  }
-
   if (roleId === 3) {
     return Number(request.requester_user_id) === Number(user.id);
+  }
+
+  if (roleId === 2) {
+    const assigned = await pool.query(
+      `
+      SELECT rea.id
+      FROM request_expert_assignments rea
+      JOIN experts e ON e.id = rea.expert_id
+      WHERE rea.service_request_id = $1
+      AND e.user_id = $2
+      `,
+      [request.id, user.id]
+    );
+
+    return assigned.rows.length > 0;
   }
 
   return false;
@@ -209,7 +218,15 @@ export const getServiceRequests = async (req, res) => {
     }
 
     if (Number(req.user.role_id) === 2) {
-      conditions.push(`LOWER(sr.status) IN ('open', 'pending', 'active')`);
+      values.push(req.user.id);
+      conditions.push(`
+    sr.id IN (
+      SELECT rea.service_request_id
+      FROM request_expert_assignments rea
+      JOIN experts e ON e.id = rea.expert_id
+      WHERE e.user_id = $${values.length}
+    )
+  `);
     }
 
     const whereSql = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
@@ -269,46 +286,97 @@ export const getServiceRequestById = async (req, res) => {
 
     const requestRow = requestResult.rows[0];
 
-    if (!canAccessRequest(req.user, requestRow)) {
+    if (!(await canAccessRequest(req.user, requestRow))) {
       return res.status(403).json({
         success: false,
         message: "Access denied for this service request",
       });
     }
 
-    const quotationResult = await pool.query(
-      `
-      SELECT 
-        q.*,
-        e.full_name AS expert_name,
-        e.rating AS expert_rating,
-        e.base_location AS expert_location
-      FROM quotations q
-      LEFT JOIN experts e ON e.id = q.expert_id
-      WHERE q.service_request_id = $1
-      ORDER BY q.created_at DESC
-      `,
-      [id]
-    );
+    let quotationResult = { rows: [] };
+
+    if (Number(req.user.role_id) === 1) {
+      quotationResult = await pool.query(
+        `
+    SELECT 
+      q.*,
+      e.full_name AS expert_name,
+      e.rating AS expert_rating,
+      e.base_location AS expert_location
+    FROM quotations q
+    LEFT JOIN experts e ON e.id = q.expert_id
+    WHERE q.service_request_id = $1
+    ORDER BY q.created_at DESC
+    `,
+        [id]
+      );
+    }
+
+    if (Number(req.user.role_id) === 2) {
+      quotationResult = await pool.query(
+        `
+    SELECT 
+      q.*,
+      e.full_name AS expert_name,
+      e.rating AS expert_rating,
+      e.base_location AS expert_location
+    FROM quotations q
+    LEFT JOIN experts e ON e.id = q.expert_id
+    WHERE q.service_request_id = $1
+    AND e.user_id = $2
+    ORDER BY q.created_at DESC
+    `,
+        [id, req.user.id]
+      );
+    }
+
+    if (Number(req.user.role_id) === 3 && requestRow.accepted_quotation_id) {
+      quotationResult = await pool.query(
+        `
+    SELECT 
+      q.*,
+      e.full_name AS expert_name,
+      e.rating AS expert_rating,
+      e.base_location AS expert_location
+    FROM quotations q
+    LEFT JOIN experts e ON e.id = q.expert_id
+    WHERE q.id = $1
+    `,
+        [requestRow.accepted_quotation_id]
+      );
+    }
 
     const requestData = mapRequestRow(requestRow);
 
-    requestData.quotations = quotationResult.rows.map((row) => ({
-      id: row.id,
-      expertId: row.expert_id,
-      expertName: row.expert_name,
-      expertRating: Number(row.expert_rating || 0),
-      expertLocation: row.expert_location,
-      totalQuoteUsd: Number(row.total_quote_usd || 0),
-      attendanceDays: row.attendance_days,
-      travelCost: Number(row.travel_cost || 0),
-      accommodationCost: Number(row.accommodation_cost || 0),
-      reportFee: Number(row.report_fee || 0),
-      urgencySurcharge: Number(row.urgency_surcharge || 0),
-      coverLetter: row.cover_letter,
-      status: row.status,
-      createdAt: row.created_at,
-    }));
+    const roleId = Number(req.user.role_id);
+
+if (roleId === 2 && !requestRow.accepted_quotation_id) {
+  requestData.requesterName = null;
+  requestData.requesterUserId = null;
+}
+
+    requestData.quotations = quotationResult.rows.map((row) => {
+      const isAccepted = row.status === "accepted";
+      const isAdmin = Number(req.user.role_id) === 1;
+      const isExpert = Number(req.user.role_id) === 2;
+
+      return {
+        id: row.id,
+        expertId: isAdmin || isAccepted || isExpert ? row.expert_id : null,
+        expertName: isAdmin || isAccepted || isExpert ? row.expert_name : null,
+        expertRating: isAdmin || isAccepted || isExpert ? Number(row.expert_rating || 0) : null,
+        expertLocation: isAdmin || isAccepted || isExpert ? row.expert_location : null,
+        totalQuoteUsd: Number(row.total_quote_usd || 0),
+        attendanceDays: row.attendance_days,
+        travelCost: Number(row.travel_cost || 0),
+        accommodationCost: Number(row.accommodation_cost || 0),
+        reportFee: Number(row.report_fee || 0),
+        urgencySurcharge: Number(row.urgency_surcharge || 0),
+        coverLetter: row.cover_letter,
+        status: row.status,
+        createdAt: row.created_at,
+      };
+    });
 
     res.json({
       success: true,
@@ -497,6 +565,59 @@ export const deleteServiceRequest = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to delete service request",
+      error: error.message,
+    });
+  }
+};
+
+export const assignExpertsToRequest = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { expertIds = [] } = req.body;
+
+    if (!Array.isArray(expertIds) || expertIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "expertIds array is required",
+      });
+    }
+
+    const requestCheck = await pool.query(
+      `SELECT id FROM service_requests WHERE id = $1`,
+      [id]
+    );
+
+    if (!requestCheck.rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: "Service request not found",
+      });
+    }
+
+    for (const expertId of expertIds) {
+      await pool.query(
+        `
+        INSERT INTO request_expert_assignments (
+          service_request_id,
+          expert_id,
+          assigned_by_user_id
+        )
+        VALUES ($1, $2, $3)
+        ON CONFLICT (service_request_id, expert_id)
+        DO UPDATE SET updated_at = CURRENT_TIMESTAMP
+        `,
+        [id, expertId, req.user.id]
+      );
+    }
+
+    res.json({
+      success: true,
+      message: "Experts assigned successfully",
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Failed to assign experts",
       error: error.message,
     });
   }
