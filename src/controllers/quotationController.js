@@ -227,6 +227,17 @@ export const createQuotation = async (req, res) => {
         message: "Service request not found",
       });
     }
+    if (
+      Number(req.user.role_id) === 2 &&
+      !["open", "pending", "active"].includes(
+        String(requestCheck.rows[0].status || "").toLowerCase()
+      )
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "Quotation can only be submitted for open requests",
+      });
+    }
 
     const expertCheck = await pool.query(
       `
@@ -246,6 +257,23 @@ export const createQuotation = async (req, res) => {
 
     const expertId =
       Number(req.user.role_id) === 2 ? expertCheck.rows[0].id : req.body.expertId;
+
+    const duplicateQuote = await pool.query(
+      `
+  SELECT id
+  FROM quotations
+  WHERE service_request_id = $1
+  AND expert_id = $2
+  `,
+      [serviceRequestId, expertId]
+    );
+
+    if (duplicateQuote.rows.length) {
+      return res.status(409).json({
+        success: false,
+        message: "You have already submitted a quotation for this request",
+      });
+    }
 
     const result = await pool.query(
       `

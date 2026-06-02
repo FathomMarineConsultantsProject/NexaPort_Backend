@@ -14,6 +14,8 @@ const mapRequestRow = (row) => ({
   requesterUserId: row.requester_user_id,
   status: row.status,
   quotationCount: Number(row.quotation_count || 0),
+  acceptedQuotationId: row.accepted_quotation_id,
+  acceptedExpertId: row.accepted_expert_id,
 
   vessel: {
     name: row.vessel_name,
@@ -45,10 +47,10 @@ const canAccessRequest = async (user, request) => {
   }
 
   if (roleId === 2) {
-  return ["open", "pending", "active"].includes(
-    String(request.status || "").toLowerCase()
-  );
-}
+    return ["open", "pending", "active"].includes(
+      String(request.status || "").toLowerCase()
+    );
+  }
 
   return false;
 };
@@ -243,6 +245,7 @@ export const getServiceRequests = async (req, res) => {
       success: true,
       data,
     });
+
   } catch (error) {
     console.error("Get service requests error:", error);
 
