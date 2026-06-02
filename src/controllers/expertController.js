@@ -59,7 +59,6 @@ const canAccessExpert = (user, expert) => {
   const roleId = Number(user.role_id);
 
   if (roleId === 1) return true;
-  if (roleId === 3) return true;
   if (roleId === 2) return Number(expert.user_id) === Number(user.id);
 
   return false;

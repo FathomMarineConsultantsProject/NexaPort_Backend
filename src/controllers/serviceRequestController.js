@@ -14,6 +14,8 @@ const mapRequestRow = (row) => ({
   requesterUserId: row.requester_user_id,
   status: row.status,
   quotationCount: Number(row.quotation_count || 0),
+  acceptedQuotationId: row.accepted_quotation_id,
+  acceptedExpertId: row.accepted_expert_id,
 
   vessel: {
     name: row.vessel_name,
@@ -45,18 +47,9 @@ const canAccessRequest = async (user, request) => {
   }
 
   if (roleId === 2) {
-    const assigned = await pool.query(
-      `
-      SELECT rea.id
-      FROM request_expert_assignments rea
-      JOIN experts e ON e.id = rea.expert_id
-      WHERE rea.service_request_id = $1
-      AND e.user_id = $2
-      `,
-      [request.id, user.id]
+    return ["open", "pending", "active"].includes(
+      String(request.status || "").toLowerCase()
     );
-
-    return assigned.rows.length > 0;
   }
 
   return false;
@@ -218,15 +211,7 @@ export const getServiceRequests = async (req, res) => {
     }
 
     if (Number(req.user.role_id) === 2) {
-      values.push(req.user.id);
-      conditions.push(`
-    sr.id IN (
-      SELECT rea.service_request_id
-      FROM request_expert_assignments rea
-      JOIN experts e ON e.id = rea.expert_id
-      WHERE e.user_id = $${values.length}
-    )
-  `);
+      conditions.push(`LOWER(sr.status) IN ('open', 'pending', 'active')`);
     }
 
     const whereSql = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
@@ -245,10 +230,22 @@ export const getServiceRequests = async (req, res) => {
       values
     );
 
+    const data = result.rows.map((row) => {
+      const item = mapRequestRow(row);
+
+      if (Number(req.user.role_id) === 2) {
+        item.requesterName = null;
+        item.requesterUserId = null;
+      }
+
+      return item;
+    });
+
     res.json({
       success: true,
-      data: result.rows.map(mapRequestRow),
+      data,
     });
+
   } catch (error) {
     console.error("Get service requests error:", error);
 
@@ -298,11 +295,7 @@ export const getServiceRequestById = async (req, res) => {
     if (Number(req.user.role_id) === 1) {
       quotationResult = await pool.query(
         `
-    SELECT 
-      q.*,
-      e.full_name AS expert_name,
-      e.rating AS expert_rating,
-      e.base_location AS expert_location
+    SELECT q.*, e.full_name AS expert_name, e.rating AS expert_rating, e.base_location AS expert_location
     FROM quotations q
     LEFT JOIN experts e ON e.id = q.expert_id
     WHERE q.service_request_id = $1
@@ -315,11 +308,7 @@ export const getServiceRequestById = async (req, res) => {
     if (Number(req.user.role_id) === 2) {
       quotationResult = await pool.query(
         `
-    SELECT 
-      q.*,
-      e.full_name AS expert_name,
-      e.rating AS expert_rating,
-      e.base_location AS expert_location
+    SELECT q.*, e.full_name AS expert_name, e.rating AS expert_rating, e.base_location AS expert_location
     FROM quotations q
     LEFT JOIN experts e ON e.id = q.expert_id
     WHERE q.service_request_id = $1
@@ -333,14 +322,11 @@ export const getServiceRequestById = async (req, res) => {
     if (Number(req.user.role_id) === 3 && requestRow.accepted_quotation_id) {
       quotationResult = await pool.query(
         `
-    SELECT 
-      q.*,
-      e.full_name AS expert_name,
-      e.rating AS expert_rating,
-      e.base_location AS expert_location
+    SELECT q.*, e.full_name AS expert_name, e.rating AS expert_rating, e.base_location AS expert_location
     FROM quotations q
     LEFT JOIN experts e ON e.id = q.expert_id
     WHERE q.id = $1
+    AND q.status = 'accepted'
     `,
         [requestRow.accepted_quotation_id]
       );
@@ -348,25 +334,41 @@ export const getServiceRequestById = async (req, res) => {
 
     const requestData = mapRequestRow(requestRow);
 
+    if (Number(req.user.role_id) === 2) {
+      requestData.requesterName = null;
+      requestData.requesterUserId = null;
+    }
+
     const roleId = Number(req.user.role_id);
 
-if (roleId === 2 && !requestRow.accepted_quotation_id) {
-  requestData.requesterName = null;
-  requestData.requesterUserId = null;
-}
+    if (roleId === 2 && !requestRow.accepted_quotation_id) {
+      requestData.requesterName = null;
+      requestData.requesterUserId = null;
+    }
 
     requestData.quotations = quotationResult.rows.map((row) => {
-      const isAccepted = row.status === "accepted";
-      const isAdmin = Number(req.user.role_id) === 1;
-      const isExpert = Number(req.user.role_id) === 2;
+      if (Number(req.user.role_id) === 3) {
+        return {
+          id: row.id,
+          expertId: row.expert_id,
+          expertName: row.expert_name,
+          expertRating: Number(row.expert_rating || 0),
+          expertLocation: row.expert_location,
+          finalTotalUsd: Number(row.client_total_usd || 0),
+          status: row.status,
+          createdAt: row.created_at,
+        };
+      }
 
       return {
         id: row.id,
-        expertId: isAdmin || isAccepted || isExpert ? row.expert_id : null,
-        expertName: isAdmin || isAccepted || isExpert ? row.expert_name : null,
-        expertRating: isAdmin || isAccepted || isExpert ? Number(row.expert_rating || 0) : null,
-        expertLocation: isAdmin || isAccepted || isExpert ? row.expert_location : null,
+        expertId: row.expert_id,
+        expertName: row.expert_name,
+        expertRating: Number(row.expert_rating || 0),
+        expertLocation: row.expert_location,
         totalQuoteUsd: Number(row.total_quote_usd || 0),
+        adminMarkupUsd: Number(row.admin_markup_usd || 0),
+        clientTotalUsd: Number(row.client_total_usd || 0),
         attendanceDays: row.attendance_days,
         travelCost: Number(row.travel_cost || 0),
         accommodationCost: Number(row.accommodation_cost || 0),
