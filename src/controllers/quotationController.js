@@ -1,24 +1,61 @@
 import { pool } from "../config/db.js";
 
-const mapQuotationRow = (row) => ({
-  id: row.id,
-  serviceRequestId: row.service_request_id,
-  expertId: row.expert_id,
-  expertUserId: row.expert_user_id,
-  expertName: row.expert_name,
-  expertRating: Number(row.expert_rating || 0),
-  expertLocation: row.expert_location,
-  totalQuoteUsd: Number(row.total_quote_usd || 0),
-  attendanceDays: row.attendance_days,
-  travelCost: Number(row.travel_cost || 0),
-  accommodationCost: Number(row.accommodation_cost || 0),
-  reportFee: Number(row.report_fee || 0),
-  urgencySurcharge: Number(row.urgency_surcharge || 0),
-  coverLetter: row.cover_letter,
-  status: row.status,
-  createdAt: row.created_at,
-  updatedAt: row.updated_at,
-});
+const mapQuotationRow = (row, user) => {
+  const roleId = Number(user.role_id);
+
+  const base = {
+    id: row.id,
+    serviceRequestId: row.service_request_id,
+    status: row.status,
+    attendanceDays: row.attendance_days,
+    coverLetter: row.cover_letter,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+
+  if (roleId === 1) {
+    return {
+      ...base,
+      expertId: row.expert_id,
+      expertUserId: row.expert_user_id,
+      expertName: row.expert_name,
+      expertRating: Number(row.expert_rating || 0),
+      expertLocation: row.expert_location,
+      expertQuoteUsd: Number(row.total_quote_usd || 0),
+      adminMarkupUsd: Number(row.admin_markup_usd || 0),
+      clientTotalUsd: Number(row.client_total_usd || 0),
+      travelCost: Number(row.travel_cost || 0),
+      accommodationCost: Number(row.accommodation_cost || 0),
+      reportFee: Number(row.report_fee || 0),
+      urgencySurcharge: Number(row.urgency_surcharge || 0),
+    };
+  }
+
+  if (roleId === 2) {
+    return {
+      ...base,
+      expertId: row.expert_id,
+      totalQuoteUsd: Number(row.total_quote_usd || 0),
+      travelCost: Number(row.travel_cost || 0),
+      accommodationCost: Number(row.accommodation_cost || 0),
+      reportFee: Number(row.report_fee || 0),
+      urgencySurcharge: Number(row.urgency_surcharge || 0),
+    };
+  }
+
+  if (roleId === 3) {
+    return {
+      ...base,
+      expertId: row.status === "accepted" ? row.expert_id : null,
+      expertName: row.status === "accepted" ? row.expert_name : null,
+      expertRating: row.status === "accepted" ? Number(row.expert_rating || 0) : null,
+      expertLocation: row.status === "accepted" ? row.expert_location : null,
+      finalTotalUsd: Number(row.client_total_usd || 0),
+    };
+  }
+
+  return base;
+};
 
 const canAccessQuotation = (user, row) => {
   const roleId = Number(user.role_id);
@@ -60,6 +97,7 @@ export const getQuotations = async (req, res) => {
     if (Number(req.user.role_id) === 3) {
       values.push(req.user.id);
       conditions.push(`sr.requester_user_id = $${values.length}`);
+      conditions.push(`q.status = 'accepted'`);
     }
 
     const whereSql = conditions.length
@@ -86,7 +124,7 @@ export const getQuotations = async (req, res) => {
     res.json({
       success: true,
       count: result.rows.length,
-      data: result.rows.map(mapQuotationRow),
+      data: result.rows.map((row) => mapQuotationRow(row, req.user)),
     });
   } catch (error) {
     res.status(500).json({
@@ -131,9 +169,19 @@ export const getQuotationById = async (req, res) => {
       });
     }
 
+    if (
+      Number(req.user.role_id) === 3 &&
+      result.rows[0].status !== "accepted"
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "Client can only view accepted quotation",
+      });
+    }
+
     res.json({
       success: true,
-      data: mapQuotationRow(result.rows[0]),
+      data: mapQuotationRow(result.rows[0], req.user),
     });
   } catch (error) {
     res.status(500).json({
@@ -233,7 +281,7 @@ export const createQuotation = async (req, res) => {
     res.status(201).json({
       success: true,
       message: "Quotation submitted successfully",
-      data: mapQuotationRow(result.rows[0]),
+      data: mapQuotationRow(result.rows[0], req.user),
     });
   } catch (error) {
     res.status(500).json({
@@ -317,7 +365,7 @@ export const updateQuotation = async (req, res) => {
     res.json({
       success: true,
       message: "Quotation updated successfully",
-      data: mapQuotationRow(result.rows[0]),
+      data: mapQuotationRow(result.rows[0], req.user),
     });
   } catch (error) {
     res.status(500).json({
@@ -384,13 +432,9 @@ export const acceptQuotation = async (req, res) => {
 
     const quoteResult = await client.query(
       `
-      SELECT 
-        q.id,
-        q.service_request_id,
-        q.expert_id,
-        q.total_quote_usd
-      FROM quotations q
-      WHERE q.id = $1
+      SELECT id, service_request_id, expert_id, total_quote_usd
+      FROM quotations
+      WHERE id = $1
       `,
       [id]
     );
@@ -412,9 +456,7 @@ export const acceptQuotation = async (req, res) => {
     await client.query(
       `
       UPDATE quotations
-      SET 
-        status = 'rejected',
-        updated_at = CURRENT_TIMESTAMP
+      SET status = 'rejected', updated_at = CURRENT_TIMESTAMP
       WHERE service_request_id = $1
       `,
       [quote.service_request_id]
@@ -423,7 +465,7 @@ export const acceptQuotation = async (req, res) => {
     const acceptedQuote = await client.query(
       `
       UPDATE quotations
-      SET 
+      SET
         status = 'accepted',
         admin_markup_usd = $1,
         client_total_usd = $2,
@@ -454,7 +496,7 @@ export const acceptQuotation = async (req, res) => {
 
     res.json({
       success: true,
-      message: "Quotation accepted and client price finalized",
+      message: "Quotation accepted successfully",
       data: acceptedQuote.rows[0],
     });
   } catch (error) {

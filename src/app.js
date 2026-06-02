@@ -1,3 +1,5 @@
+//app.js - Main application file for NexaPort Backend API
+
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
