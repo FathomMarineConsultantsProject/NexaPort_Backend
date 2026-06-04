@@ -354,7 +354,8 @@ export const getServiceRequestById = async (req, res) => {
           expertName: row.expert_name,
           expertRating: Number(row.expert_rating || 0),
           expertLocation: row.expert_location,
-          finalTotalUsd: Number(row.client_total_usd || 0),
+          finalTotalUsd: Number(row.client_total_usd || row.total_quote_usd || 0),
+          totalQuoteUsd: Number(row.client_total_usd || row.total_quote_usd || 0),
           status: row.status,
           createdAt: row.created_at,
         };

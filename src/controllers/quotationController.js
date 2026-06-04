@@ -44,15 +44,20 @@ const mapQuotationRow = (row, user) => {
   }
 
   if (roleId === 3) {
-    return {
-      ...base,
-      expertId: row.status === "accepted" ? row.expert_id : null,
-      expertName: row.status === "accepted" ? row.expert_name : null,
-      expertRating: row.status === "accepted" ? Number(row.expert_rating || 0) : null,
-      expertLocation: row.status === "accepted" ? row.expert_location : null,
-      finalTotalUsd: Number(row.client_total_usd || 0),
-    };
-  }
+  const finalAmount = Number(row.client_total_usd || row.total_quote_usd || 0);
+
+  return {
+    ...base,
+    expertId: row.status === "accepted" ? row.expert_id : null,
+    expertName: row.status === "accepted" ? row.expert_name : null,
+    expertRating: row.status === "accepted" ? Number(row.expert_rating || 0) : null,
+    expertLocation: row.status === "accepted" ? row.expert_location : null,
+
+    // client sees only final total, no breakdown
+    finalTotalUsd: finalAmount,
+    totalQuoteUsd: finalAmount,
+  };
+}
 
   return base;
 };
