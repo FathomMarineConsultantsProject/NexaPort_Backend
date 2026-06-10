@@ -58,22 +58,21 @@ export const createExpertReview = async (req, res) => {
     }
 
     const expert = expertResult.rows[0];
-    const realExpertId = expert.id;
 
     if (Number(req.user.role_id) === 3) {
       const allowed = await pool.query(
         `
-        SELECT sr.id
-        FROM service_requests sr
-        WHERE sr.created_by_user_id = $1
-          AND sr.status IN ('assigned', 'completed')
+        SELECT id
+        FROM service_requests
+        WHERE created_by_user_id = $1
+          AND status IN ('assigned', 'completed')
           AND (
-            sr.accepted_expert_id = $2
-            OR sr.accepted_expert_id = $3
+            accepted_expert_id = $2
+            OR accepted_expert_id = $3
           )
         LIMIT 1
         `,
-        [req.user.id, realExpertId, expert.user_id]
+        [req.user.id, expert.id, expert.user_id]
       );
 
       if (!allowed.rows.length) {
@@ -96,13 +95,7 @@ export const createExpertReview = async (req, res) => {
       VALUES ($1, $2, $3, $4, $5)
       RETURNING *
       `,
-      [
-        realExpertId,
-        job_name,
-        rating,
-        comment || null,
-        reviewer_name || null,
-      ]
+      [expert.id, job_name, rating, comment || null, reviewer_name || null]
     );
 
     await pool.query(
@@ -122,7 +115,7 @@ export const createExpertReview = async (req, res) => {
         updated_at = CURRENT_TIMESTAMP
       WHERE id = $1
       `,
-      [realExpertId]
+      [expert.id]
     );
 
     res.status(201).json({
@@ -131,6 +124,7 @@ export const createExpertReview = async (req, res) => {
       data: result.rows[0],
     });
   } catch (error) {
+    console.error("REVIEW CREATE ERROR:", error);
     res.status(500).json({
       success: false,
       message: "Failed to create expert review",
