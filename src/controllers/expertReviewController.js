@@ -31,7 +31,7 @@ export const getExpertReviews = async (req, res) => {
 export const createExpertReview = async (req, res) => {
   try {
     const { expertId } = req.params;
-    const { job_name, rating, comment, reviewer_name } = req.body;
+    const { serviceRequestId, job_name, rating, comment, reviewer_name } = req.body;
 
     if (!job_name || !rating) {
       return res.status(400).json({
@@ -47,7 +47,7 @@ export const createExpertReview = async (req, res) => {
       WHERE id = $1 OR user_id = $1
       LIMIT 1
       `,
-      [expertId]
+      [Number(expertId)]
     );
 
     if (!expertResult.rows.length) {
@@ -62,17 +62,28 @@ export const createExpertReview = async (req, res) => {
     if (Number(req.user.role_id) === 3) {
       const allowed = await pool.query(
         `
-        SELECT id
-        FROM service_requests
-        WHERE created_by_user_id = $1
-          AND status IN ('assigned', 'completed')
+        SELECT sr.id
+        FROM service_requests sr
+        LEFT JOIN quotations q
+          ON q.service_request_id = sr.id
+          AND q.status = 'accepted'
+        WHERE sr.created_by_user_id = $1
+          AND sr.status IN ('assigned', 'completed')
+          AND ($4::int IS NULL OR sr.id = $4)
           AND (
-            accepted_expert_id = $2
-            OR accepted_expert_id = $3
+            sr.accepted_expert_id = $2
+            OR sr.accepted_expert_id = $3
+            OR q.expert_id = $2
+            OR q.expert_id = $3
           )
         LIMIT 1
         `,
-        [req.user.id, expert.id, expert.user_id]
+        [
+          req.user.id,
+          expert.id,
+          expert.user_id,
+          serviceRequestId ? Number(serviceRequestId) : null,
+        ]
       );
 
       if (!allowed.rows.length) {
