@@ -40,6 +40,27 @@ export const createExpertReview = async (req, res) => {
       });
     }
 
+    if (Number(req.user.role_id) === 3) {
+      const allowed = await pool.query(
+        `
+    SELECT sr.id
+    FROM service_requests sr
+    WHERE sr.created_by_user_id = $1
+      AND sr.accepted_expert_id = $2
+      AND sr.status IN ('assigned', 'completed')
+      AND sr.is_active = true
+    LIMIT 1
+    `,
+        [req.user.id, expertId]
+      );
+
+      if (!allowed.rows.length) {
+        return res.status(403).json({
+          success: false,
+          message: "You can review only the accepted expert for your request",
+        });
+      }
+    }
     const result = await pool.query(
       `
       INSERT INTO expert_reviews (
