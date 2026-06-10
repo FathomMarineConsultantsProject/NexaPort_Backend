@@ -40,18 +40,40 @@ export const createExpertReview = async (req, res) => {
       });
     }
 
+    const expertResult = await pool.query(
+      `
+      SELECT id, user_id
+      FROM experts
+      WHERE id = $1 OR user_id = $1
+      LIMIT 1
+      `,
+      [expertId]
+    );
+
+    if (!expertResult.rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: "Expert profile not found",
+      });
+    }
+
+    const expert = expertResult.rows[0];
+    const realExpertId = expert.id;
+
     if (Number(req.user.role_id) === 3) {
       const allowed = await pool.query(
         `
-    SELECT sr.id
-    FROM service_requests sr
-    WHERE sr.created_by_user_id = $1
-      AND sr.accepted_expert_id = $2
-      AND sr.status IN ('assigned', 'completed')
-      AND sr.is_active = true
-    LIMIT 1
-    `,
-        [req.user.id, expertId]
+        SELECT sr.id
+        FROM service_requests sr
+        WHERE sr.created_by_user_id = $1
+          AND sr.status IN ('assigned', 'completed')
+          AND (
+            sr.accepted_expert_id = $2
+            OR sr.accepted_expert_id = $3
+          )
+        LIMIT 1
+        `,
+        [req.user.id, realExpertId, expert.user_id]
       );
 
       if (!allowed.rows.length) {
@@ -61,6 +83,7 @@ export const createExpertReview = async (req, res) => {
         });
       }
     }
+
     const result = await pool.query(
       `
       INSERT INTO expert_reviews (
@@ -74,7 +97,7 @@ export const createExpertReview = async (req, res) => {
       RETURNING *
       `,
       [
-        expertId,
+        realExpertId,
         job_name,
         rating,
         comment || null,
@@ -86,11 +109,11 @@ export const createExpertReview = async (req, res) => {
       `
       UPDATE experts
       SET
-        rating = (
+        rating = COALESCE((
           SELECT ROUND(AVG(rating)::numeric, 1)
           FROM expert_reviews
           WHERE expert_id = $1
-        ),
+        ), 0),
         review_count = (
           SELECT COUNT(*)
           FROM expert_reviews
@@ -99,7 +122,7 @@ export const createExpertReview = async (req, res) => {
         updated_at = CURRENT_TIMESTAMP
       WHERE id = $1
       `,
-      [expertId]
+      [realExpertId]
     );
 
     res.status(201).json({
