@@ -17,6 +17,8 @@ const createToken = (user) => {
 };
 
 export const register = async (req, res) => {
+  const client = await pool.connect();
+
   try {
     const { full_name, email, username, password, role_id, phone } = req.body;
 
@@ -26,6 +28,7 @@ export const register = async (req, res) => {
         message: "full_name, email, username and password are required",
       });
     }
+
     const requestedRoleId = Number(role_id) || 3;
 
     if (![1, 2, 3].includes(requestedRoleId)) {
@@ -35,7 +38,10 @@ export const register = async (req, res) => {
       });
     }
 
-    if (requestedRoleId === 1 && req.body.admin_secret !== process.env.ADMIN_REGISTRATION_SECRET) {
+    if (
+      requestedRoleId === 1 &&
+      req.body.admin_secret !== process.env.ADMIN_REGISTRATION_SECRET
+    ) {
       return res.status(403).json({
         success: false,
         message: "Invalid admin registration secret",
@@ -44,7 +50,7 @@ export const register = async (req, res) => {
 
     const existing = await pool.query(
       `SELECT id FROM users WHERE email = $1 OR username = $2`,
-      [email, username]
+      [email.toLowerCase(), username]
     );
 
     if (existing.rows.length) {
@@ -54,9 +60,11 @@ export const register = async (req, res) => {
       });
     }
 
+    await client.query("BEGIN");
+
     const passwordHash = await bcrypt.hash(password, 10);
 
-    const result = await pool.query(
+    const result = await client.query(
       `
       INSERT INTO users (
         full_name,
@@ -80,6 +88,34 @@ export const register = async (req, res) => {
     );
 
     const user = result.rows[0];
+
+    let expertProfile = null;
+
+    if (requestedRoleId === 2) {
+      const expertResult = await client.query(
+        `
+        INSERT INTO experts (
+          user_id,
+          full_name,
+          biography,
+          availability
+        )
+        VALUES ($1,$2,$3,$4)
+        RETURNING *
+        `,
+        [
+          user.id,
+          full_name,
+          "Expert profile pending completion.",
+          "available",
+        ]
+      );
+
+      expertProfile = expertResult.rows[0];
+    }
+
+    await client.query("COMMIT");
+
     const token = createToken(user);
 
     res.status(201).json({
@@ -87,13 +123,18 @@ export const register = async (req, res) => {
       message: "Registered successfully",
       token,
       user,
+      expertProfile,
     });
   } catch (error) {
+    await client.query("ROLLBACK");
+
     res.status(500).json({
       success: false,
       message: "Registration failed",
       error: error.message,
     });
+  } finally {
+    client.release();
   }
 };
 
