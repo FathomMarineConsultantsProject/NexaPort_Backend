@@ -64,6 +64,25 @@ const canAccessExpert = (user, expert) => {
   return false;
 };
 
+const getOrCreateMasterId = async (client, tableName, name) => {
+  const cleanName = String(name || "").trim();
+  if (!cleanName) return null;
+
+  const found = await client.query(
+    `SELECT id FROM ${tableName} WHERE LOWER(name) = LOWER($1) LIMIT 1`,
+    [cleanName]
+  );
+
+  if (found.rows.length) return found.rows[0].id;
+
+  const created = await client.query(
+    `INSERT INTO ${tableName} (name) VALUES ($1) RETURNING id`,
+    [cleanName]
+  );
+
+  return created.rows[0].id;
+};
+
 export const getAllExperts = async (req, res) => {
   try {
     const values = [];
@@ -320,11 +339,38 @@ export const updateExpert = async (req, res) => {
       specialty_ids,
       certification_ids,
       vessel_type_ids,
+      specialties,
+      certifications,
+      vessel_types,
       ports,
       languages,
     } = req.body;
 
     await client.query("BEGIN");
+
+    const finalSpecialtyIds = Array.isArray(specialties)
+      ? (await Promise.all(
+        specialties.map((name) =>
+          getOrCreateMasterId(client, "master_specialties", name)
+        )
+      )).filter(Boolean)
+      : specialty_ids;
+
+    const finalCertificationIds = Array.isArray(certifications)
+      ? (await Promise.all(
+        certifications.map((name) =>
+          getOrCreateMasterId(client, "master_certifications", name)
+        )
+      )).filter(Boolean)
+      : certification_ids;
+
+    const finalVesselTypeIds = Array.isArray(vessel_types)
+      ? (await Promise.all(
+        vessel_types.map((name) =>
+          getOrCreateMasterId(client, "master_vessel_types", name)
+        )
+      )).filter(Boolean)
+      : vessel_type_ids;
 
     const result = await client.query(
       `
@@ -355,12 +401,12 @@ export const updateExpert = async (req, res) => {
       ]
     );
 
-    if (Array.isArray(specialty_ids)) {
+    if (Array.isArray(finalSpecialtyIds)) {
       await client.query(`DELETE FROM expert_specialties WHERE expert_id = $1`, [
         id,
       ]);
 
-      for (const specialtyId of specialty_ids) {
+      for (const specialtyId of finalSpecialtyIds) {
         await client.query(
           `INSERT INTO expert_specialties (expert_id, specialty_id) VALUES ($1, $2)`,
           [id, specialtyId]
@@ -368,13 +414,13 @@ export const updateExpert = async (req, res) => {
       }
     }
 
-    if (Array.isArray(certification_ids)) {
+    if (Array.isArray(finalCertificationIds)) {
       await client.query(
         `DELETE FROM expert_certifications WHERE expert_id = $1`,
         [id]
       );
 
-      for (const certificationId of certification_ids) {
+      for (const certificationId of finalCertificationIds) {
         await client.query(
           `INSERT INTO expert_certifications (expert_id, certification_id) VALUES ($1, $2)`,
           [id, certificationId]
@@ -382,13 +428,13 @@ export const updateExpert = async (req, res) => {
       }
     }
 
-    if (Array.isArray(vessel_type_ids)) {
+    if (Array.isArray(finalVesselTypeIds)) {
       await client.query(
         `DELETE FROM expert_vessel_types WHERE expert_id = $1`,
         [id]
       );
 
-      for (const vesselTypeId of vessel_type_ids) {
+      for (const vesselTypeId of finalVesselTypeIds) {
         await client.query(
           `INSERT INTO expert_vessel_types (expert_id, vessel_type_id) VALUES ($1, $2)`,
           [id, vesselTypeId]
