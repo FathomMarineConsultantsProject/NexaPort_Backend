@@ -86,7 +86,16 @@ export const getPorts = async (req, res) => {
     const values = [];
     let query = `
       SELECT
-        p.*,
+        p.id,
+        p.port_name,
+        p.country,
+        p.region,
+        p.description,
+        p.psc_risk_level,
+        p.is_active,
+        p.created_at,
+        p.updated_at,
+        COALESCE(epc.experts_available, 0)::int AS experts_available,
         COALESCE(
           ARRAY_AGG(DISTINCT pvt.vessel_type) FILTER (WHERE pvt.vessel_type IS NOT NULL),
           '{}'
@@ -96,6 +105,14 @@ export const getPorts = async (req, res) => {
           '{}'
         ) AS services
       FROM ports p
+      LEFT JOIN (
+        SELECT
+          LOWER(TRIM(port_name)) AS normalized_port_name,
+          COUNT(DISTINCT expert_id) AS experts_available
+        FROM expert_ports
+        WHERE port_name IS NOT NULL AND TRIM(port_name) <> ''
+        GROUP BY LOWER(TRIM(port_name))
+      ) epc ON epc.normalized_port_name = LOWER(TRIM(p.port_name))
       LEFT JOIN port_vessel_types pvt ON pvt.port_id = p.id
       LEFT JOIN port_services ps ON ps.port_id = p.id
       WHERE p.is_active = true
@@ -118,7 +135,7 @@ export const getPorts = async (req, res) => {
     }
 
     query += `
-      GROUP BY p.id
+      GROUP BY p.id, epc.experts_available
       ORDER BY p.created_at DESC
     `;
 
