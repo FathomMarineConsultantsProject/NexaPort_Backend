@@ -1,5 +1,163 @@
 import { pool } from "../config/db.js";
 
+const normalizeSubmittedPorts = (ports) => {
+  if (!Array.isArray(ports)) {
+    const error = new Error("Ports must be an array");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const seen = new Set();
+  const normalized = [];
+
+  ports.forEach((port) => {
+    if (typeof port !== "string") {
+      const error = new Error("Ports must contain valid port names");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const clean = port.trim();
+    if (!clean || clean.length > 200) {
+      const error = new Error("Ports must contain valid port names");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const key = clean.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      normalized.push(clean);
+    }
+  });
+
+  return normalized;
+};
+
+const validateCanonicalPorts = async (client, submittedPorts) => {
+  const normalizedPorts = normalizeSubmittedPorts(submittedPorts);
+  if (!normalizedPorts.length) return [];
+
+  const normalizedNames = normalizedPorts.map((port) => port.toLowerCase());
+  const result = await client.query(
+    `
+    SELECT port_name
+    FROM ports
+    WHERE is_active = true
+      AND LOWER(TRIM(port_name)) = ANY($1::text[])
+    `,
+    [normalizedNames]
+  );
+
+  const canonicalByName = new Map(
+    result.rows.map((row) => [row.port_name.trim().toLowerCase(), row.port_name])
+  );
+
+  if (canonicalByName.size !== normalizedNames.length) {
+    const error = new Error("Every selected port must exist and be active");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return normalizedNames.map((name) => canonicalByName.get(name));
+};
+
+const optionalText = (value) => {
+  if (value === undefined) return undefined;
+  const clean = String(value ?? "").trim();
+  return clean || null;
+};
+
+const requiredText = (value) => {
+  if (value === undefined) return undefined;
+  return String(value ?? "").trim();
+};
+
+const jsonValue = (value, fallback) => {
+  if (value === undefined) return undefined;
+  return JSON.stringify(value ?? fallback);
+};
+
+const updateRegistrationDetails = async (client, expertId, details = {}) => {
+  if (!details || typeof details !== "object" || Array.isArray(details)) return;
+
+  const existing = await client.query(
+    `SELECT id FROM expert_registration_details WHERE expert_id = $1 LIMIT 1`,
+    [expertId]
+  );
+
+  if (!existing.rows.length) return;
+
+  const fieldMap = [
+    ["phone_number", requiredText(details.phone_number)],
+    ["mobile_number", optionalText(details.mobile_number)],
+    ["nationality", requiredText(details.nationality)],
+    ["employment_status", requiredText(details.employment_status)],
+    ["company_name", optionalText(details.company_name)],
+    ["dob_dd", requiredText(details.dob_dd)],
+    ["dob_mm", requiredText(details.dob_mm)],
+    ["dob_yyyy", requiredText(details.dob_yyyy)],
+    ["year_started", optionalText(details.year_started)],
+    ["heard_about", requiredText(details.heard_about)],
+    ["street1", requiredText(details.street1)],
+    ["street2", optionalText(details.street2)],
+    ["city", requiredText(details.city)],
+    ["postal_code", requiredText(details.postal_code)],
+    ["country", requiredText(details.country)],
+    ["state_region", requiredText(details.state_region)],
+    ["discipline", requiredText(details.discipline)],
+    ["rank", requiredText(details.rank)],
+    ["discipline_other", optionalText(details.discipline_other)],
+    ["rank_other", optionalText(details.rank_other)],
+    ["qualifications_other", optionalText(details.qualifications_other)],
+    ["vessel_types_other", optionalText(details.vessel_types_other)],
+    ["shoreside_experience_other", optionalText(details.shoreside_experience_other)],
+    ["surveying_experience_other", optionalText(details.surveying_experience_other)],
+    [
+      "vessel_type_surveying_experience_other",
+      optionalText(details.vessel_type_surveying_experience_other),
+    ],
+    ["accreditations_other", optionalText(details.accreditations_other)],
+    ["courses_completed_other", optionalText(details.courses_completed_other)],
+    ["qualifications", jsonValue(details.qualifications, [])],
+    [
+      "experience_by_qualification",
+      jsonValue(details.experience_by_qualification, {}),
+    ],
+    ["vessel_types", jsonValue(details.vessel_types, [])],
+    ["shoreside_experience", jsonValue(details.shoreside_experience, [])],
+    ["surveying_experience", jsonValue(details.surveying_experience, [])],
+    [
+      "vessel_type_surveying_experience",
+      jsonValue(details.vessel_type_surveying_experience, []),
+    ],
+    ["accreditations", jsonValue(details.accreditations, [])],
+    ["courses_completed", jsonValue(details.courses_completed, [])],
+    ["refs", jsonValue(details.refs, [])],
+    ["inspection_cost", requiredText(details.inspection_cost)],
+    [
+      "marketing_consent",
+      details.marketing_consent === undefined ? undefined : Boolean(details.marketing_consent),
+    ],
+  ].filter(([, value]) => value !== undefined);
+
+  if (!fieldMap.length) return;
+
+  const setSql = fieldMap
+    .map(([column], index) => `${column} = $${index + 1}`)
+    .join(", ");
+  const values = fieldMap.map(([, value]) => value);
+
+  await client.query(
+    `
+    UPDATE expert_registration_details
+    SET ${setSql}, updated_at = CURRENT_TIMESTAMP
+    WHERE expert_id = $${values.length + 1}
+    `,
+    [...values, expertId]
+  );
+};
+
 const getExpertFullData = async (expertId) => {
   const expertResult = await pool.query(`SELECT * FROM experts WHERE id = $1`, [
     expertId,
@@ -7,7 +165,7 @@ const getExpertFullData = async (expertId) => {
 
   if (!expertResult.rows.length) return null;
 
-  const [specialties, certifications, vesselTypes, languages, ports] =
+  const [specialties, certifications, vesselTypes, languages, ports, registrationDetails] =
     await Promise.all([
       pool.query(
         `
@@ -43,6 +201,10 @@ const getExpertFullData = async (expertId) => {
       pool.query(`SELECT id, port_name FROM expert_ports WHERE expert_id = $1`, [
         expertId,
       ]),
+      pool.query(
+        `SELECT * FROM expert_registration_details WHERE expert_id = $1 LIMIT 1`,
+        [expertId]
+      ),
     ]);
 
   return {
@@ -52,6 +214,7 @@ const getExpertFullData = async (expertId) => {
     vessel_types: vesselTypes.rows,
     languages: languages.rows,
     ports: ports.rows,
+    registration_details: registrationDetails.rows[0] || null,
   };
 };
 
@@ -344,7 +507,10 @@ export const updateExpert = async (req, res) => {
       vessel_types,
       ports,
       languages,
+      registration_details,
     } = req.body;
+
+    const canonicalPorts = ports !== undefined ? await validateCanonicalPorts(client, ports) : null;
 
     await client.query("BEGIN");
 
@@ -445,13 +611,15 @@ export const updateExpert = async (req, res) => {
     if (Array.isArray(ports)) {
       await client.query(`DELETE FROM expert_ports WHERE expert_id = $1`, [id]);
 
-      for (const portName of ports) {
+      for (const portName of canonicalPorts) {
         await client.query(
           `INSERT INTO expert_ports (expert_id, port_name) VALUES ($1, $2)`,
           [id, portName]
         );
       }
     }
+
+    await updateRegistrationDetails(client, id, registration_details);
 
     if (Array.isArray(languages)) {
       await client.query(`DELETE FROM expert_languages WHERE expert_id = $1`, [
@@ -478,7 +646,7 @@ export const updateExpert = async (req, res) => {
   } catch (error) {
     await client.query("ROLLBACK");
 
-    res.status(500).json({
+    res.status(error.statusCode || 500).json({
       success: false,
       message: "Failed to update expert",
       error: error.message,
