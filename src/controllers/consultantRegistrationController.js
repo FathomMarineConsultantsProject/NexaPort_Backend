@@ -287,6 +287,12 @@ export const presignConsultantUpload = async (req, res) => {
     const uploadUrl = createPresignedPutUrl({ key, contentType });
     return res.json({ success: true, key, uploadUrl });
   } catch (error) {
+    console.error("Consultant upload presign failed", {
+      name: error?.name,
+      message: error?.message,
+      code: error?.code,
+      metadata: error?.$metadata,
+    });
     return res.status(500).json({
       success: false,
       message: "Failed to create upload URL",
