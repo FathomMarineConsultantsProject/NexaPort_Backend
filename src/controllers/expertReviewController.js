@@ -95,10 +95,11 @@ export const createExpertReview = async (req, res) => {
     const { expertId } = req.params;
     const { serviceRequestId, job_name, rating, comment, reviewer_name } = req.body;
 
-    if (Number(req.user.role_id) !== 3) {
+    const requesterRoleId = Number(req.user.role_id);
+    if (requesterRoleId !== 1 && requesterRoleId !== 3) {
       return res.status(403).json({
         success: false,
-        message: "Only clients can submit expert reviews",
+        message: "You are not authorized to submit expert reviews",
       });
     }
 
@@ -127,37 +128,39 @@ export const createExpertReview = async (req, res) => {
     }
 
     const expert = expertResult.rows[0];
-    const allowed = await pool.query(
-      `
-      SELECT sr.id
-      FROM service_requests sr
-      LEFT JOIN quotations q
-        ON q.service_request_id = sr.id
-        AND q.status = 'accepted'
-      WHERE sr.created_by_user_id = $1
-        AND sr.status IN ('assigned', 'completed')
-        AND ($4::int IS NULL OR sr.id = $4)
-        AND (
-          sr.accepted_expert_id = $2
-          OR sr.accepted_expert_id = $3
-          OR q.expert_id = $2
-          OR q.expert_id = $3
-        )
-      LIMIT 1
-      `,
-      [
-        req.user.id,
-        expert.id,
-        expert.user_id,
-        serviceRequestId ? Number(serviceRequestId) : null,
-      ]
-    );
+    if (requesterRoleId === 3) {
+      const allowed = await pool.query(
+        `
+        SELECT sr.id
+        FROM service_requests sr
+        LEFT JOIN quotations q
+          ON q.service_request_id = sr.id
+          AND q.status = 'accepted'
+        WHERE sr.created_by_user_id = $1
+          AND sr.status IN ('assigned', 'completed')
+          AND ($4::int IS NULL OR sr.id = $4)
+          AND (
+            sr.accepted_expert_id = $2
+            OR sr.accepted_expert_id = $3
+            OR q.expert_id = $2
+            OR q.expert_id = $3
+          )
+        LIMIT 1
+        `,
+        [
+          req.user.id,
+          expert.id,
+          expert.user_id,
+          serviceRequestId ? Number(serviceRequestId) : null,
+        ]
+      );
 
-    if (!allowed.rows.length) {
-      return res.status(403).json({
-        success: false,
-        message: "You can review only the accepted expert for your request",
-      });
+      if (!allowed.rows.length) {
+        return res.status(403).json({
+          success: false,
+          message: "You can review only the accepted expert for your request",
+        });
+      }
     }
 
     const result = await pool.query(
