@@ -275,6 +275,7 @@ export const getAllExperts = async (req, res) => {
       SELECT 
         e.*,
         erd.photo_s3_key,
+        erd.inspection_cost,
         COALESCE(
           JSON_AGG(DISTINCT JSONB_BUILD_OBJECT('id', ms.id, 'name', ms.name))
           FILTER (WHERE ms.id IS NOT NULL), '[]'
@@ -296,7 +297,7 @@ export const getAllExperts = async (req, res) => {
       LEFT JOIN expert_certifications ec ON ec.expert_id = e.id
       LEFT JOIN master_certifications mc ON mc.id = ec.certification_id
       ${whereSql}
-      GROUP BY e.id, erd.photo_s3_key
+      GROUP BY e.id, erd.photo_s3_key, erd.inspection_cost
       ORDER BY e.created_at DESC
       `,
       values
