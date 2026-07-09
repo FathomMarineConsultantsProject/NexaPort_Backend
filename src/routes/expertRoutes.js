@@ -2,6 +2,7 @@ import express from "express";
 import {
   getAllExperts,
   getExpertById,
+  getExpertCvUrl,
   createExpert,
   updateExpert,
   deleteExpert,
@@ -11,6 +12,7 @@ import { requireAuth, allowRoles } from "../middlewares/authMiddleware.js";
 const router = express.Router();
 
 router.get("/", requireAuth, allowRoles(1, 2), getAllExperts);
+router.get("/:id/cv-url", requireAuth, allowRoles(1), getExpertCvUrl);
 router.get("/:id", requireAuth, getExpertById);
 router.post("/", requireAuth, allowRoles(1, 2), createExpert);
 router.patch("/:id", requireAuth, allowRoles(1, 2), updateExpert);

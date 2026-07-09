@@ -1,4 +1,5 @@
 import { pool } from "../config/db.js";
+import { createPresignedGetUrl } from "../utils/s3Presign.js";
 
 const roleName = (roleId) => {
   if (Number(roleId) === 1) return "Super Admin";
@@ -12,18 +13,23 @@ export const getMyProfile = async (req, res) => {
     const result = await pool.query(
       `
       SELECT 
-        id,
-        full_name,
-        email,
-        username,
-        role_id,
-        phone,
-        profile_image,
-        is_active,
-        created_at,
-        updated_at
-      FROM users
-      WHERE id = $1
+        u.id,
+        u.full_name,
+        u.email,
+        u.username,
+        u.role_id,
+        u.phone,
+        u.profile_image,
+        u.is_active,
+        u.created_at,
+        u.updated_at,
+        e.id AS expert_id,
+        erd.photo_s3_key
+      FROM users u
+      LEFT JOIN experts e ON e.user_id = u.id
+      LEFT JOIN expert_registration_details erd ON erd.expert_id = e.id
+      WHERE u.id = $1
+      LIMIT 1
       `,
       [req.user.id]
     );
@@ -35,13 +41,22 @@ export const getMyProfile = async (req, res) => {
       });
     }
 
-    const user = result.rows[0];
+    const {
+      photo_s3_key: photoS3Key,
+      ...user
+    } = result.rows[0];
+    const photo =
+      Number(user.role_id) === 2 && photoS3Key
+        ? createPresignedGetUrl({ key: photoS3Key })
+        : null;
 
     res.json({
       success: true,
       data: {
         ...user,
         role_name: roleName(user.role_id),
+        photo_url: photo?.url || null,
+        photo_expires_at: photo?.expiresAt || null,
       },
     });
   } catch (error) {

@@ -1,4 +1,5 @@
 import { pool } from "../config/db.js";
+import { createPresignedGetUrl } from "../utils/s3Presign.js";
 
 const normalizeSubmittedPorts = (ports) => {
   if (!Array.isArray(ports)) {
@@ -207,6 +208,16 @@ const getExpertFullData = async (expertId) => {
       ),
     ]);
 
+  const registrationRow = registrationDetails.rows[0] || null;
+  const {
+    photo_s3_key: photoS3Key,
+    cv_s3_key: cvS3Key,
+    ...safeRegistrationDetails
+  } = registrationRow || {};
+  const photo = photoS3Key
+    ? createPresignedGetUrl({ key: photoS3Key })
+    : null;
+
   return {
     ...expertResult.rows[0],
     specialties: specialties.rows,
@@ -214,7 +225,10 @@ const getExpertFullData = async (expertId) => {
     vessel_types: vesselTypes.rows,
     languages: languages.rows,
     ports: ports.rows,
-    registration_details: registrationDetails.rows[0] || null,
+    registration_details: registrationRow ? safeRegistrationDetails : null,
+    photo_url: photo?.url || null,
+    photo_expires_at: photo?.expiresAt || null,
+    has_cv: Boolean(cvS3Key),
   };
 };
 
@@ -260,6 +274,7 @@ export const getAllExperts = async (req, res) => {
       `
       SELECT 
         e.*,
+        erd.photo_s3_key,
         COALESCE(
           JSON_AGG(DISTINCT JSONB_BUILD_OBJECT('id', ms.id, 'name', ms.name))
           FILTER (WHERE ms.id IS NOT NULL), '[]'
@@ -273,6 +288,7 @@ export const getAllExperts = async (req, res) => {
           FILTER (WHERE mc.id IS NOT NULL), '[]'
         ) AS certifications
       FROM experts e
+      LEFT JOIN expert_registration_details erd ON erd.expert_id = e.id
       LEFT JOIN expert_specialties es ON es.expert_id = e.id
       LEFT JOIN master_specialties ms ON ms.id = es.specialty_id
       LEFT JOIN expert_vessel_types evt ON evt.expert_id = e.id
@@ -280,16 +296,29 @@ export const getAllExperts = async (req, res) => {
       LEFT JOIN expert_certifications ec ON ec.expert_id = e.id
       LEFT JOIN master_certifications mc ON mc.id = ec.certification_id
       ${whereSql}
-      GROUP BY e.id
+      GROUP BY e.id, erd.photo_s3_key
       ORDER BY e.created_at DESC
       `,
       values
     );
 
+    const experts = result.rows.map((row) => {
+      const { photo_s3_key: photoS3Key, ...expert } = row;
+      const photo = photoS3Key
+        ? createPresignedGetUrl({ key: photoS3Key })
+        : null;
+
+      return {
+        ...expert,
+        photo_url: photo?.url || null,
+        photo_expires_at: photo?.expiresAt || null,
+      };
+    });
+
     res.json({
       success: true,
-      count: result.rows.length,
-      data: result.rows,
+      count: experts.length,
+      data: experts,
     });
   } catch (error) {
     res.status(500).json({
@@ -327,6 +356,52 @@ export const getExpertById = async (req, res) => {
       success: false,
       message: "Failed to fetch expert",
       error: error.message,
+    });
+  }
+};
+
+export const getExpertCvUrl = async (req, res) => {
+  try {
+    const expertId = Number(req.params.id);
+    if (!Number.isInteger(expertId) || expertId <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid expert ID",
+      });
+    }
+
+    const result = await pool.query(
+      `
+      SELECT cv_s3_key
+      FROM expert_registration_details
+      WHERE expert_id = $1
+      LIMIT 1
+      `,
+      [expertId]
+    );
+    const cvS3Key = result.rows[0]?.cv_s3_key;
+
+    if (!cvS3Key) {
+      return res.status(404).json({
+        success: false,
+        message: "CV not found",
+      });
+    }
+
+    const cv = createPresignedGetUrl({
+      key: cvS3Key,
+      expiresInSeconds: 600,
+    });
+
+    return res.json({
+      success: true,
+      url: cv.url,
+      expiresAt: cv.expiresAt,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: "Failed to create CV access URL",
     });
   }
 };

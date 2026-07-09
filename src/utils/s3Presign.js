@@ -84,3 +84,57 @@ export function createPresignedPutUrl({
 
   return `https://${host}${canonicalUri}?${canonicalQueryString}&X-Amz-Signature=${signature}`;
 }
+
+export function createPresignedGetUrl({
+  key,
+  expiresInSeconds = 3600,
+}) {
+  const { region, bucket, accessKeyId, secretAccessKey } = getS3UploadConfig();
+  const now = new Date();
+  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, "");
+  const dateStamp = amzDate.slice(0, 8);
+  const credentialScope = `${dateStamp}/${region}/${SERVICE}/aws4_request`;
+  const credential = `${accessKeyId}/${credentialScope}`;
+  const host = `${bucket}.s3.${region}.amazonaws.com`;
+  const canonicalUri = `/${key.split("/").map(encodeRfc3986).join("/")}`;
+  const signedHeaders = "host";
+
+  const queryParams = {
+    "X-Amz-Algorithm": ALGORITHM,
+    "X-Amz-Credential": credential,
+    "X-Amz-Date": amzDate,
+    "X-Amz-Expires": String(expiresInSeconds),
+    "X-Amz-SignedHeaders": signedHeaders,
+  };
+
+  const canonicalQueryString = Object.keys(queryParams)
+    .sort()
+    .map((name) => `${encodeRfc3986(name)}=${encodeRfc3986(queryParams[name])}`)
+    .join("&");
+
+  const canonicalHeaders = `host:${host}\n`;
+  const canonicalRequest = [
+    "GET",
+    canonicalUri,
+    canonicalQueryString,
+    canonicalHeaders,
+    signedHeaders,
+    "UNSIGNED-PAYLOAD",
+  ].join("\n");
+
+  const stringToSign = [
+    ALGORITHM,
+    amzDate,
+    credentialScope,
+    sha256Hex(canonicalRequest),
+  ].join("\n");
+
+  const signingKey = getSigningKey(secretAccessKey, dateStamp, region);
+  const signature = hmac(signingKey, stringToSign, "hex");
+  const url = `https://${host}${canonicalUri}?${canonicalQueryString}&X-Amz-Signature=${signature}`;
+
+  return {
+    url,
+    expiresAt: new Date(now.getTime() + expiresInSeconds * 1000).toISOString(),
+  };
+}
