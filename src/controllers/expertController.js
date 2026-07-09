@@ -1,5 +1,17 @@
+import crypto from "crypto";
 import { pool } from "../config/db.js";
-import { createPresignedGetUrl } from "../utils/s3Presign.js";
+import {
+  createPresignedGetUrl,
+  createPresignedPutUrl,
+} from "../utils/s3Presign.js";
+
+const EXPERT_PHOTO_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+]);
+const EXPERT_PHOTO_MAX_BYTES = 3 * 1024 * 1024;
+const EXPERT_PHOTO_UPLOAD_EXPIRY_SECONDS = 300;
 
 const normalizeSubmittedPorts = (ports) => {
   if (!Array.isArray(ports)) {
@@ -357,6 +369,175 @@ export const getExpertById = async (req, res) => {
       success: false,
       message: "Failed to fetch expert",
       error: error.message,
+    });
+  }
+};
+
+const getExpertPhotoUpdateTarget = async (expertId) => {
+  const result = await pool.query(
+    `
+    SELECT e.id, e.user_id, erd.id AS registration_details_id
+    FROM experts e
+    LEFT JOIN expert_registration_details erd ON erd.expert_id = e.id
+    WHERE e.id = $1
+    LIMIT 1
+    `,
+    [expertId]
+  );
+
+  return result.rows[0] || null;
+};
+
+export const createExpertPhotoUploadUrl = async (req, res) => {
+  try {
+    const expertId = Number(req.params.id);
+    if (!Number.isInteger(expertId) || expertId <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid expert ID",
+      });
+    }
+
+    const expert = await getExpertPhotoUpdateTarget(expertId);
+    if (!expert) {
+      return res.status(404).json({
+        success: false,
+        message: "Expert not found",
+      });
+    }
+
+    if (Number(expert.user_id) !== Number(req.user.id)) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied for this expert profile",
+      });
+    }
+
+    if (!expert.registration_details_id) {
+      return res.status(409).json({
+        success: false,
+        message: "Profile photo update is not available for this consultant",
+      });
+    }
+
+    const { contentType, size } = req.body || {};
+    const byteSize = Number(size);
+
+    if (!EXPERT_PHOTO_TYPES.has(contentType)) {
+      return res.status(400).json({
+        success: false,
+        message: "Photo must be PNG, JPEG or WEBP",
+      });
+    }
+
+    if (!Number.isFinite(byteSize) || byteSize <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "File size is required",
+      });
+    }
+
+    if (byteSize > EXPERT_PHOTO_MAX_BYTES) {
+      return res.status(400).json({
+        success: false,
+        message: "Photo must be 3MB or less",
+      });
+    }
+
+    const key = `consultant-registrations/photos/${expertId}/${crypto.randomUUID()}.img`;
+    const uploadUrl = createPresignedPutUrl({ key, contentType });
+
+    return res.json({
+      success: true,
+      uploadUrl,
+      key,
+      expiresAt: new Date(
+        Date.now() + EXPERT_PHOTO_UPLOAD_EXPIRY_SECONDS * 1000
+      ).toISOString(),
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: "Failed to create profile photo upload URL",
+    });
+  }
+};
+
+export const updateExpertPhoto = async (req, res) => {
+  try {
+    const expertId = Number(req.params.id);
+    if (!Number.isInteger(expertId) || expertId <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid expert ID",
+      });
+    }
+
+    const expert = await getExpertPhotoUpdateTarget(expertId);
+    if (!expert) {
+      return res.status(404).json({
+        success: false,
+        message: "Expert not found",
+      });
+    }
+
+    if (Number(expert.user_id) !== Number(req.user.id)) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied for this expert profile",
+      });
+    }
+
+    if (!expert.registration_details_id) {
+      return res.status(409).json({
+        success: false,
+        message: "Profile photo update is not available for this consultant",
+      });
+    }
+
+    const photoS3Key =
+      typeof req.body?.photoS3Key === "string"
+        ? req.body.photoS3Key.trim()
+        : "";
+    const expectedPrefix = `consultant-registrations/photos/${expertId}/`;
+    const keySuffix = photoS3Key.slice(expectedPrefix.length);
+    const validGeneratedSuffix =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.img$/i;
+
+    if (
+      !photoS3Key ||
+      photoS3Key.includes("..") ||
+      photoS3Key.includes("\\") ||
+      !photoS3Key.startsWith(expectedPrefix) ||
+      !validGeneratedSuffix.test(keySuffix)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid profile photo key",
+      });
+    }
+
+    await pool.query(
+      `
+      UPDATE expert_registration_details
+      SET photo_s3_key = $1,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE expert_id = $2
+      `,
+      [photoS3Key, expertId]
+    );
+
+    const photo = createPresignedGetUrl({ key: photoS3Key });
+
+    return res.json({
+      success: true,
+      photo_url: photo.url,
+      photo_expires_at: photo.expiresAt,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update profile photo",
     });
   }
 };
