@@ -35,6 +35,85 @@ const normalizeReferences = (refs) =>
       Object.values(ref).some((value) => String(value || "").trim())
     );
 
+const optionalTrimmedString = (value) => {
+  const clean = String(value ?? "").trim();
+  return clean || null;
+};
+
+const normalizeFlagServices = (body, errors) => {
+  const providesFlagStateInspectionServices =
+    typeof body.providesFlagStateInspectionServices === "boolean"
+      ? body.providesFlagStateInspectionServices
+      : body.providesFlagStateInspectionServices === "true";
+
+  if (!providesFlagStateInspectionServices) {
+    return {
+      providesFlagStateInspectionServices: false,
+      flagServices: [],
+    };
+  }
+
+  if (!Array.isArray(body.flagServices) || body.flagServices.length === 0) {
+    errors.push("Select at least one Flag served");
+    return {
+      providesFlagStateInspectionServices: true,
+      flagServices: [],
+    };
+  }
+
+  const seenFlagIds = new Set();
+  const flagServices = [];
+
+  body.flagServices.forEach((service) => {
+    const flagId = Number(service?.flagId);
+    if (!Number.isInteger(flagId) || flagId <= 0) {
+      errors.push("Flag services must contain valid Flag IDs");
+      return;
+    }
+
+    if (seenFlagIds.has(flagId)) {
+      errors.push("Duplicate Flags are not allowed");
+      return;
+    }
+    seenFlagIds.add(flagId);
+
+    const coverageRows = normalizeArray(service?.coverage)
+      .map((coverage) => ({
+        country: optionalTrimmedString(coverage?.country),
+        region: optionalTrimmedString(coverage?.region),
+        location: optionalTrimmedString(coverage?.location),
+        coverageNote: optionalTrimmedString(coverage?.coverageNote),
+      }))
+      .filter(
+        (coverage) =>
+          coverage.country ||
+          coverage.region ||
+          coverage.location ||
+          coverage.coverageNote
+      );
+
+    if (!coverageRows.length) {
+      errors.push("Each selected Flag requires at least one coverage area");
+      return;
+    }
+
+    if (coverageRows.some((coverage) => !coverage.country)) {
+      errors.push("Country is required for each Flag coverage area");
+      return;
+    }
+
+    flagServices.push({
+      flagId,
+      coverage: coverageRows,
+    });
+  });
+
+  return {
+    providesFlagStateInspectionServices: true,
+    flagServices,
+  };
+};
+
 const normalizeSubmittedPorts = (ports, errors) => {
   if (!Array.isArray(ports)) {
     errors.push("Ports must be an array");
@@ -89,6 +168,24 @@ const validateCanonicalPorts = async (client, submittedPorts) => {
   }
 
   return normalizedNames.map((name) => canonicalByName.get(name));
+};
+
+const validateActiveFlags = async (client, flagServices) => {
+  if (!flagServices.length) return;
+
+  const flagIds = flagServices.map((service) => service.flagId);
+  const result = await client.query(
+    `
+    SELECT id
+    FROM master_flag_states
+    WHERE id = ANY($1::int[])
+    `,
+    [flagIds]
+  );
+
+  if (result.rows.length !== flagIds.length) {
+    throw new Error("Every selected Flag must exist");
+  }
 };
 
 const validateRegistrationPayload = (body) => {
@@ -162,6 +259,11 @@ const validateRegistrationPayload = (body) => {
     photoS3Key: requiredString(body, "photoS3Key", "Profile photo", errors),
     cvS3Key: requiredString(body, "cvS3Key", "CV file", errors),
   };
+
+  const flagServiceData = normalizeFlagServices(body, errors);
+  data.providesFlagStateInspectionServices =
+    flagServiceData.providesFlagStateInspectionServices;
+  data.flagServices = flagServiceData.flagServices;
 
   if (!data.password) errors.push("Password is required");
   if (data.password && data.password.length < 6) {
@@ -395,12 +497,49 @@ export const registerConsultant = async (req, res) => {
     const expert = expertResult.rows[0];
 
     const canonicalPorts = await validateCanonicalPorts(client, data.ports);
+    await validateActiveFlags(client, data.flagServices);
 
     for (const portName of canonicalPorts) {
       await client.query(
         `INSERT INTO expert_ports (expert_id, port_name) VALUES ($1, $2)`,
         [expert.id, portName]
       );
+    }
+
+    for (const flagService of data.flagServices) {
+      const expertFlagResult = await client.query(
+        `
+        INSERT INTO expert_flags (expert_id, flag_id, is_active)
+        VALUES ($1, $2, true)
+        RETURNING id
+        `,
+        [expert.id, flagService.flagId]
+      );
+
+      const expertFlagId = expertFlagResult.rows[0].id;
+
+      for (const coverage of flagService.coverage) {
+        await client.query(
+          `
+          INSERT INTO expert_flag_coverage (
+            expert_flag_id,
+            country,
+            region,
+            location,
+            coverage_note,
+            is_active
+          )
+          VALUES ($1, $2, $3, $4, $5, true)
+          `,
+          [
+            expertFlagId,
+            coverage.country,
+            coverage.region,
+            coverage.location,
+            coverage.coverageNote,
+          ]
+        );
+      }
     }
 
     await client.query(

@@ -12,6 +12,7 @@ const EXPERT_PHOTO_TYPES = new Set([
 ]);
 const EXPERT_PHOTO_MAX_BYTES = 3 * 1024 * 1024;
 const EXPERT_PHOTO_UPLOAD_EXPIRY_SECONDS = 300;
+const flagSlugSql = "LOWER(REGEXP_REPLACE(TRIM(mfs.name), '[^a-zA-Z0-9]+', '-', 'g'))";
 
 const normalizeSubmittedPorts = (ports) => {
   if (!Array.isArray(ports)) {
@@ -178,7 +179,15 @@ const getExpertFullData = async (expertId) => {
 
   if (!expertResult.rows.length) return null;
 
-  const [specialties, certifications, vesselTypes, languages, ports, registrationDetails] =
+  const [
+    specialties,
+    certifications,
+    vesselTypes,
+    languages,
+    ports,
+    registrationDetails,
+    flagServices,
+  ] =
     await Promise.all([
       pool.query(
         `
@@ -218,6 +227,36 @@ const getExpertFullData = async (expertId) => {
         `SELECT * FROM expert_registration_details WHERE expert_id = $1 LIMIT 1`,
         [expertId]
       ),
+      pool.query(
+        `
+        SELECT
+          ef.flag_id,
+          mfs.name AS flag_name,
+          ${flagSlugSql} AS flag_slug,
+          COALESCE(
+            JSON_AGG(
+              JSONB_BUILD_OBJECT(
+                'country', efc.country,
+                'region', efc.region,
+                'location', efc.location,
+                'coverage_note', efc.coverage_note
+              )
+              ORDER BY efc.country ASC, efc.region ASC, efc.location ASC
+            ) FILTER (WHERE efc.id IS NOT NULL),
+            '[]'
+          ) AS coverage
+        FROM expert_flags ef
+        JOIN master_flag_states mfs ON mfs.id = ef.flag_id
+        LEFT JOIN expert_flag_coverage efc
+          ON efc.expert_flag_id = ef.id
+          AND efc.is_active = true
+        WHERE ef.expert_id = $1
+          AND ef.is_active = true
+        GROUP BY ef.flag_id, mfs.name
+        ORDER BY mfs.name ASC
+        `,
+        [expertId]
+      ),
     ]);
 
   const registrationRow = registrationDetails.rows[0] || null;
@@ -237,6 +276,7 @@ const getExpertFullData = async (expertId) => {
     vessel_types: vesselTypes.rows,
     languages: languages.rows,
     ports: ports.rows,
+    flag_services: flagServices.rows,
     registration_details: registrationRow ? safeRegistrationDetails : null,
     photo_url: photo?.url || null,
     photo_expires_at: photo?.expiresAt || null,
