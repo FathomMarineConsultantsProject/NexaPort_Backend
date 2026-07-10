@@ -22,14 +22,18 @@ const normalizeObject = (value) =>
   value && typeof value === "object" && !Array.isArray(value) ? value : {};
 
 const normalizeReferences = (refs) =>
-  normalizeArray(refs).map((ref) => ({
-    name: String(ref?.name || "").trim(),
-    email: String(ref?.email || "").trim(),
-    phoneNumber: String(ref?.phoneNumber || "").trim(),
-    position: String(ref?.position || "").trim(),
-    companyName: String(ref?.companyName || "").trim(),
-    ...(ref?.contact ? { contact: String(ref.contact).trim() } : {}),
-  }));
+  normalizeArray(refs)
+    .map((ref) => ({
+      name: String(ref?.name || "").trim(),
+      email: String(ref?.email || "").trim(),
+      phoneNumber: String(ref?.phoneNumber || "").trim(),
+      position: String(ref?.position || "").trim(),
+      companyName: String(ref?.companyName || "").trim(),
+      ...(ref?.contact ? { contact: String(ref.contact).trim() } : {}),
+    }))
+    .filter((ref) =>
+      Object.values(ref).some((value) => String(value || "").trim())
+    );
 
 const normalizeSubmittedPorts = (ports, errors) => {
   if (!Array.isArray(ports)) {
@@ -218,21 +222,17 @@ const validateRegistrationPayload = (body) => {
     }
   }
 
-  if (data.references.length < 2) {
-    errors.push("At least two references are required");
+  if (body.references !== undefined && !Array.isArray(body.references)) {
+    errors.push("References must be an array");
   }
+
   data.references.forEach((ref, index) => {
-    const hasAny = Object.values(ref).some((value) => String(value || "").trim());
-    if (index < 2 || hasAny) {
-      if (!ref.name) errors.push(`Reference ${index + 1} name is required`);
-      if (!ref.email || !/^\S+@\S+\.\S+$/.test(ref.email)) {
-        errors.push(`Reference ${index + 1} email is invalid`);
-      }
-      if (!ref.phoneNumber) errors.push(`Reference ${index + 1} phone is required`);
-      if (!ref.position) errors.push(`Reference ${index + 1} position is required`);
-      if (!ref.companyName) {
-        errors.push(`Reference ${index + 1} company name is required`);
-      }
+    if (!ref.name) errors.push(`Reference ${index + 1} name is required`);
+    if (!ref.email && !ref.phoneNumber) {
+      errors.push(`Reference ${index + 1} email or phone is required`);
+    }
+    if (ref.email && !/^\S+@\S+\.\S+$/.test(ref.email)) {
+      errors.push(`Reference ${index + 1} email is invalid`);
     }
   });
 
