@@ -11,7 +11,10 @@ const EXPERT_PHOTO_TYPES = new Set([
   "image/webp",
 ]);
 const EXPERT_PHOTO_MAX_BYTES = 3 * 1024 * 1024;
+const EXPERT_CV_MAX_BYTES = 5 * 1024 * 1024;
 const EXPERT_PHOTO_UPLOAD_EXPIRY_SECONDS = 300;
+const GENERATED_MEDIA_SUFFIX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(img|pdf)$/i;
 const flagSlugSql = "LOWER(REGEXP_REPLACE(TRIM(mfs.name), '[^a-zA-Z0-9]+', '-', 'g'))";
 
 const normalizeSubmittedPorts = (ports) => {
@@ -428,6 +431,87 @@ const getExpertPhotoUpdateTarget = async (expertId) => {
   return result.rows[0] || null;
 };
 
+const validateExpertMediaKey = (key, kind, expertId) => {
+  if (typeof key !== "string" || !key.trim()) return false;
+
+  const cleanKey = key.trim();
+  const extension = kind === "photo" ? "img" : "pdf";
+  const prefix = `consultant-registrations/${
+    kind === "photo" ? "photos" : "cvs"
+  }/${expertId}/`;
+  const suffix = cleanKey.slice(prefix.length);
+
+  return (
+    !cleanKey.includes("..") &&
+    !cleanKey.includes("\\") &&
+    cleanKey.startsWith(prefix) &&
+    GENERATED_MEDIA_SUFFIX.test(suffix) &&
+    suffix.toLowerCase().endsWith(`.${extension}`)
+  );
+};
+
+export const createExpertMediaUploadUrl = async (req, res) => {
+  try {
+    const expertId = Number(req.params.id);
+    if (!Number.isInteger(expertId) || expertId <= 0) {
+      return res.status(400).json({ success: false, message: "Invalid expert ID" });
+    }
+
+    const expert = await getExpertPhotoUpdateTarget(expertId);
+    if (!expert) {
+      return res.status(404).json({ success: false, message: "Expert not found" });
+    }
+    if (!canAccessExpert(req.user, expert)) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied for this expert profile",
+      });
+    }
+    if (!expert.registration_details_id) {
+      return res.status(409).json({
+        success: false,
+        message: "Profile media update is not available for this consultant",
+      });
+    }
+
+    const { kind, contentType, size } = req.body || {};
+    const byteSize = Number(size);
+    if (kind !== "photo" && kind !== "cv") {
+      return res.status(400).json({ success: false, message: "Invalid media kind" });
+    }
+    if (!Number.isFinite(byteSize) || byteSize <= 0) {
+      return res.status(400).json({ success: false, message: "File size is required" });
+    }
+    if (kind === "photo" && !EXPERT_PHOTO_TYPES.has(contentType)) {
+      return res.status(400).json({
+        success: false,
+        message: "Photo must be PNG, JPEG or WEBP",
+      });
+    }
+    if (kind === "photo" && byteSize > EXPERT_PHOTO_MAX_BYTES) {
+      return res.status(400).json({ success: false, message: "Photo must be 3MB or less" });
+    }
+    if (kind === "cv" && contentType !== "application/pdf") {
+      return res.status(400).json({ success: false, message: "CV must be PDF" });
+    }
+    if (kind === "cv" && byteSize > EXPERT_CV_MAX_BYTES) {
+      return res.status(400).json({ success: false, message: "CV must be 5MB or less" });
+    }
+
+    const folder = kind === "photo" ? "photos" : "cvs";
+    const extension = kind === "photo" ? "img" : "pdf";
+    const key = `consultant-registrations/${folder}/${expertId}/${crypto.randomUUID()}.${extension}`;
+    const uploadUrl = createPresignedPutUrl({ key, contentType });
+
+    return res.json({ success: true, uploadUrl, key });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: "Failed to create profile media upload URL",
+    });
+  }
+};
+
 export const createExpertPhotoUploadUrl = async (req, res) => {
   try {
     const expertId = Number(req.params.id);
@@ -805,11 +889,62 @@ export const updateExpert = async (req, res) => {
       ports,
       languages,
       registration_details,
+      photo_s3_key,
+      cv_s3_key,
     } = req.body;
+
+    if (
+      photo_s3_key !== undefined &&
+      !validateExpertMediaKey(photo_s3_key, "photo", id)
+    ) {
+      const error = new Error("Invalid profile photo key");
+      error.statusCode = 400;
+      throw error;
+    }
+    if (
+      cv_s3_key !== undefined &&
+      !validateExpertMediaKey(cv_s3_key, "cv", id)
+    ) {
+      const error = new Error("Invalid CV key");
+      error.statusCode = 400;
+      throw error;
+    }
 
     const canonicalPorts = ports !== undefined ? await validateCanonicalPorts(client, ports) : null;
 
     await client.query("BEGIN");
+
+    if (photo_s3_key !== undefined || cv_s3_key !== undefined) {
+      const registration = await client.query(
+        `SELECT id FROM expert_registration_details WHERE expert_id = $1 LIMIT 1`,
+        [id]
+      );
+      if (!registration.rows.length) {
+        const error = new Error(
+          "Profile media update is not available for this consultant"
+        );
+        error.statusCode = 409;
+        throw error;
+      }
+
+      const mediaFields = [];
+      const mediaValues = [];
+      if (photo_s3_key !== undefined) {
+        mediaValues.push(photo_s3_key.trim());
+        mediaFields.push(`photo_s3_key = $${mediaValues.length}`);
+      }
+      if (cv_s3_key !== undefined) {
+        mediaValues.push(cv_s3_key.trim());
+        mediaFields.push(`cv_s3_key = $${mediaValues.length}`);
+      }
+      mediaValues.push(id);
+      await client.query(
+        `UPDATE expert_registration_details
+         SET ${mediaFields.join(", ")}, updated_at = CURRENT_TIMESTAMP
+         WHERE expert_id = $${mediaValues.length}`,
+        mediaValues
+      );
+    }
 
     const finalSpecialtyIds = Array.isArray(specialties)
       ? (await Promise.all(
@@ -945,7 +1080,7 @@ export const updateExpert = async (req, res) => {
 
     res.status(error.statusCode || 500).json({
       success: false,
-      message: "Failed to update expert",
+      message: error.statusCode ? error.message : "Failed to update expert",
       error: error.message,
     });
   } finally {

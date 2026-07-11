@@ -3,6 +3,7 @@ import {
   getAllExperts,
   getExpertById,
   getExpertCvUrl,
+  createExpertMediaUploadUrl,
   createExpertPhotoUploadUrl,
   updateExpertPhoto,
   createExpert,
@@ -15,6 +16,12 @@ const router = express.Router();
 
 router.get("/", requireAuth, allowRoles(1, 2), getAllExperts);
 router.get("/:id/cv-url", requireAuth, allowRoles(1), getExpertCvUrl);
+router.post(
+  "/:id/media-upload-url",
+  requireAuth,
+  allowRoles(1, 2),
+  createExpertMediaUploadUrl
+);
 router.post(
   "/:id/photo-upload-url",
   requireAuth,
