@@ -16,6 +16,7 @@ import expertReviewRoutes from "./routes/expertReviewRoutes.js";
 import dashboardRoutes from "./routes/dashboardRoutes.js";
 import userRoutes from "./routes/userRoutes.js";
 import flagRoutes from "./routes/flagRoutes.js";
+import appointedSurveyorRoutes from "./routes/appointedSurveyorRoutes.js";
 import {
   accreditationSchemeRouter,
   accreditedInspectorRouter,
@@ -51,6 +52,7 @@ app.use("/api/ports", portRoutes);
 app.use("/api/flags", flagRoutes);
 app.use("/api/accreditation-schemes", accreditationSchemeRouter);
 app.use("/api/accredited-inspectors", accreditedInspectorRouter);
+app.use("/api/appointed-surveyors", appointedSurveyorRoutes);
 app.use("/api/service-requests", serviceRequestRoutes);
 app.use("/api/quotations", quotationRoutes);
 app.use("/api/experts", expertReviewRoutes);
