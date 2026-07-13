@@ -86,6 +86,11 @@ export const getFlagDirectory = async (req, res) => {
         AND (
           fi.full_name ILIKE $${externalValues.length}
           OR fi.organization_name ILIKE $${externalValues.length}
+          OR fi.organization_address ILIKE $${externalValues.length}
+          OR fi.organization_email ILIKE $${externalValues.length}
+          OR fi.organization_telephone ILIKE $${externalValues.length}
+          OR fi.inspector_email ILIKE $${externalValues.length}
+          OR fi.inspector_telephone ILIKE $${externalValues.length}
           OR fi.country ILIKE $${externalValues.length}
           OR fi.region ILIKE $${externalValues.length}
           OR fi.location ILIKE $${externalValues.length}
