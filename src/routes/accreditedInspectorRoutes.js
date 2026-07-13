@@ -3,14 +3,20 @@ import {
   getAccreditationSchemes,
   getAccreditedInspectors,
 } from "../controllers/accreditedInspectorController.js";
-import { requireAuth } from "../middlewares/authMiddleware.js";
+import { allowRoles, requireAuth } from "../middlewares/authMiddleware.js";
 
 export const accreditationSchemeRouter = express.Router();
 export const accreditedInspectorRouter = express.Router();
 
-accreditationSchemeRouter.get("/", requireAuth, getAccreditationSchemes);
+accreditationSchemeRouter.get(
+  "/",
+  requireAuth,
+  allowRoles(1),
+  getAccreditationSchemes
+);
 accreditedInspectorRouter.get(
   "/:schemeSlug",
   requireAuth,
+  allowRoles(1),
   getAccreditedInspectors
 );
