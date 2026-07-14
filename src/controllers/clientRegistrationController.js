@@ -2,15 +2,12 @@ import bcrypt from "bcrypt";
 import crypto from "crypto";
 import { pool } from "../config/db.js";
 import { createToken } from "./authController.js";
-import { sendClientRegistrationOtp } from "../services/emailService.js";
 import {
-  createOtp,
-  createRegistrationToken,
-  digestOtp,
+  createRegistrationDraftToken,
   getRegistrationBearer,
   normalizeEmail,
-  otpMatches,
-  verifyRegistrationToken,
+  registrationDraftMatchesEmail,
+  verifyRegistrationDraftToken,
 } from "../services/clientRegistrationSecurity.js";
 import {
   DOCUMENT_CATEGORIES,
@@ -38,140 +35,63 @@ const SERVICE_NAMES = [
 const emailValid = (email) => /^\S+@\S+\.\S+$/.test(email);
 const clean = (value) => String(value ?? "").trim();
 const optional = (value) => clean(value) || null;
-const ttlSeconds = () => Math.max(60, Number(process.env.OTP_TTL_SECONDS) || 600);
-const maxAttempts = () => Math.max(1, Number(process.env.OTP_MAX_ATTEMPTS) || 5);
-const cooldownSeconds = () => Math.max(10, Number(process.env.OTP_RESEND_COOLDOWN_SECONDS) || 60);
 
-const safeConfigurationError = (res, error) => {
-  const configurationCodes = ["EMAIL_NOT_CONFIGURED", "OTP_NOT_CONFIGURED", "REGISTRATION_TOKEN_NOT_CONFIGURED"];
-  if (configurationCodes.includes(error?.code) || /not configured/i.test(error?.message || "")) {
-    return res.status(503).json({ success: false, code: "REGISTRATION_SERVICE_NOT_CONFIGURED", message: "Client email verification is not configured." });
+const rateBuckets = new Map();
+const consumeRateLimit = ({ scope, keys, limit, windowMs }) => {
+  const now = Date.now();
+  if (rateBuckets.size > 10_000) {
+    for (const [key, timestamps] of rateBuckets) {
+      const recent = timestamps.filter((timestamp) => now - timestamp < windowMs);
+      if (recent.length) rateBuckets.set(key, recent);
+      else rateBuckets.delete(key);
+    }
   }
-  return null;
+  for (const key of keys.filter(Boolean)) {
+    const bucketKey = `${scope}:${key}`;
+    const recent = (rateBuckets.get(bucketKey) || []).filter((timestamp) => now - timestamp < windowMs);
+    if (recent.length >= limit) return false;
+    recent.push(now);
+    rateBuckets.set(bucketKey, recent);
+  }
+  return true;
 };
 
-export const requestClientEmailOtp = async (req, res) => {
+export const createClientRegistrationDraft = async (req, res) => {
   const email = normalizeEmail(req.body?.email);
-  if (!emailValid(email)) return res.status(400).json({ success: false, message: "A valid email is required" });
+  if (!emailValid(email)) return res.status(400).json({ success: false, message: "A valid email is required." });
+  if (!consumeRateLimit({ scope: "draft", keys: [`email:${email}`, `ip:${req.ip}`], limit: 10, windowMs: 60 * 60 * 1000 })) {
+    return res.status(429).json({ success: false, message: "Too many registration requests. Please try again later." });
+  }
 
   try {
     const existing = await pool.query(`SELECT id FROM users WHERE LOWER(email) = $1 LIMIT 1`, [email]);
     if (existing.rows.length) return res.status(409).json({ success: false, message: "An account with this email already exists." });
-
-    const latest = await pool.query(
-      `SELECT last_sent_at FROM email_verification_challenges WHERE normalized_email = $1 ORDER BY created_at DESC LIMIT 1`,
-      [email]
-    );
-    if (latest.rows.length) {
-      const elapsed = (Date.now() - new Date(latest.rows[0].last_sent_at).getTime()) / 1000;
-      if (elapsed < cooldownSeconds()) {
-        return res.status(429).json({ success: false, code: "OTP_COOLDOWN", retry_after_seconds: Math.ceil(cooldownSeconds() - elapsed), message: "Please wait before requesting another code." });
-      }
-    }
-
-    const recent = await pool.query(
-      `SELECT COUNT(*)::int AS total FROM email_verification_challenges WHERE (normalized_email = $1 OR request_ip = $2) AND created_at > CURRENT_TIMESTAMP - INTERVAL '1 hour'`,
-      [email, req.ip]
-    );
-    if (recent.rows[0].total >= 10) return res.status(429).json({ success: false, message: "Too many verification requests. Please try again later." });
-
     const draftId = crypto.randomUUID();
-    const otp = createOtp();
-    const digest = digestOtp({ email, draftId, otp });
-    const inserted = await pool.query(
-      `
-      INSERT INTO email_verification_challenges
-        (normalized_email, otp_digest, expires_at, attempt_count, max_attempts, last_sent_at, registration_draft_id, request_ip)
-      VALUES ($1, $2, CURRENT_TIMESTAMP + ($3 * INTERVAL '1 second'), 0, $4, CURRENT_TIMESTAMP, $5, $6)
-      RETURNING id
-      `,
-      [email, digest, ttlSeconds(), maxAttempts(), draftId, req.ip]
-    );
-
-    try {
-      await sendClientRegistrationOtp({ email, otp });
-    } catch (error) {
-      await pool.query(`DELETE FROM email_verification_challenges WHERE id = $1`, [inserted.rows[0].id]);
-      throw error;
-    }
-
-    return res.json({ success: true, message: "If the address is eligible, a verification code has been sent.", expires_in_seconds: ttlSeconds(), resend_after_seconds: cooldownSeconds() });
+    const registrationDraftToken = createRegistrationDraftToken({ email, draftId });
+    return res.json({ success: true, registrationDraftToken, expiresIn: process.env.CLIENT_REGISTRATION_TOKEN_TTL || "60m" });
   } catch (error) {
-    const configResponse = safeConfigurationError(res, error);
-    if (configResponse) return configResponse;
-    return res.status(500).json({ success: false, message: "Unable to send verification code." });
-  }
-};
-
-export const verifyClientEmailOtp = async (req, res) => {
-  const email = normalizeEmail(req.body?.email);
-  const otp = clean(req.body?.otp);
-  if (!emailValid(email) || !/^\d{6}$/.test(otp)) return res.status(400).json({ success: false, message: "Email and a six-digit code are required" });
-
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    const result = await client.query(
-      `SELECT * FROM email_verification_challenges WHERE normalized_email = $1 AND consumed_at IS NULL ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,
-      [email]
-    );
-    const challenge = result.rows[0];
-    if (!challenge || new Date(challenge.expires_at).getTime() <= Date.now()) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({ success: false, code: "OTP_EXPIRED", message: "The verification code is invalid or expired." });
+    if (error?.code === "REGISTRATION_TOKEN_NOT_CONFIGURED") {
+      return res.status(503).json({ success: false, code: "REGISTRATION_SERVICE_NOT_CONFIGURED", message: "Client registration is not configured." });
     }
-    if (challenge.attempt_count >= challenge.max_attempts) {
-      await client.query("ROLLBACK");
-      return res.status(429).json({ success: false, code: "OTP_ATTEMPTS_EXCEEDED", message: "Verification attempt limit reached." });
-    }
-
-    const candidate = digestOtp({ email, draftId: challenge.registration_draft_id, otp });
-    if (!otpMatches({ expectedDigest: challenge.otp_digest, candidateDigest: candidate })) {
-      await client.query(`UPDATE email_verification_challenges SET attempt_count = attempt_count + 1 WHERE id = $1`, [challenge.id]);
-      await client.query("COMMIT");
-      return res.status(400).json({ success: false, code: "OTP_INVALID", message: "The verification code is invalid or expired." });
-    }
-
-    await client.query(`UPDATE email_verification_challenges SET consumed_at = CURRENT_TIMESTAMP WHERE id = $1`, [challenge.id]);
-    await client.query("COMMIT");
-    const registrationToken = createRegistrationToken({ email, draftId: challenge.registration_draft_id, challengeId: challenge.id });
-    return res.json({ success: true, message: "Email verified successfully.", registrationToken });
-  } catch (error) {
-    await client.query("ROLLBACK");
-    const configResponse = safeConfigurationError(res, error);
-    if (configResponse) return configResponse;
-    return res.status(500).json({ success: false, message: "Email verification failed." });
-  } finally {
-    client.release();
+    return res.status(500).json({ success: false, message: "Unable to start client registration." });
   }
 };
 
 const registrationIdentity = (req, res) => {
   try {
-    return verifyRegistrationToken(getRegistrationBearer(req));
+    return verifyRegistrationDraftToken(getRegistrationBearer(req));
   } catch {
-    res.status(401).json({ success: false, message: "A valid verified-email registration token is required." });
+    res.status(401).json({ success: false, message: "A valid registration draft token is required." });
     return null;
   }
-};
-
-const activeRegistrationIdentity = async (req, res) => {
-  const identity = registrationIdentity(req, res);
-  if (!identity) return null;
-  const result = await pool.query(
-    `SELECT id FROM email_verification_challenges WHERE id=$1 AND registration_draft_id=$2 AND consumed_at IS NOT NULL AND registration_completed_at IS NULL`,
-    [identity.challengeId, identity.draftId]
-  );
-  if (!result.rows.length) {
-    res.status(409).json({ success: false, message: "This verified-email registration session is no longer active." });
-    return null;
-  }
-  return identity;
 };
 
 export const presignClientRegistrationDocument = async (req, res) => {
-  const identity = await activeRegistrationIdentity(req, res);
+  const identity = registrationIdentity(req, res);
   if (!identity) return;
+  if (!consumeRateLimit({ scope: "upload", keys: [`draft:${identity.draftId}`, `ip:${req.ip}`], limit: 30, windowMs: 60 * 60 * 1000 })) {
+    return res.status(429).json({ success: false, message: "Too many document upload requests. Please try again later." });
+  }
   const { category, contentType, size, originalFilename } = req.body || {};
   const validationError = validateDocumentInput({ category, contentType, size, originalFilename });
   if (validationError) return res.status(400).json({ success: false, message: validationError });
@@ -184,8 +104,11 @@ export const presignClientRegistrationDocument = async (req, res) => {
 };
 
 export const confirmClientRegistrationDocument = async (req, res) => {
-  const identity = await activeRegistrationIdentity(req, res);
+  const identity = registrationIdentity(req, res);
   if (!identity) return;
+  if (!consumeRateLimit({ scope: "confirm", keys: [`draft:${identity.draftId}`, `ip:${req.ip}`], limit: 60, windowMs: 60 * 60 * 1000 })) {
+    return res.status(429).json({ success: false, message: "Too many document confirmation requests. Please try again later." });
+  }
   const { key, category, contentType, size, originalFilename } = req.body || {};
   const validationError = validateDocumentInput({ category, contentType, size, originalFilename });
   if (validationError || !keyBelongsToOwner({ key, ownerType: "drafts", ownerId: identity.draftId, category, contentType })) {
@@ -226,7 +149,7 @@ export const registerClient = async (req, res) => {
 
   const requiredUser = clean(body.full_name) && clean(body.mobile_number) && clean(body.designation);
   const requiredCompany = clean(company.legal_name) && COMPANY_TYPES.includes(company.company_type) && clean(company.registered_address) && clean(company.country) && clean(company.registration_number) && clean(company.authorized_representative_name) && emailValid(normalizeEmail(company.authorized_representative_email)) && clean(company.authorized_representative_phone);
-  if (!requiredUser || !requiredCompany || email !== identity.email || !validatePassword(body.password)) {
+  if (!requiredUser || !requiredCompany || !registrationDraftMatchesEmail(identity, email) || !validatePassword(body.password)) {
     return res.status(400).json({ success: false, message: "Registration details are incomplete or invalid. Passwords require at least eight characters with letters and numbers." });
   }
   if (!Number.isInteger(Number(body.declared_vessel_count)) || Number(body.declared_vessel_count) < 0) return res.status(400).json({ success: false, message: "Number of vessels must be zero or greater." });
@@ -245,15 +168,6 @@ export const registerClient = async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const challengeResult = await client.query(
-      `SELECT * FROM email_verification_challenges WHERE id = $1 AND registration_draft_id = $2 FOR UPDATE`,
-      [identity.challengeId, identity.draftId]
-    );
-    const challenge = challengeResult.rows[0];
-    if (!challenge || !challenge.consumed_at || challenge.registration_completed_at || normalizeEmail(challenge.normalized_email) !== email) {
-      await client.query("ROLLBACK");
-      return res.status(409).json({ success: false, message: "This registration token has already been used or is invalid." });
-    }
     const duplicate = await client.query(`SELECT id FROM users WHERE LOWER(email) = $1 LIMIT 1`, [email]);
     if (duplicate.rows.length) {
       await client.query("ROLLBACK");
@@ -309,7 +223,6 @@ export const registerClient = async (req, res) => {
       );
     }
     await client.query(`INSERT INTO client_verification_events (client_profile_id, previous_status, new_status) VALUES ($1,NULL,'pending')`, [profile.id]);
-    await client.query(`UPDATE email_verification_challenges SET registration_completed_at = CURRENT_TIMESTAMP WHERE id = $1`, [challenge.id]);
     await client.query("COMMIT");
 
     const responseUser = { ...user, verification_status: "pending" };
