@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
-    "test": "echo \"No tests yet\""
+    "test": "node --test"
   },
   "repository": {
     "type": "git",
@@ -28,6 +28,7 @@
     "helmet": "^8.2.0",
     "jsonwebtoken": "^9.0.3",
     "morgan": "^1.10.1",
+    "nodemailer": "^7.0.13",
     "pg": "^8.21.0",
     "zod": "^4.4.3"
   },

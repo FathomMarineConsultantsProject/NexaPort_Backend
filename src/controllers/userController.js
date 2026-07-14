@@ -25,9 +25,11 @@ export const getMyProfile = async (req, res) => {
         u.updated_at,
         e.id AS expert_id,
         erd.photo_s3_key
+        ,cp.verification_status
       FROM users u
       LEFT JOIN experts e ON e.user_id = u.id
       LEFT JOIN expert_registration_details erd ON erd.expert_id = e.id
+      LEFT JOIN client_profiles cp ON cp.user_id = u.id
       WHERE u.id = $1
       LIMIT 1
       `,
@@ -54,6 +56,10 @@ export const getMyProfile = async (req, res) => {
       success: true,
       data: {
         ...user,
+        verification_status:
+          Number(user.role_id) === 3
+            ? user.verification_status || "missing"
+            : null,
         role_name: roleName(user.role_id),
         photo_url: photo?.url || null,
         photo_expires_at: photo?.expiresAt || null,

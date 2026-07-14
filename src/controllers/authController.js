@@ -2,7 +2,7 @@ import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import { pool } from "../config/db.js";
 
-const createToken = (user) => {
+export const createToken = (user) => {
   return jwt.sign(
     {
       id: user.id,
@@ -20,7 +20,7 @@ export const register = async (req, res) => {
   const client = await pool.connect();
 
   try {
-    const { full_name, email, username, password, role_id, phone } = req.body;
+    const { full_name, email, username, password, phone } = req.body;
 
     if (!full_name || !email || !username || !password) {
       return res.status(400).json({
@@ -29,23 +29,15 @@ export const register = async (req, res) => {
       });
     }
 
-    const requestedRoleId = Number(role_id) || 3;
-
-    if (![1, 2, 3].includes(requestedRoleId)) {
+    if (typeof password !== "string" || password.length < 8 || !/[A-Za-z]/.test(password) || !/\d/.test(password)) {
       return res.status(400).json({
         success: false,
-        message: "role_id must be 1, 2 or 3",
+        message: "Password must be at least 8 characters and include letters and numbers",
       });
     }
 
-    if (
-      requestedRoleId === 1 &&
-      req.body.admin_secret !== process.env.ADMIN_REGISTRATION_SECRET
-    ) {
-      return res.status(403).json({
-        success: false,
-        message: "Invalid admin registration secret",
-      });
+    if (!/^\S+@\S+\.\S+$/.test(String(email).trim())) {
+      return res.status(400).json({ success: false, message: "A valid email is required" });
     }
 
     const existing = await pool.query(
@@ -72,9 +64,10 @@ export const register = async (req, res) => {
         username,
         password_hash,
         role_id,
-        phone
+        phone,
+        is_active
       )
-      VALUES ($1,$2,$3,$4,$5,$6)
+      VALUES ($1,$2,$3,$4,$5,$6,true)
       RETURNING id, full_name, email, username, role_id, phone, is_active, created_at
       `,
       [
@@ -82,48 +75,43 @@ export const register = async (req, res) => {
         email.toLowerCase(),
         username,
         passwordHash,
-        requestedRoleId,
+        3,
         phone || null,
       ]
     );
 
     const user = result.rows[0];
 
-    let expertProfile = null;
-
-    if (requestedRoleId === 2) {
-      const expertResult = await client.query(
-        `
-        INSERT INTO experts (
-          user_id,
-          full_name,
-          biography,
-          availability
-        )
-        VALUES ($1,$2,$3,$4)
-        RETURNING *
-        `,
-        [
-          user.id,
-          full_name,
-          "Expert profile pending completion.",
-          "available",
-        ]
-      );
-
-      expertProfile = expertResult.rows[0];
-    }
+    const profileResult = await client.query(
+      `
+      INSERT INTO client_profiles (
+        user_id,
+        verification_status,
+        verification_submitted_at
+      )
+      VALUES ($1, 'pending', CURRENT_TIMESTAMP)
+      RETURNING id, verification_status
+      `,
+      [user.id]
+    );
+    await client.query(
+      `INSERT INTO client_verification_events (client_profile_id, previous_status, new_status) VALUES ($1, NULL, 'pending')`,
+      [profileResult.rows[0].id]
+    );
 
     await client.query("COMMIT");
 
-    const token = createToken(user);
+    const responseUser = {
+      ...user,
+      verification_status: profileResult.rows[0].verification_status,
+    };
+    const token = createToken(responseUser);
 
     res.status(201).json({
       success: true,
-      message: "Registered successfully",
+      message: "Legacy Client account created. Complete Client onboarding before operational access.",
       token,
-      user,
-      expertProfile,
+      user: responseUser,
     });
   } catch (error) {
     await client.query("ROLLBACK");
@@ -151,9 +139,11 @@ export const login = async (req, res) => {
 
     const result = await pool.query(
       `
-      SELECT id, full_name, email, username, password_hash, role_id, phone, is_active
-      FROM users
-      WHERE email = $1 OR username = $1
+      SELECT u.id, u.full_name, u.email, u.username, u.password_hash, u.role_id,
+             u.phone, u.is_active, cp.verification_status
+      FROM users u
+      LEFT JOIN client_profiles cp ON cp.user_id = u.id
+      WHERE u.email = $1 OR u.username = $1
       `,
       [identifier.toLowerCase()]
     );
@@ -184,6 +174,9 @@ export const login = async (req, res) => {
     }
 
     delete user.password_hash;
+    if (Number(user.role_id) === 3 && !user.verification_status) {
+      user.verification_status = "missing";
+    }
 
     const token = createToken(user);
 
@@ -206,16 +199,26 @@ export const getMe = async (req, res) => {
   try {
     const result = await pool.query(
       `
-      SELECT id, full_name, email, username, role_id, phone, is_active, created_at
-      FROM users
-      WHERE id = $1
+      SELECT u.id, u.full_name, u.email, u.username, u.role_id, u.phone,
+             u.is_active, u.created_at, cp.verification_status
+      FROM users u
+      LEFT JOIN client_profiles cp ON cp.user_id = u.id
+      WHERE u.id = $1
       `,
       [req.user.id]
     );
 
     res.json({
       success: true,
-      data: result.rows[0],
+      data: result.rows[0]
+        ? {
+            ...result.rows[0],
+            verification_status:
+              Number(result.rows[0].role_id) === 3
+                ? result.rows[0].verification_status || "missing"
+                : null,
+          }
+        : null,
     });
   } catch (error) {
     res.status(500).json({

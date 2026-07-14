@@ -7,11 +7,12 @@ import {
   deletePort,
 } from "../controllers/portController.js";
 import { requireAuth, allowRoles } from "../middlewares/authMiddleware.js";
+import { requireApprovedClient } from "../middlewares/clientApprovalMiddleware.js";
 
 const router = express.Router();
 
-router.get("/", requireAuth, getPorts);
-router.get("/:id", requireAuth, getPortById);
+router.get("/", requireAuth, requireApprovedClient, getPorts);
+router.get("/:id", requireAuth, requireApprovedClient, getPortById);
 
 router.post("/", requireAuth, allowRoles(1), createPort);
 router.patch("/:id", requireAuth, allowRoles(1), updatePort);

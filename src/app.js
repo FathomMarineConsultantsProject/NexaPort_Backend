@@ -15,6 +15,8 @@ import quotationRoutes from "./routes/quotationRoutes.js";
 import expertReviewRoutes from "./routes/expertReviewRoutes.js";
 import dashboardRoutes from "./routes/dashboardRoutes.js";
 import userRoutes from "./routes/userRoutes.js";
+import clientOnboardingRoutes from "./routes/clientOnboardingRoutes.js";
+import adminClientRegistrationRoutes from "./routes/adminClientRegistrationRoutes.js";
 import flagRoutes from "./routes/flagRoutes.js";
 import appointedSurveyorRoutes from "./routes/appointedSurveyorRoutes.js";
 import {
@@ -45,6 +47,8 @@ app.use("/api/auth", authRoutes);
 
 //Main APIs
 app.use("/api/users", userRoutes);
+app.use("/api/client-onboarding", clientOnboardingRoutes);
+app.use("/api/admin/client-registrations", adminClientRegistrationRoutes);
 app.use("/api/experts", expertRoutes);
 app.use("/api/master", masterRoutes);
 app.use("/api/vessels", vesselRoutes);
