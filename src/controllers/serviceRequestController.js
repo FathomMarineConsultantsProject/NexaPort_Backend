@@ -1,6 +1,8 @@
 import { pool } from "../config/db.js";
 import { findOrCreatePort } from "../utils/findOrCreatePort.js";
 
+const quoteIdentifier = (value) => `"${String(value).replaceAll('"', '""')}"`;
+
 const mapRequestRow = (row) => ({
   id: row.id,
   serviceType: row.service_type,
@@ -570,6 +572,113 @@ export const deleteServiceRequest = async (req, res) => {
       message: "Failed to delete service request",
       error: error.message,
     });
+  }
+};
+
+export const deleteAllServiceRequests = async (req, res) => {
+  if (req.body?.confirmation !== "DELETE ALL") {
+    return res.status(400).json({
+      success: false,
+      message: 'Type "DELETE ALL" exactly to confirm this operation.',
+    });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const countResult = await client.query(
+      `SELECT COUNT(*)::int AS count FROM public.service_requests`
+    );
+    const requestCount = countResult.rows[0]?.count || 0;
+
+    const constraintsResult = await client.query(`
+      SELECT
+        con.conname AS constraint_name,
+        child_ns.nspname AS child_schema,
+        child.relname AS child_table,
+        child_col.attname AS child_column,
+        parent_col.attname AS parent_column,
+        con.confdeltype AS delete_action,
+        cardinality(con.conkey) AS column_count
+      FROM pg_constraint con
+      JOIN pg_class child ON child.oid = con.conrelid
+      JOIN pg_namespace child_ns ON child_ns.oid = child.relnamespace
+      JOIN pg_class parent ON parent.oid = con.confrelid
+      JOIN pg_namespace parent_ns ON parent_ns.oid = parent.relnamespace
+      JOIN pg_attribute child_col
+        ON child_col.attrelid = con.conrelid AND child_col.attnum = con.conkey[1]
+      JOIN pg_attribute parent_col
+        ON parent_col.attrelid = con.confrelid AND parent_col.attnum = con.confkey[1]
+      WHERE con.contype = 'f'
+        AND parent_ns.nspname = 'public'
+        AND parent.relname = 'service_requests'
+      ORDER BY child_ns.nspname, child.relname, con.conname
+    `);
+
+    const actionNames = {
+      a: "NO ACTION",
+      r: "RESTRICT",
+      c: "CASCADE",
+      n: "SET NULL",
+      d: "SET DEFAULT",
+    };
+    const deletionOrder = [];
+
+    for (const constraint of constraintsResult.rows) {
+      if (Number(constraint.column_count) !== 1) {
+        const error = new Error(
+          `Composite foreign key ${constraint.constraint_name} requires a reviewed deletion strategy.`
+        );
+        error.status = 409;
+        throw error;
+      }
+
+      if (!["a", "r"].includes(constraint.delete_action)) continue;
+
+      const childTable = `${quoteIdentifier(constraint.child_schema)}.${quoteIdentifier(
+        constraint.child_table
+      )}`;
+      const childColumn = quoteIdentifier(constraint.child_column);
+      const parentColumn = quoteIdentifier(constraint.parent_column);
+      const deleted = await client.query(
+        `DELETE FROM ${childTable} WHERE ${childColumn} IN (SELECT ${parentColumn} FROM public.service_requests)`
+      );
+      deletionOrder.push({
+        table: `${constraint.child_schema}.${constraint.child_table}`,
+        rows_deleted: deleted.rowCount,
+      });
+    }
+
+    const deletedRequests = await client.query(`DELETE FROM public.service_requests`);
+    deletionOrder.push({ table: "public.service_requests", rows_deleted: deletedRequests.rowCount });
+
+    await client.query("COMMIT");
+    return res.json({
+      success: true,
+      message: `${requestCount} service request${requestCount === 1 ? "" : "s"} deleted.`,
+      deleted_count: deletedRequests.rowCount,
+      foreign_keys: constraintsResult.rows.map((constraint) => ({
+        constraint: constraint.constraint_name,
+        child_table: `${constraint.child_schema}.${constraint.child_table}`,
+        child_column: constraint.child_column,
+        on_delete: actionNames[constraint.delete_action] || constraint.delete_action,
+      })),
+      deletion_order: deletionOrder,
+    });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("Delete all service requests failed", {
+      name: error?.name,
+      code: error?.code,
+      message: error?.message,
+    });
+    return res.status(error.status || 500).json({
+      success: false,
+      message: error.status ? error.message : "Failed to delete all service requests.",
+    });
+  } finally {
+    client.release();
   }
 };
 

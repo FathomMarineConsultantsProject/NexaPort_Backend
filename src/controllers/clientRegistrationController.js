@@ -2,6 +2,7 @@ import bcrypt from "bcrypt";
 import crypto from "crypto";
 import { pool } from "../config/db.js";
 import { createToken } from "./authController.js";
+import { createRegistrationNotifications } from "../services/adminNotificationService.js";
 import {
   createRegistrationDraftToken,
   getRegistrationBearer,
@@ -223,6 +224,20 @@ export const registerClient = async (req, res) => {
       );
     }
     await client.query(`INSERT INTO client_verification_events (client_profile_id, previous_status, new_status) VALUES ($1,NULL,'pending')`, [profile.id]);
+    await createRegistrationNotifications(client, {
+      type: "client_registration",
+      entityType: "client",
+      entityId: profile.id,
+      title: "New client registration",
+      message: `${user.full_name} submitted a Client registration.`,
+      payload: {
+        name: user.full_name,
+        company: clean(company.legal_name),
+        email: user.email,
+        registration_timestamp: profile.verification_submitted_at,
+        registration_id: profile.id,
+      },
+    });
     await client.query("COMMIT");
 
     const responseUser = { ...user, verification_status: "pending" };

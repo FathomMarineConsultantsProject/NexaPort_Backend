@@ -2,6 +2,7 @@ import bcrypt from "bcrypt";
 import crypto from "crypto";
 import { pool } from "../config/db.js";
 import { createPresignedPutUrl } from "../utils/s3Presign.js";
+import { createRegistrationNotifications } from "../services/adminNotificationService.js";
 
 const nameRegex = /^[A-Za-z\s'-]+$/;
 const phoneRegex = /^[0-9+\-\s()]+$/;
@@ -618,6 +619,22 @@ export const registerConsultant = async (req, res) => {
         data.cvS3Key,
       ]
     );
+
+    await createRegistrationNotifications(client, {
+      type: "consultant_registration",
+      entityType: "consultant",
+      entityId: expert.id,
+      title: "New consultant registration",
+      message: `${user.full_name} registered as a Consultant.`,
+      payload: {
+        name: user.full_name,
+        company: data.companyName || null,
+        email: user.email,
+        registration_timestamp: user.created_at,
+        expert_id: expert.id,
+        user_id: user.id,
+      },
+    });
 
     await client.query("COMMIT");
 
