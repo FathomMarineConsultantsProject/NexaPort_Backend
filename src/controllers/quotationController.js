@@ -219,7 +219,7 @@ export const createQuotation = async (req, res) => {
 
     const requestCheck = await pool.query(
       `
-      SELECT id, status
+      SELECT id, status, moderation_status
       FROM service_requests
       WHERE id = $1
       `,
@@ -230,6 +230,16 @@ export const createQuotation = async (req, res) => {
       return res.status(404).json({
         success: false,
         message: "Service request not found",
+      });
+    }
+    if (
+      Number(req.user.role_id) === 2 &&
+      requestCheck.rows[0].moderation_status !== "approved"
+    ) {
+      return res.status(404).json({
+        success: false,
+        code: "REQUEST_NOT_APPROVED",
+        message: "Service request is not available",
       });
     }
     if (

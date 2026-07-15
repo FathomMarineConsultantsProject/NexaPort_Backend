@@ -11,7 +11,7 @@ export const getDashboardStats = async (req, res) => {
     const vesselValues = [];
 
     if (roleId === 2) {
-      requestWhere = `WHERE LOWER(status) IN ('open', 'pending', 'active')`;
+      requestWhere = `WHERE moderation_status = 'approved' AND LOWER(status) IN ('open', 'pending', 'active')`;
     }
 
     if (roleId === 3) {
@@ -71,27 +71,21 @@ export const getDashboardStats = async (req, res) => {
         requestValues
       ),
 
-      pool.query(
-        `
-        SELECT urgency, COUNT(*)::int AS count
-        FROM service_requests
-        ${requestWhere}
-        GROUP BY urgency
-        ORDER BY count DESC
-        `,
-        requestValues
-      ),
+      roleId === 2
+        ? Promise.resolve({ rows: [] })
+        : pool.query(
+          `SELECT urgency, COUNT(*)::int AS count FROM service_requests ${requestWhere} GROUP BY urgency ORDER BY count DESC`,
+          requestValues
+        ),
 
-      pool.query(
-        `
-        SELECT 
-          COALESCE(ROUND(AVG(budget_usd), 2), 0)::float AS avg_budget_per_request,
-          COUNT(*) FILTER (WHERE status = 'completed')::int AS completed_requests
-        FROM service_requests
-        ${requestWhere}
-        `,
-        requestValues
-      ),
+      roleId === 2
+        ? Promise.resolve({ rows: [{ avg_budget_per_request: 0, completed_requests: 0 }] })
+        : pool.query(
+          `SELECT COALESCE(ROUND(AVG(budget_usd), 2), 0)::float AS avg_budget_per_request,
+                  COUNT(*) FILTER (WHERE status = 'completed')::int AS completed_requests
+           FROM service_requests ${requestWhere}`,
+          requestValues
+        ),
 
       pool.query(`
         SELECT 

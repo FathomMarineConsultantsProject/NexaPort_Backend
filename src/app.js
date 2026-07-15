@@ -18,6 +18,8 @@ import userRoutes from "./routes/userRoutes.js";
 import clientOnboardingRoutes from "./routes/clientOnboardingRoutes.js";
 import adminClientRegistrationRoutes from "./routes/adminClientRegistrationRoutes.js";
 import adminNotificationRoutes from "./routes/adminNotificationRoutes.js";
+import notificationRoutes from "./routes/notificationRoutes.js";
+import adminAdministrationRoutes from "./routes/adminAdministrationRoutes.js";
 import flagRoutes from "./routes/flagRoutes.js";
 import appointedSurveyorRoutes from "./routes/appointedSurveyorRoutes.js";
 import {
@@ -51,6 +53,8 @@ app.use("/api/users", userRoutes);
 app.use("/api/client-onboarding", clientOnboardingRoutes);
 app.use("/api/admin/client-registrations", adminClientRegistrationRoutes);
 app.use("/api/admin-notifications", adminNotificationRoutes);
+app.use("/api/notifications", notificationRoutes);
+app.use("/api/admin", adminAdministrationRoutes);
 app.use("/api/experts", expertRoutes);
 app.use("/api/master", masterRoutes);
 app.use("/api/vessels", vesselRoutes);

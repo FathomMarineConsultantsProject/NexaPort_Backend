@@ -176,7 +176,12 @@ const updateRegistrationDetails = async (client, expertId, details = {}) => {
 };
 
 const getExpertFullData = async (expertId) => {
-  const expertResult = await pool.query(`SELECT * FROM experts WHERE id = $1`, [
+  const expertResult = await pool.query(`
+    SELECT e.*, u.email AS user_email, u.phone AS user_phone, u.is_active AS user_is_active
+    FROM experts e
+    LEFT JOIN users u ON u.id = e.user_id
+    WHERE e.id = $1
+  `, [
     expertId,
   ]);
 
@@ -329,8 +334,12 @@ export const getAllExperts = async (req, res) => {
       `
       SELECT 
         e.*,
+        u.email AS user_email,
+        u.phone AS user_phone,
+        u.is_active AS user_is_active,
         erd.photo_s3_key,
         erd.inspection_cost,
+        erd.company_name,
         COALESCE(
           JSON_AGG(DISTINCT JSONB_BUILD_OBJECT('id', ms.id, 'name', ms.name))
           FILTER (WHERE ms.id IS NOT NULL), '[]'
@@ -344,6 +353,7 @@ export const getAllExperts = async (req, res) => {
           FILTER (WHERE mc.id IS NOT NULL), '[]'
         ) AS certifications
       FROM experts e
+      LEFT JOIN users u ON u.id = e.user_id
       LEFT JOIN expert_registration_details erd ON erd.expert_id = e.id
       LEFT JOIN expert_specialties es ON es.expert_id = e.id
       LEFT JOIN master_specialties ms ON ms.id = es.specialty_id
@@ -352,7 +362,7 @@ export const getAllExperts = async (req, res) => {
       LEFT JOIN expert_certifications ec ON ec.expert_id = e.id
       LEFT JOIN master_certifications mc ON mc.id = ec.certification_id
       ${whereSql}
-      GROUP BY e.id, erd.photo_s3_key, erd.inspection_cost
+      GROUP BY e.id, u.email, u.phone, u.is_active, erd.photo_s3_key, erd.inspection_cost, erd.company_name
       ORDER BY e.created_at DESC
       `,
       values
@@ -784,7 +794,7 @@ export const createExpert = async (req, res) => {
         day_rate_usd || null,
         years_experience || null,
         availability || "available",
-        is_premium || false,
+        Number(req.user.role_id) === 1 ? Boolean(is_premium) : false,
       ]
     );
 
@@ -994,7 +1004,7 @@ export const updateExpert = async (req, res) => {
         day_rate_usd,
         years_experience,
         availability,
-        is_premium,
+        Number(req.user.role_id) === 1 ? is_premium : undefined,
         id,
       ]
     );
@@ -1089,30 +1099,9 @@ export const updateExpert = async (req, res) => {
 };
 
 export const deleteExpert = async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const result = await pool.query(
-      `DELETE FROM experts WHERE id = $1 RETURNING *`,
-      [id]
-    );
-
-    if (!result.rows.length) {
-      return res.status(404).json({
-        success: false,
-        message: "Expert not found",
-      });
-    }
-
-    res.json({
-      success: true,
-      message: "Expert deleted successfully",
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Failed to delete expert",
-      error: error.message,
-    });
-  }
+  return res.status(410).json({
+    success: false,
+    code: "DEPENDENCY_AWARE_ADMIN_ENDPOINT_REQUIRED",
+    message: "Use the dependency-aware Super Admin Consultant deletion workflow",
+  });
 };

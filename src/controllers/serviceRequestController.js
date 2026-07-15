@@ -1,6 +1,8 @@
 import { pool } from "../config/db.js";
 import { findOrCreatePort } from "../utils/findOrCreatePort.js";
 import { deleteServiceRequestById } from "../services/serviceRequestService.js";
+import { createServiceRequestApprovedNotifications } from "../services/adminNotificationService.js";
+import { writeAdminAudit } from "../services/adminAuditService.js";
 
 const mapRequestRow = (row) => ({
   id: row.id,
@@ -14,6 +16,9 @@ const mapRequestRow = (row) => ({
   requesterName: row.requester_name,
   requesterUserId: row.requester_user_id,
   status: row.status,
+  moderationStatus: row.moderation_status,
+  approvedAt: row.approved_at,
+  approvedByUserId: row.approved_by_user_id,
   quotationCount: Number(row.quotation_count || 0),
   acceptedQuotationId: row.accepted_quotation_id,
   acceptedExpertId: row.accepted_expert_id,
@@ -37,6 +42,17 @@ const mapRequestRow = (row) => ({
   createdAt: row.created_at,
   updatedAt: row.updated_at,
 });
+
+const serializeApprovedServiceRequestForConsultant = (row) => ({
+  id: row.id,
+  inspectionType: row.inspection_type,
+  vesselType: row.vessel_type,
+  inspectionDate: row.inspection_date,
+  portOfInspection: row.port_of_inspection,
+});
+
+const serializeServiceRequestForAdmin = mapRequestRow;
+const serializeServiceRequestForClient = mapRequestRow;
 
 const canAccessRequest = async (user, request) => {
   const roleId = Number(user.role_id);
@@ -122,11 +138,13 @@ export const createServiceRequest = async (req, res) => {
         eta,
         location_summary,
         required_certification,
-        requester_user_id
+        requester_user_id,
+        moderation_status,
+        status
       )
       VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,
-        $9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19
+        $9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21
       )
       RETURNING *
       `,
@@ -150,6 +168,8 @@ export const createServiceRequest = async (req, res) => {
         locationSummary || null,
         requiredCertification || null,
         req.user.id,
+        "pending",
+        "open",
       ]
     );
 
@@ -176,7 +196,49 @@ export const createServiceRequest = async (req, res) => {
 
 export const getServiceRequests = async (req, res) => {
   try {
-    const { search, type, status, urgency } = req.query;
+    const { search, type, status, urgency, moderation } = req.query;
+
+    if (Number(req.user.role_id) === 2) {
+      const conditions = [
+        `sr.moderation_status = 'approved'`,
+        `LOWER(sr.status) IN ('open', 'pending', 'active')`,
+      ];
+      const values = [];
+
+      if (search) {
+        values.push(`%${search}%`);
+        conditions.push(`(
+          sr.service_category ILIKE $${values.length}
+          OR sr.service_type ILIKE $${values.length}
+          OR sr.vessel_type ILIKE $${values.length}
+          OR sr.port_name ILIKE $${values.length}
+        )`);
+      }
+      if (type && type !== "all") {
+        values.push(type);
+        conditions.push(`LOWER(COALESCE(NULLIF(TRIM(sr.service_category), ''), sr.service_type)) = LOWER($${values.length})`);
+      }
+
+      const result = await pool.query(
+        `
+        SELECT
+          sr.id,
+          COALESCE(NULLIF(TRIM(sr.service_category), ''), NULLIF(TRIM(sr.service_type), '')) AS inspection_type,
+          sr.vessel_type,
+          sr.required_by AS inspection_date,
+          sr.port_name AS port_of_inspection
+        FROM service_requests sr
+        WHERE ${conditions.join(" AND ")}
+        ORDER BY sr.required_by ASC NULLS LAST, sr.id DESC
+        `,
+        values
+      );
+
+      return res.json({
+        success: true,
+        data: result.rows.map(serializeApprovedServiceRequestForConsultant),
+      });
+    }
 
     const conditions = [];
     const values = [];
@@ -211,8 +273,9 @@ export const getServiceRequests = async (req, res) => {
       conditions.push(`sr.requester_user_id = $${values.length}`);
     }
 
-    if (Number(req.user.role_id) === 2) {
-      conditions.push(`LOWER(sr.status) IN ('open', 'pending', 'active')`);
+    if (Number(req.user.role_id) === 1 && moderation && moderation !== "all") {
+      values.push(moderation);
+      conditions.push(`sr.moderation_status = $${values.length}`);
     }
 
     const whereSql = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
@@ -231,16 +294,10 @@ export const getServiceRequests = async (req, res) => {
       values
     );
 
-    const data = result.rows.map((row) => {
-      const item = mapRequestRow(row);
-
-      if (Number(req.user.role_id) === 2) {
-        item.requesterName = null;
-        item.requesterUserId = null;
-      }
-
-      return item;
-    });
+    const serializer = Number(req.user.role_id) === 1
+      ? serializeServiceRequestForAdmin
+      : serializeServiceRequestForClient;
+    const data = result.rows.map(serializer);
 
     res.json({
       success: true,
@@ -261,6 +318,31 @@ export const getServiceRequests = async (req, res) => {
 export const getServiceRequestById = async (req, res) => {
   try {
     const { id } = req.params;
+
+    if (Number(req.user.role_id) === 2) {
+      const safeResult = await pool.query(
+        `
+        SELECT
+          sr.id,
+          COALESCE(NULLIF(TRIM(sr.service_category), ''), NULLIF(TRIM(sr.service_type), '')) AS inspection_type,
+          sr.vessel_type,
+          sr.required_by AS inspection_date,
+          sr.port_name AS port_of_inspection
+        FROM service_requests sr
+        WHERE sr.id = $1
+          AND sr.moderation_status = 'approved'
+        `,
+        [id]
+      );
+      if (!safeResult.rows.length) {
+        return res.status(404).json({ success: false, message: "Service request not found" });
+      }
+
+      return res.json({
+        success: true,
+        data: serializeApprovedServiceRequestForConsultant(safeResult.rows[0]),
+      });
+    }
 
     const requestResult = await pool.query(
       `
@@ -401,125 +483,79 @@ export const updateServiceRequest = async (req, res) => {
   const client = await pool.connect();
 
   try {
-    const { id } = req.params;
-
+    const id = Number(req.params.id);
+    const roleId = Number(req.user.role_id);
+    await client.query("BEGIN");
     const existing = await client.query(
-      `SELECT * FROM service_requests WHERE id = $1`,
+      `SELECT * FROM service_requests WHERE id = $1 FOR UPDATE`,
       [id]
     );
-
     if (!existing.rows.length) {
-      return res.status(404).json({
-        success: false,
-        message: "Service request not found",
-      });
+      await client.query("ROLLBACK");
+      return res.status(404).json({ success: false, message: "Service request not found" });
+    }
+    const request = existing.rows[0];
+    if (roleId !== 1 && Number(request.requester_user_id) !== Number(req.user.id)) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({ success: false, message: "Only the request owner or admin can update this request" });
+    }
+    if (roleId === 1 && request.moderation_status !== "pending") {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ success: false, code: "REQUEST_ALREADY_MODERATED", message: "Only pending requests may be edited" });
     }
 
-    const existingRequest = existing.rows[0];
-
-    if (
-      Number(req.user.role_id) !== 1 &&
-      Number(existingRequest.requester_user_id) !== Number(req.user.id)
-    ) {
-      return res.status(403).json({
-        success: false,
-        message: "Only the request owner or admin can update this request",
-      });
+    const fieldMap = {
+      serviceType: "service_type",
+      serviceCategory: "service_category",
+      title: "title",
+      scopeOfWork: "scope_of_work",
+      urgency: "urgency",
+      budgetUsd: "budget_usd",
+      requiredBy: "required_by",
+      vesselName: "vessel_name",
+      imoNumber: "imo_number",
+      vesselType: "vessel_type",
+      flagState: "flag_state",
+      portId: "port_id",
+      portName: "port_name",
+      country: "country",
+      eta: "eta",
+      locationSummary: "location_summary",
+      requiredCertification: "required_certification",
+    };
+    const clientAllowed = new Set([
+      "serviceType", "serviceCategory", "title", "scopeOfWork", "urgency",
+      "budgetUsd", "requiredBy", "vesselName", "imoNumber", "vesselType",
+      "flagState", "portName", "country", "eta", "locationSummary",
+      "requiredCertification",
+    ]);
+    const updates = [];
+    const values = [];
+    for (const [bodyField, column] of Object.entries(fieldMap)) {
+      if (!(bodyField in req.body) || (roleId === 3 && !clientAllowed.has(bodyField))) continue;
+      values.push(req.body[bodyField] === "" ? null : req.body[bodyField]);
+      updates.push(`${column} = $${values.length}`);
     }
-
-    const {
-      serviceType,
-      serviceCategory,
-      title,
-      scopeOfWork,
-      urgency,
-      budgetUsd,
-      requiredBy,
-      requesterName,
-      vesselName,
-      imoNumber,
-      vesselType,
-      flagState,
-      portName,
-      country,
-      eta,
-      locationSummary,
-      requiredCertification,
-      status,
-    } = req.body;
-
-    await client.query("BEGIN");
-
-    let portId = null;
-
-    if (portName && country) {
-      const port = await findOrCreatePort({
-        port_name: portName,
-        country,
-        region: locationSummary || null,
-      });
-
-      portId = port.id;
+    if (!updates.length) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ success: false, message: "No editable request fields supplied" });
     }
-
+    values.push(id);
     const result = await client.query(
-      `
-      UPDATE service_requests
-      SET
-        service_type = COALESCE($1, service_type),
-        service_category = COALESCE($2, service_category),
-        title = COALESCE($3, title),
-        scope_of_work = COALESCE($4, scope_of_work),
-        urgency = COALESCE($5, urgency),
-        budget_usd = COALESCE($6, budget_usd),
-        required_by = COALESCE($7, required_by),
-        requester_name = COALESCE($8, requester_name),
-        vessel_name = COALESCE($9, vessel_name),
-        imo_number = COALESCE($10, imo_number),
-        vessel_type = COALESCE($11, vessel_type),
-        flag_state = COALESCE($12, flag_state),
-        port_id = COALESCE($13, port_id),
-        port_name = COALESCE($14, port_name),
-        country = COALESCE($15, country),
-        eta = COALESCE($16, eta),
-        location_summary = COALESCE($17, location_summary),
-        required_certification = COALESCE($18, required_certification),
-        status = COALESCE($19, status),
-        updated_at = CURRENT_TIMESTAMP
-      WHERE id = $20
-      RETURNING *
-      `,
-      [
-        serviceType || null,
-        serviceCategory || null,
-        title || null,
-        scopeOfWork || null,
-        urgency || null,
-        budgetUsd || null,
-        requiredBy || null,
-        requesterName || null,
-        vesselName || null,
-        imoNumber || null,
-        vesselType || null,
-        flagState || null,
-        portId,
-        portName || null,
-        country || null,
-        eta || null,
-        locationSummary || null,
-        requiredCertification || null,
-        status || null,
-        id,
-      ]
+      `UPDATE service_requests SET ${updates.join(", ")}, updated_at = CURRENT_TIMESTAMP WHERE id = $${values.length} RETURNING *`,
+      values
     );
-
+    if (roleId === 1) {
+      await writeAdminAudit(client, {
+        actorUserId: req.user.id,
+        action: "service_request.edited",
+        targetType: "service_request",
+        targetId: id,
+        summary: `Updated fields: ${updates.map((item) => item.split(" = ")[0]).join(", ")}`,
+      });
+    }
     await client.query("COMMIT");
-
-    res.json({
-      success: true,
-      message: "Service request updated successfully",
-      data: mapRequestRow(result.rows[0]),
-    });
+    return res.json({ success: true, message: "Service request updated successfully", data: mapRequestRow(result.rows[0]) });
   } catch (error) {
     await client.query("ROLLBACK");
 
@@ -528,6 +564,72 @@ export const updateServiceRequest = async (req, res) => {
       message: "Failed to update service request",
       error: error.message,
     });
+  } finally {
+    client.release();
+  }
+};
+
+export const approveServiceRequest = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ success: false, message: "Invalid service request ID" });
+    }
+    await client.query("BEGIN");
+    const locked = await client.query(
+      `SELECT * FROM service_requests WHERE id = $1 FOR UPDATE`,
+      [id]
+    );
+    if (!locked.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ success: false, message: "Service request not found" });
+    }
+    const request = locked.rows[0];
+    if (request.moderation_status === "approved") {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ success: false, code: "REQUEST_ALREADY_APPROVED", message: "Service request is already approved" });
+    }
+    const inspectionType = String(request.service_category || request.service_type || "").trim();
+    const vesselType = String(request.vessel_type || "").trim();
+    const port = String(request.port_name || "").trim();
+    if (!inspectionType || !vesselType || !request.required_by || !port) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
+        success: false,
+        code: "REQUEST_APPROVAL_FIELDS_REQUIRED",
+        message: "Inspection type, ship type, inspection date and port are required before approval",
+      });
+    }
+    const approved = await client.query(
+      `
+      UPDATE service_requests
+      SET moderation_status = 'approved', approved_at = CURRENT_TIMESTAMP,
+          approved_by_user_id = $1, updated_at = CURRENT_TIMESTAMP
+      WHERE id = $2
+      RETURNING *
+      `,
+      [req.user.id, id]
+    );
+    await createServiceRequestApprovedNotifications(client, {
+      requestId: id,
+      inspectionType,
+      vesselType,
+      inspectionDate: request.required_by,
+      portOfInspection: port,
+    });
+    await writeAdminAudit(client, {
+      actorUserId: req.user.id,
+      action: "service_request.approved",
+      targetType: "service_request",
+      targetId: id,
+      summary: "Approved a pending service request and notified eligible Consultants",
+    });
+    await client.query("COMMIT");
+    return res.json({ success: true, message: "Service request approved", data: mapRequestRow(approved.rows[0]) });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    return res.status(500).json({ success: false, message: "Failed to approve service request", error: error.message });
   } finally {
     client.release();
   }
@@ -567,6 +669,15 @@ export const deleteServiceRequest = async (req, res) => {
     }
 
     await deleteServiceRequestById(client, id);
+    if (Number(req.user.role_id) === 1) {
+      await writeAdminAudit(client, {
+        actorUserId: req.user.id,
+        action: "service_request.deleted",
+        targetType: "service_request",
+        targetId: id,
+        summary: "Deleted an individual service request",
+      });
+    }
     await client.query("COMMIT");
 
     return res.json({

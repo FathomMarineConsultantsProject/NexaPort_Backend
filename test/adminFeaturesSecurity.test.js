@@ -95,34 +95,82 @@ test("request creation is limited to roles 1 and 3 and uses the authenticated us
   assert.doesNotMatch(controller, /requester_user_id\s*}\s*=\s*req\.body/);
 });
 
-test("dependent cleanup targets only the selected service request", async () => {
+test("service-request deletion blocks business dependencies and targets only the selected request", async () => {
   const calls = [];
   const client = {
     async query(sql, params) {
       calls.push({ sql, params });
-      if (sql.includes("FROM pg_constraint")) {
-        return {
-          rows: [{
-            constraint_name: "quotations_service_request_id_fkey",
-            child_schema: "public",
-            child_table: "quotations",
-            child_column: "service_request_id",
-            parent_column: "id",
-            delete_action: "r",
-            column_count: 1,
-          }],
-        };
-      }
-      if (sql.includes('DELETE FROM "public"."quotations"')) return { rowCount: 2, rows: [] };
+      if (sql.includes("SELECT COUNT(*)::int")) return { rows: [{ quotations: 0, assignments: 0 }] };
       return { rowCount: 1, rows: [{ id: 42 }] };
     },
   };
 
   const result = await deleteServiceRequestById(client, 42);
   assert.equal(result.deleted, true);
+  assert.deepEqual(calls[0].params, [42]);
   assert.deepEqual(calls[1].params, [42]);
-  assert.match(calls[1].sql, /WHERE "service_request_id" = \(SELECT "id" FROM public\.service_requests WHERE id = \$1\)/);
-  assert.deepEqual(calls[2].params, [42]);
+  assert.match(calls[1].sql, /DELETE FROM public\.service_requests WHERE id = \$1 RETURNING id/);
+});
+
+test("request moderation is explicit and Consultant responses are allowlisted", async () => {
+  const controller = await source("src/controllers/serviceRequestController.js");
+  const routes = await source("src/routes/serviceRequestRoutes.js");
+  assert.match(controller, /moderation_status[\s\S]*"pending"[\s\S]*"open"/);
+  assert.match(controller, /sr\.moderation_status = 'approved'/);
+  assert.match(controller, /serializeApprovedServiceRequestForConsultant/);
+  assert.match(controller, /inspectionType: row\.inspection_type/);
+  assert.doesNotMatch(controller.match(/const serializeApprovedServiceRequestForConsultant[\s\S]*?\}\);/)[0], /title|imo|budget|requester|vesselName/);
+  assert.match(routes, /post\("\/:id\/approve", requireAuth, allowRoles\(1\), approveServiceRequest\)/);
+});
+
+test("approval notifications target active role-2 users with expert profiles and safe payload", async () => {
+  const service = await source("src/services/adminNotificationService.js");
+  assert.match(service, /JOIN public\.experts e ON e\.user_id = u\.id/);
+  assert.match(service, /u\.role_id = 2/);
+  assert.match(service, /u\.is_active = TRUE/);
+  assert.match(service, /service_request_approved/);
+  assert.doesNotMatch(service, /vessel_name|imo_number|requester_name|client_name/);
+});
+
+test("personal notifications and administration APIs are authenticated and role-scoped", async () => {
+  const [notifications, administration] = await Promise.all([
+    source("src/routes/notificationRoutes.js"),
+    source("src/routes/adminAdministrationRoutes.js"),
+  ]);
+  assert.match(notifications, /router\.use\(requireAuth, allowRoles\(1, 2\)\)/);
+  assert.match(administration, /router\.use\(requireAuth, allowRoles\(1\)\)/);
+  assert.match(administration, /deletion-impact/);
+  assert.match(administration, /deactivate-anonymize/);
+});
+
+test("request/admin migrations are rerun-safe, non-destructive, and keep operational status separate", async () => {
+  const [moderation, backfill, audit] = await Promise.all([
+    source("../Request_User_Admin_Migration/001_request_moderation_and_admin.sql"),
+    source("../Request_User_Admin_Migration/002_existing_requests_backfill.sql"),
+    source("../Request_User_Admin_Migration/003_administrative_audit.sql"),
+  ]);
+  assert.match(moderation, /ADD COLUMN IF NOT EXISTS moderation_status TEXT NOT NULL DEFAULT 'pending'/);
+  assert.match(moderation, /CHECK \(moderation_status IN \('pending', 'approved'\)\)/);
+  assert.match(moderation, /ON DELETE SET NULL/);
+  assert.doesNotMatch(moderation, /DROP TABLE|DROP COLUMN/);
+  assert.match(backfill, /moderation_status = 'approved'/);
+  assert.match(backfill, /approved_at = COALESCE\(approved_at, created_at\)/);
+  assert.match(audit, /CREATE TABLE IF NOT EXISTS public\.admin_audit_logs/);
+  assert.match(audit, /CREATE TABLE IF NOT EXISTS public\.s3_cleanup_jobs/);
+});
+
+test("authenticated requests revalidate active account and database role", async () => {
+  const middleware = await source("src/middlewares/authMiddleware.js");
+  assert.match(middleware, /SELECT id, full_name, email, username, role_id, is_active FROM users/);
+  assert.match(middleware, /ACCOUNT_INACTIVE/);
+  assert.match(middleware, /req\.user = user/);
+});
+
+test("Client request updates cannot change operational or moderation fields", async () => {
+  const controller = await source("src/controllers/serviceRequestController.js");
+  const updateBlock = controller.slice(controller.indexOf("export const updateServiceRequest"), controller.indexOf("export const approveServiceRequest"));
+  assert.doesNotMatch(updateBlock, /status:\s*"status"/);
+  assert.doesNotMatch(updateBlock, /moderationStatus|approvedAt|approvedByUserId|requesterUserId|acceptedQuotationId/);
 });
 
 test("notification migration has recipient indexes and duplicate protection", async () => {
