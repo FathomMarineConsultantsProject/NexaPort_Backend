@@ -22,6 +22,7 @@ import notificationRoutes from "./routes/notificationRoutes.js";
 import adminAdministrationRoutes from "./routes/adminAdministrationRoutes.js";
 import flagRoutes from "./routes/flagRoutes.js";
 import appointedSurveyorRoutes from "./routes/appointedSurveyorRoutes.js";
+import publicStatsRoutes from "./routes/publicStatsRoutes.js";
 import {
   accreditationSchemeRouter,
   accreditedInspectorRouter,
@@ -47,6 +48,7 @@ app.get("/health", (req, res) => {
 app.use("/api", testRoutes);
 
 app.use("/api/auth", authRoutes);
+app.use("/api/public", publicStatsRoutes);
 
 //Main APIs
 app.use("/api/users", userRoutes);

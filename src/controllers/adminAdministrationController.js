@@ -223,7 +223,7 @@ export const getClientAsAdmin = async (req, res) => {
 
 export const getClientDeletionImpact = async (req, res) => {
   try { const impact = await clientImpact(pool, positiveId(req.params.userId)); if (!impact) return res.status(404).json({ success: false, message: "Client not found" }); return res.json({ success: true, data: { ...impact.counts, has_immutable_history: impact.hasImmutableHistory } }); }
-  catch (error) { return res.status(500).json({ success: false, message: "Failed to inspect Client dependencies", error: error.message }); }
+  catch (error) { console.error("Failed to inspect Client dependencies", { error }); return res.status(500).json({ success: false, message: "Failed to inspect Client dependencies" }); }
 };
 
 export const updateClientAsAdmin = async (req, res) => {
