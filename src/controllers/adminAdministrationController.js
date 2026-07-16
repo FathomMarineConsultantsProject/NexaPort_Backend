@@ -1,6 +1,13 @@
 import { pool } from "../config/db.js";
 import { writeAdminAudit } from "../services/adminAuditService.js";
 import { enqueueS3Cleanup } from "../services/s3CleanupService.js";
+import { createPresignedGetUrl } from "../utils/s3Presign.js";
+import {
+  loadAdminClient,
+  updateAdminClient,
+  updateAdminClientServices,
+  updateAdminClientVessels,
+} from "../services/adminClientService.js";
 
 const positiveId = (value) => {
   const id = Number(value);
@@ -192,26 +199,26 @@ export const listClientsAsAdmin = async (req, res) => {
     const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
     const conditions = ["u.role_id=3"]; const values = [];
     if (search) { values.push(`%${search}%`); conditions.push(`(u.full_name ILIKE $${values.length} OR u.email ILIKE $${values.length} OR u.phone ILIKE $${values.length} OR cc.legal_name ILIKE $${values.length} OR cc.registration_number ILIKE $${values.length})`); }
-    if (verification === "legacy") conditions.push("cp.id IS NULL");
-    else if (verification) { values.push(verification); conditions.push(`cp.verification_status=$${values.length}`); }
+    const legacyCondition = `(cp.id IS NULL OR (cp.verification_submitted_at IS NULL AND NOT EXISTS (SELECT 1 FROM client_verification_events cve WHERE cve.client_profile_id=cp.id)))`;
+    if (verification === "legacy") conditions.push(legacyCondition);
+    else if (verification) { values.push(verification); conditions.push(`cp.verification_status=$${values.length} AND NOT ${legacyCondition}`); }
     if (["true", "false"].includes(active)) { values.push(active === "true"); conditions.push(`u.is_active=$${values.length}`); }
     const where = conditions.join(" AND ");
     const countValues = [...values]; values.push(limit, (page - 1) * limit);
     const [rows, count] = await Promise.all([
-      pool.query(`SELECT u.id AS user_id,cp.id AS client_profile_id,u.full_name,u.email,u.phone,cc.legal_name AS company_legal_name,cc.country,COALESCE(cp.verification_status,'legacy') AS verification_status,u.is_active,u.created_at,(cp.id IS NULL) AS is_legacy FROM users u LEFT JOIN client_profiles cp ON cp.user_id=u.id LEFT JOIN client_companies cc ON cc.client_profile_id=cp.id WHERE ${where} ORDER BY u.created_at DESC LIMIT $${values.length - 1} OFFSET $${values.length}`, values),
+      pool.query(`SELECT u.id AS user_id,cp.id AS client_profile_id,u.full_name,u.email,u.phone,cc.legal_name AS company_legal_name,cc.country,CASE WHEN ${legacyCondition} THEN 'legacy' ELSE cp.verification_status END AS verification_status,u.is_active,u.created_at,${legacyCondition} AS is_legacy FROM users u LEFT JOIN client_profiles cp ON cp.user_id=u.id LEFT JOIN client_companies cc ON cc.client_profile_id=cp.id WHERE ${where} ORDER BY u.created_at DESC LIMIT $${values.length - 1} OFFSET $${values.length}`, values),
       pool.query(`SELECT COUNT(*)::int AS total FROM users u LEFT JOIN client_profiles cp ON cp.user_id=u.id LEFT JOIN client_companies cc ON cc.client_profile_id=cp.id WHERE ${where}`, countValues),
     ]);
     return res.json({ success: true, data: rows.rows, pagination: { page, limit, total: count.rows[0].total, pages: Math.max(1, Math.ceil(count.rows[0].total / limit)) } });
-  } catch (error) { return res.status(500).json({ success: false, message: "Failed to list Clients", error: error.message }); }
+  } catch (error) { console.error("Failed to list Clients", { error }); return res.status(500).json({ success: false, message: "Failed to list Clients" }); }
 };
 
 export const getClientAsAdmin = async (req, res) => {
   try {
-    const uid = positiveId(req.params.userId); const impact = await clientImpact(pool, uid);
-    if (!impact) return res.status(404).json({ success: false, message: "Client not found" });
-    const detail = await pool.query(`SELECT u.id AS user_id,u.full_name,u.email,u.phone,u.is_active,u.created_at,cp.id AS client_profile_id,cp.designation,cp.declared_vessel_count,cp.verification_status,cc.* FROM users u LEFT JOIN client_profiles cp ON cp.user_id=u.id LEFT JOIN client_companies cc ON cc.client_profile_id=cp.id WHERE u.id=$1 AND u.role_id=3`, [uid]);
-    return res.json({ success: true, data: { client: detail.rows[0], dependencies: impact.counts, has_immutable_history: impact.hasImmutableHistory } });
-  } catch (error) { return res.status(500).json({ success: false, message: "Failed to load Client", error: error.message }); }
+    const data = await loadAdminClient(pool, positiveId(req.params.userId));
+    if (!data) return res.status(404).json({ success: false, message: "Client not found" });
+    return res.json({ success: true, data });
+  } catch (error) { console.error("Failed to load Client", { error }); return res.status(500).json({ success: false, message: "Failed to load Client" }); }
 };
 
 export const getClientDeletionImpact = async (req, res) => {
@@ -220,23 +227,49 @@ export const getClientDeletionImpact = async (req, res) => {
 };
 
 export const updateClientAsAdmin = async (req, res) => {
-  const client = await pool.connect();
   try {
-    const uid = positiveId(req.params.userId); await client.query("BEGIN");
-    const target = await client.query(`SELECT u.id,cp.id AS profile_id FROM users u LEFT JOIN client_profiles cp ON cp.user_id=u.id WHERE u.id=$1 AND u.role_id=3 FOR UPDATE OF u`, [uid]);
-    if (!target.rows.length) throw Object.assign(new Error("Client not found"), { status: 404 });
-    const { user = {}, profile = {}, company = {} } = req.body || {};
-    if (user.email !== undefined) { const email=normalizedEmail(user.email); if (!validEmail(email)) throw Object.assign(new Error("A valid email is required"),{status:400}); const duplicate=await client.query(`SELECT id FROM users WHERE LOWER(email)=LOWER($1) AND id<>$2`,[email,uid]); if(duplicate.rows.length) throw Object.assign(new Error("Email is already in use"),{status:409}); user.email=email; }
-    const updateAllowed = async (table, map, obj, key, value) => { const sets=[]; const values=[]; for(const [field,column] of Object.entries(map)) if(field in obj){values.push(obj[field]);sets.push(`${column}=$${values.length}`);} if(!sets.length)return; values.push(value); await client.query(`UPDATE ${table} SET ${sets.join(", ")} WHERE ${key}=$${values.length}`,values); };
-    await updateAllowed("users",{full_name:"full_name",email:"email",phone:"phone",is_active:"is_active"},user,"id",uid);
-    const pid=target.rows[0].profile_id;
-    if (pid) {
-      await updateAllowed("client_profiles",{designation:"designation",declared_vessel_count:"declared_vessel_count"},profile,"id",pid);
-      const companyMap={legal_name:"legal_name",company_type:"company_type",registered_address:"registered_address",country:"country",registration_number:"registration_number",website:"website",imo_company_number:"imo_company_number",tax_number:"tax_number",authorized_representative_name:"authorized_representative_name",authorized_representative_designation:"authorized_representative_designation",authorized_representative_email:"authorized_representative_email",authorized_representative_phone:"authorized_representative_phone"};
-      if (Object.keys(company).length) { const existing=await client.query(`SELECT id FROM client_companies WHERE client_profile_id=$1`,[pid]); if(!existing.rows.length) throw Object.assign(new Error("Client company record is missing"),{status:409}); for(const field of ["registration_number","imo_company_number"]){if(company[field]){const duplicate=await client.query(`SELECT id FROM client_companies WHERE LOWER(TRIM(${field}))=LOWER(TRIM($1)) AND client_profile_id<>$2 LIMIT 1`,[company[field],pid]);if(duplicate.rows.length)throw Object.assign(new Error(`${field.replaceAll("_"," ")} is already in use`),{status:409});}} await updateAllowed("client_companies",companyMap,company,"client_profile_id",pid); }
-    } else if (Object.keys(profile).length || Object.keys(company).length) throw Object.assign(new Error("Legacy Client has no editable profile/company record"),{status:409});
-    await writeAdminAudit(client,{actorUserId:req.user.id,action:"client.edited",targetType:"client",targetId:uid,summary:"Updated permitted Client account/profile/company fields"}); await client.query("COMMIT"); return res.json({success:true,message:"Client updated"});
-  } catch(error){await client.query("ROLLBACK");return res.status(error.status||500).json({success:false,message:error.status?error.message:"Failed to update Client"});} finally{client.release();}
+    const data = await updateAdminClient(positiveId(req.params.userId), req.body, req.user.id);
+    return res.json({ success: true, message: "Client updated", data });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ success: false, code: error.code, message: error.message, ...(error.fieldErrors ? { field_errors: error.fieldErrors } : {}) });
+    console.error("Failed to update Client", { error });
+    return res.status(500).json({ success: false, message: "Failed to update Client" });
+  }
+};
+
+export const updateClientVesselsAsAdmin = async (req, res) => {
+  try {
+    const data = await updateAdminClientVessels(positiveId(req.params.userId), req.body, req.user.id);
+    return res.json({ success: true, message: "Client fleet updated", data });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ success: false, code: error.code, message: error.message, ...(error.fieldErrors ? { field_errors: error.fieldErrors } : {}) });
+    console.error("Failed to update Client fleet", { error });
+    return res.status(500).json({ success: false, message: "Failed to update Client fleet" });
+  }
+};
+
+export const updateClientServicesAsAdmin = async (req, res) => {
+  try {
+    const data = await updateAdminClientServices(positiveId(req.params.userId), req.body, req.user.id);
+    return res.json({ success: true, message: "Client required services updated", data });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ success: false, code: error.code, message: error.message, ...(error.fieldErrors ? { field_errors: error.fieldErrors } : {}) });
+    console.error("Failed to update Client services", { error });
+    return res.status(500).json({ success: false, message: "Failed to update Client services" });
+  }
+};
+
+export const getClientDocumentDownloadUrlAsAdmin = async (req, res) => {
+  try {
+    const userId = positiveId(req.params.userId);
+    const documentId = positiveId(req.params.documentId);
+    const result = await pool.query(`SELECT d.s3_key FROM users u JOIN client_profiles cp ON cp.user_id=u.id JOIN client_verification_documents d ON d.client_profile_id=cp.id WHERE u.id=$1 AND u.role_id=3 AND d.id=$2 AND d.is_current=TRUE`, [userId, documentId]);
+    if (!result.rows.length) return res.status(404).json({ success: false, message: "Verification document not found" });
+    const key = result.rows[0].s3_key;
+    if (typeof key !== "string" || !key.startsWith("client-verifications/") || key.includes("..") || key.includes("\\")) return res.status(404).json({ success: false, message: "Verification document not found" });
+    const signed = createPresignedGetUrl({ key, expiresInSeconds: 600 });
+    return res.json({ success: true, url: signed.url, expiresAt: signed.expiresAt });
+  } catch (error) { console.error("Failed to sign Client document", { error }); return res.status(500).json({ success: false, message: "Failed to create private document URL" }); }
 };
 
 const queueClientDocuments = async (client, profileId) => {
@@ -246,8 +279,8 @@ const queueClientDocuments = async (client, profileId) => {
 };
 
 export const deleteClientAsAdmin = async (req,res)=>{
-  if(req.body?.confirmation!=="DELETE")return res.status(400).json({success:false,message:"Type DELETE to confirm"}); const client=await pool.connect();
-  try{const uid=positiveId(req.params.userId);await client.query("BEGIN");const impact=await clientImpact(client,uid);if(!impact)throw Object.assign(new Error("Client not found"),{status:404});await client.query(`SELECT id FROM users WHERE id=$1 FOR UPDATE`,[uid]);if(impact.hasImmutableHistory)throw Object.assign(new Error("Client has business history and must be deactivated and anonymized"),{status:409,code:"IMMUTABLE_HISTORY"});const pid=impact.target.client_profile_id;await queueClientDocuments(client,pid);if(pid){await client.query(`DELETE FROM admin_notifications WHERE entity_type='client_registration' AND entity_id=$1`,[String(pid)]);await client.query(`DELETE FROM client_verification_documents WHERE client_profile_id=$1`,[pid]);await client.query(`DELETE FROM client_verification_events WHERE client_profile_id=$1`,[pid]);await client.query(`DELETE FROM client_required_services WHERE client_profile_id=$1`,[pid]);await client.query(`DELETE FROM client_onboarding_vessels WHERE client_profile_id=$1`,[pid]);await client.query(`DELETE FROM client_companies WHERE client_profile_id=$1`,[pid]);await client.query(`DELETE FROM client_profiles WHERE id=$1`,[pid]);}await client.query(`DELETE FROM admin_notifications WHERE recipient_user_id=$1`,[uid]);await client.query(`DELETE FROM users WHERE id=$1 AND role_id=3`,[uid]);await writeAdminAudit(client,{actorUserId:req.user.id,action:"client.deleted",targetType:"client",targetId:uid,summary:`Permanently deleted dependency-free Client ${impact.target.full_name}`});await client.query("COMMIT");return res.json({success:true,message:"Client permanently deleted; private document cleanup queued"});}catch(error){await client.query("ROLLBACK");return res.status(error.status||500).json({success:false,code:error.code,message:error.status?error.message:"Failed to delete Client"});}finally{client.release();}
+  const reason=textOrNull(req.body?.reason);if(req.body?.confirmation!=="DELETE"||!reason)return res.status(400).json({success:false,message:"Type DELETE and provide an administrative reason"}); const client=await pool.connect();
+  try{const uid=positiveId(req.params.userId);await client.query("BEGIN");const impact=await clientImpact(client,uid);if(!impact)throw Object.assign(new Error("Client not found"),{status:404});await client.query(`SELECT id FROM users WHERE id=$1 FOR UPDATE`,[uid]);if(impact.hasImmutableHistory)throw Object.assign(new Error("Client has business history and must be deactivated and anonymized"),{status:409,code:"IMMUTABLE_HISTORY"});const pid=impact.target.client_profile_id;await queueClientDocuments(client,pid);if(pid){await client.query(`DELETE FROM admin_notifications WHERE entity_type='client_registration' AND entity_id=$1`,[String(pid)]);await client.query(`DELETE FROM client_verification_documents WHERE client_profile_id=$1`,[pid]);await client.query(`DELETE FROM client_verification_events WHERE client_profile_id=$1`,[pid]);await client.query(`DELETE FROM client_required_services WHERE client_profile_id=$1`,[pid]);await client.query(`DELETE FROM client_onboarding_vessels WHERE client_profile_id=$1`,[pid]);await client.query(`DELETE FROM client_companies WHERE client_profile_id=$1`,[pid]);await client.query(`DELETE FROM client_profiles WHERE id=$1`,[pid]);}await client.query(`DELETE FROM admin_notifications WHERE recipient_user_id=$1`,[uid]);await client.query(`DELETE FROM users WHERE id=$1 AND role_id=3`,[uid]);await writeAdminAudit(client,{actorUserId:req.user.id,action:"client.deleted",targetType:"client",targetId:uid,summary:`Permanently deleted dependency-free Client ${impact.target.full_name}`,reason});await client.query("COMMIT");return res.json({success:true,message:"Client permanently deleted; private document cleanup queued"});}catch(error){await client.query("ROLLBACK");if(error.status)return res.status(error.status).json({success:false,code:error.code,message:error.message});console.error("Failed to delete Client",{error});return res.status(500).json({success:false,message:"Failed to delete Client"});}finally{client.release();}
 };
 
 export const deactivateClientAsAdmin=async(req,res)=>{

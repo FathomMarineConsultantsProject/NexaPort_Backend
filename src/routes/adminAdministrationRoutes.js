@@ -11,6 +11,9 @@ import {
   getClientDeletionImpact,
   deleteClientAsAdmin,
   deactivateClientAsAdmin,
+  getClientDocumentDownloadUrlAsAdmin,
+  updateClientServicesAsAdmin,
+  updateClientVesselsAsAdmin,
 } from "../controllers/adminAdministrationController.js";
 
 const router = express.Router();
@@ -25,6 +28,9 @@ router.get("/clients", listClientsAsAdmin);
 router.get("/clients/:userId/deletion-impact", getClientDeletionImpact);
 router.get("/clients/:userId", getClientAsAdmin);
 router.patch("/clients/:userId", updateClientAsAdmin);
+router.put("/clients/:userId/onboarding-vessels", updateClientVesselsAsAdmin);
+router.put("/clients/:userId/required-services", updateClientServicesAsAdmin);
+router.get("/clients/:userId/documents/:documentId/download-url", getClientDocumentDownloadUrlAsAdmin);
 router.delete("/clients/:userId", deleteClientAsAdmin);
 router.post("/clients/:userId/deactivate-anonymize", deactivateClientAsAdmin);
 
