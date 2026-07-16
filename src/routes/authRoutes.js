@@ -1,5 +1,6 @@
 import express from "express";
-import { register, login, getMe } from "../controllers/authController.js";
+import { register, login, getMe, sendForgotPasswordOtp,
+  resetForgottenPassword, } from "../controllers/authController.js";
 import {
   presignConsultantUpload,
   registerConsultant,
@@ -23,5 +24,14 @@ router.post("/register-consultant/upload-url", presignConsultantUpload);
 router.post("/register-consultant", registerConsultant);
 router.post("/login", login);
 router.get("/me", requireAuth, getMe);
+router.post(
+  "/forgot-password/send-otp",
+  sendForgotPasswordOtp
+);
+
+router.post(
+  "/forgot-password/reset",
+  resetForgottenPassword
+);
 
 export default router;

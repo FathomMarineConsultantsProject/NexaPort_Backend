@@ -1,6 +1,12 @@
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import { pool } from "../config/db.js";
+import { sendPasswordResetOtp } from "../services/emailService.js";
+import {
+  generateOtp,
+  hashOtp,
+  verifyOtpHash,
+} from "../services/passwordResetService.js";
 
 export const createToken = (user) => {
   return jwt.sign(
@@ -225,5 +231,424 @@ export const getMe = async (req, res) => {
       success: false,
       message: "Failed to fetch profile",
     });
+  }
+};
+
+const validateNewPassword = (password) => {
+  return (
+    typeof password === "string" &&
+    password.length >= 8 &&
+    /[A-Za-z]/.test(password) &&
+    /\d/.test(password)
+  );
+};
+
+const normalizeEmail = (email) => {
+  return String(email || "")
+    .trim()
+    .toLowerCase();
+};
+
+/**
+ * Step 1:
+ * User submits email and receives OTP.
+ *
+ * POST /api/auth/forgot-password/send-otp
+ *
+ * Body:
+ * {
+ *   "email": "user@example.com"
+ * }
+ */
+export const sendForgotPasswordOtp = async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    const email = normalizeEmail(req.body.email);
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: "Email is required",
+      });
+    }
+
+    if (!/^\S+@\S+\.\S+$/.test(email)) {
+      return res.status(400).json({
+        success: false,
+        message: "Enter a valid email address",
+      });
+    }
+
+    const userResult = await client.query(
+      `
+      SELECT
+        id,
+        full_name,
+        email,
+        is_active
+      FROM users
+      WHERE LOWER(email) = $1
+      LIMIT 1
+      `,
+      [email]
+    );
+
+    /*
+     * Generic response prevents outsiders from checking
+     * which email addresses are registered.
+     */
+    if (!userResult.rows.length) {
+      return res.json({
+        success: true,
+        message:
+          "If this email is registered, an OTP has been sent.",
+      });
+    }
+
+    const user = userResult.rows[0];
+
+    if (!user.is_active) {
+      return res.json({
+        success: true,
+        message:
+          "If this email is registered, an OTP has been sent.",
+      });
+    }
+
+    const expiryMinutes = Number(
+      process.env.PASSWORD_RESET_OTP_EXPIRY_MINUTES || 10
+    );
+
+    const otp = generateOtp();
+    const otpHash = hashOtp(otp);
+
+    await client.query("BEGIN");
+
+    /*
+     * Disable all previous unused OTPs for this user.
+     */
+    await client.query(
+      `
+      UPDATE password_reset_otps
+      SET used_at = CURRENT_TIMESTAMP
+      WHERE user_id = $1
+        AND used_at IS NULL
+      `,
+      [user.id]
+    );
+
+    await client.query(
+      `
+      INSERT INTO password_reset_otps (
+        user_id,
+        email,
+        otp_hash,
+        attempts,
+        expires_at
+      )
+      VALUES (
+        $1,
+        $2,
+        $3,
+        0,
+        CURRENT_TIMESTAMP + ($4 * INTERVAL '1 minute')
+      )
+      `,
+      [
+        user.id,
+        email,
+        otpHash,
+        expiryMinutes,
+      ]
+    );
+
+    await sendPasswordResetOtp({
+      email,
+      fullName: user.full_name,
+      otp,
+    });
+
+    await client.query("COMMIT");
+
+    return res.json({
+      success: true,
+      message: "OTP sent successfully",
+      data: {
+        email,
+        expires_in_minutes: expiryMinutes,
+      },
+    });
+  } catch (error) {
+    await client.query("ROLLBACK");
+
+    console.error("Send forgot password OTP error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to send OTP",
+      error:
+        process.env.NODE_ENV === "development"
+          ? error.message
+          : undefined,
+    });
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * Step 2:
+ * User submits email, OTP and new password.
+ *
+ * POST /api/auth/forgot-password/reset
+ *
+ * Body:
+ * {
+ *   "email": "user@example.com",
+ *   "otp": "123456",
+ *   "new_password": "Password123",
+ *   "confirm_password": "Password123"
+ * }
+ */
+export const resetForgottenPassword = async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    const email = normalizeEmail(req.body.email);
+
+    const otp = String(req.body.otp || "").trim();
+
+    const newPassword = req.body.new_password;
+    const confirmPassword = req.body.confirm_password;
+
+    if (
+      !email ||
+      !otp ||
+      !newPassword ||
+      !confirmPassword
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "email, otp, new_password and confirm_password are required",
+      });
+    }
+
+    if (!/^\d{6}$/.test(otp)) {
+      return res.status(400).json({
+        success: false,
+        message: "OTP must contain exactly 6 digits",
+      });
+    }
+
+    if (newPassword !== confirmPassword) {
+      return res.status(400).json({
+        success: false,
+        message: "Passwords do not match",
+      });
+    }
+
+    if (!validateNewPassword(newPassword)) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Password must be at least 8 characters and include letters and numbers",
+      });
+    }
+
+    const maxAttempts = Number(
+      process.env.PASSWORD_RESET_MAX_ATTEMPTS || 5
+    );
+
+    await client.query("BEGIN");
+
+    const otpResult = await client.query(
+      `
+      SELECT
+        pro.id,
+        pro.user_id,
+        pro.email,
+        pro.otp_hash,
+        pro.attempts,
+        pro.expires_at,
+        pro.used_at,
+        u.password_hash,
+        u.is_active
+      FROM password_reset_otps pro
+      INNER JOIN users u
+        ON u.id = pro.user_id
+      WHERE LOWER(pro.email) = $1
+        AND pro.used_at IS NULL
+      ORDER BY pro.created_at DESC
+      LIMIT 1
+      FOR UPDATE
+      `,
+      [email]
+    );
+
+    if (!otpResult.rows.length) {
+      await client.query("ROLLBACK");
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Invalid or expired OTP. Request a new OTP.",
+      });
+    }
+
+    const record = otpResult.rows[0];
+
+    if (!record.is_active) {
+      await client.query("ROLLBACK");
+
+      return res.status(403).json({
+        success: false,
+        message: "Account is inactive",
+      });
+    }
+
+    if (Number(record.attempts) >= maxAttempts) {
+      await client.query(
+        `
+        UPDATE password_reset_otps
+        SET used_at = CURRENT_TIMESTAMP
+        WHERE id = $1
+        `,
+        [record.id]
+      );
+
+      await client.query("COMMIT");
+
+      return res.status(429).json({
+        success: false,
+        message:
+          "Maximum OTP attempts exceeded. Request a new OTP.",
+      });
+    }
+
+    if (
+      new Date(record.expires_at).getTime() <
+      Date.now()
+    ) {
+      await client.query(
+        `
+        UPDATE password_reset_otps
+        SET used_at = CURRENT_TIMESTAMP
+        WHERE id = $1
+        `,
+        [record.id]
+      );
+
+      await client.query("COMMIT");
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "OTP has expired. Request a new OTP.",
+      });
+    }
+
+    const otpMatches = verifyOtpHash(
+      otp,
+      record.otp_hash
+    );
+
+    if (!otpMatches) {
+      await client.query(
+        `
+        UPDATE password_reset_otps
+        SET attempts = attempts + 1
+        WHERE id = $1
+        `,
+        [record.id]
+      );
+
+      await client.query("COMMIT");
+
+      return res.status(400).json({
+        success: false,
+        message: "Invalid OTP",
+      });
+    }
+
+    const samePassword = await bcrypt.compare(
+      newPassword,
+      record.password_hash
+    );
+
+    if (samePassword) {
+      await client.query("ROLLBACK");
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "New password must be different from the current password",
+      });
+    }
+
+    const newPasswordHash = await bcrypt.hash(
+      newPassword,
+      12
+    );
+
+    await client.query(
+      `
+      UPDATE users
+      SET
+        password_hash = $1,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = $2
+      `,
+      [
+        newPasswordHash,
+        record.user_id,
+      ]
+    );
+
+    await client.query(
+      `
+      UPDATE password_reset_otps
+      SET used_at = CURRENT_TIMESTAMP
+      WHERE id = $1
+      `,
+      [record.id]
+    );
+
+    /*
+     * Disable any other active OTP belonging to the user.
+     */
+    await client.query(
+      `
+      UPDATE password_reset_otps
+      SET used_at = CURRENT_TIMESTAMP
+      WHERE user_id = $1
+        AND used_at IS NULL
+      `,
+      [record.user_id]
+    );
+
+    await client.query("COMMIT");
+
+    return res.json({
+      success: true,
+      message:
+        "Password changed successfully. You can now login using your new password.",
+    });
+  } catch (error) {
+    await client.query("ROLLBACK");
+
+    console.error("Reset forgotten password error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to change password",
+      error:
+        process.env.NODE_ENV === "development"
+          ? error.message
+          : undefined,
+    });
+  } finally {
+    client.release();
   }
 };
