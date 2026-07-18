@@ -55,7 +55,7 @@ export const getPlatformStats = async (_req, res) => {
 
     const actualPortsTotal = Number(stats.ports_total || 0);
 
-    const displayedPortsTotal = actualPortsTotal * 10;
+    const displayedPortsTotal = actualPortsTotal;
 
     const actualGlobalCoverageTotal =
       maritimeProfessionalsTotal + actualPortsTotal;
