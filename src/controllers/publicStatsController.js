@@ -53,13 +53,15 @@ export const getPlatformStats = async (_req, res) => {
       0
     );
 
-    const portsTotal = Number(stats.ports_total || 0);
+    const actualPortsTotal = Number(stats.ports_total || 0);
+
+    const displayedPortsTotal = actualPortsTotal * 10;
 
     const actualGlobalCoverageTotal =
-      maritimeProfessionalsTotal + portsTotal;
+      maritimeProfessionalsTotal + actualPortsTotal;
 
     const globalPresenceScore =
-      actualGlobalCoverageTotal * 10;
+      (maritimeProfessionalsTotal + displayedPortsTotal) * 10;
 
     res.set(
       "Cache-Control",
@@ -72,7 +74,11 @@ export const getPlatformStats = async (_req, res) => {
         maritime_professionals_total:
           maritimeProfessionalsTotal,
 
-        ports_total: portsTotal,
+        ports_total:
+          displayedPortsTotal,
+
+        actual_ports_total:
+          actualPortsTotal,
 
         actual_global_coverage_total:
           actualGlobalCoverageTotal,
