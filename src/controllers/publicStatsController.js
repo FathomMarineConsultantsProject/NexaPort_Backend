@@ -61,11 +61,11 @@ export const getPlatformStats = async (_req, res) => {
       maritimeProfessionalsTotal + actualPortsTotal;
 
     const globalPresenceScore =
-      (maritimeProfessionalsTotal + displayedPortsTotal) * 10;
+      actualGlobalCoverageTotal * 10;
 
     res.set(
       "Cache-Control",
-      "public, max-age=60, s-maxage=120"
+      "no-store, no-cache, must-revalidate"
     );
 
     return res.json({
