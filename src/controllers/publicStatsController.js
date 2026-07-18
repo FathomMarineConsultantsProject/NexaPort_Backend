@@ -40,28 +40,33 @@ export const getPlatformStats = async (_req, res) => {
     const stats = result.rows[0];
 
     const breakdown = {
-      nexaport_consultants: Number(stats.nexaport_consultants || 0),
-      flag_inspectors: Number(stats.flag_inspectors || 0),
-      accredited_inspectors: Number(stats.accredited_inspectors || 0),
+      nexaport_consultants: Number(
+        stats.nexaport_consultants || 0
+      ),
+
+      flag_inspectors: Number(
+        stats.flag_inspectors || 0
+      ),
+
+      accredited_inspectors: Number(
+        stats.accredited_inspectors || 0
+      ),
+
       appointed_ship_surveyors: Number(
         stats.appointed_ship_surveyors || 0
       ),
     };
 
-    const maritimeProfessionalsTotal = Object.values(breakdown).reduce(
-      (sum, count) => sum + count,
-      0
+    const maritimeProfessionalsTotal = Object.values(
+      breakdown
+    ).reduce((sum, count) => sum + count, 0);
+
+    const portsTotal = Number(
+      stats.ports_total || 0
     );
 
-    const actualPortsTotal = Number(stats.ports_total || 0);
-
-    const displayedPortsTotal = actualPortsTotal;
-
-    const actualGlobalCoverageTotal =
-      maritimeProfessionalsTotal + actualPortsTotal;
-
-    const globalPresenceScore =
-      actualGlobalCoverageTotal;
+    const globalPresenceTotal =
+      maritimeProfessionalsTotal + portsTotal;
 
     res.set(
       "Cache-Control",
@@ -70,28 +75,24 @@ export const getPlatformStats = async (_req, res) => {
 
     return res.json({
       success: true,
+
       data: {
         maritime_professionals_total:
           maritimeProfessionalsTotal,
 
         ports_total:
-          displayedPortsTotal,
-
-        actual_ports_total:
-          actualPortsTotal,
-
-        actual_global_coverage_total:
-          actualGlobalCoverageTotal,
+          portsTotal,
 
         global_presence_score:
-          globalPresenceScore,
+          globalPresenceTotal,
 
         breakdown,
 
         directory_entries_total:
           maritimeProfessionalsTotal,
 
-        updated_at: new Date().toISOString(),
+        updated_at:
+          new Date().toISOString(),
       },
     });
   } catch (error) {
