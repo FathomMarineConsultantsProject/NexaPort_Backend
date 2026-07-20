@@ -172,8 +172,8 @@ export const registerClient = async (req, res) => {
   } catch {
     return res.status(400).json({ success: false, message: "One or more document confirmations are invalid or expired." });
   }
-  const categories = new Set(documents.filter((doc) => doc.draftId === identity.draftId).map((doc) => doc.category));
-  if (documents.length !== DOCUMENT_CATEGORIES.length || categories.size !== DOCUMENT_CATEGORIES.length || DOCUMENT_CATEGORIES.some((category) => !categories.has(category))) return res.status(400).json({ success: false, message: "Upload exactly one current file for every required verification document." });
+  const categories = new Set(documents.map((document) => document.category));
+  if (documents.some((document) => document.draftId !== identity.draftId || !DOCUMENT_CATEGORIES.includes(document.category)) || categories.size !== documents.length) return res.status(400).json({ success: false, message: "Upload at most one file for each verification document category." });
 
   const client = await pool.connect();
   try {

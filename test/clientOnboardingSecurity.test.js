@@ -127,6 +127,12 @@ test("client creation remains server-controlled as role 3 with pending verificat
   assert.doesNotMatch(controller, /email_verification_challenges|sendClientRegistration/i);
 });
 
+test("client verification documents are optional without allowing duplicate categories", async () => {
+  const controller = await readFile(new URL("../src/controllers/clientRegistrationController.js", import.meta.url), "utf8");
+  assert.doesNotMatch(controller, /documents\.length !== DOCUMENT_CATEGORIES\.length/);
+  assert.match(controller, /categories\.size !== documents\.length/);
+});
+
 test("generic public registration cannot accept role 1 or role 2", async () => {
   const controller = await readFile(new URL("../src/controllers/authController.js", import.meta.url), "utf8");
   assert.match(controller, /passwordHash,\s*3,\s*phone/);
