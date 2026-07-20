@@ -80,9 +80,18 @@ export const createClientRegistrationDraft = async (req, res) => {
 
 const registrationIdentity = (req, res) => {
   try {
-    return verifyRegistrationDraftToken(getRegistrationBearer(req));
+    const token =
+      req.headers["x-registration-draft-token"] ||
+      getRegistrationBearer(req);
+
+    return verifyRegistrationDraftToken(token);
   } catch {
-    res.status(401).json({ success: false, message: "A valid registration draft token is required." });
+    res.status(401).json({
+      success: false,
+      message:
+        "A valid registration draft token is required.",
+    });
+
     return null;
   }
 };
