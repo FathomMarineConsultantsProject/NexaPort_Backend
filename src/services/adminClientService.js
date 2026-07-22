@@ -96,7 +96,7 @@ export const loadAdminClient = async (queryable, userId) => {
     (SELECT COUNT(*)::int FROM vessels WHERE created_by_user_id=$1 AND is_active=TRUE) AS vessel_count,
     (SELECT COUNT(*)::int FROM quotations q JOIN service_requests sr ON sr.id=q.service_request_id WHERE sr.requester_user_id=$1 AND q.status='accepted') AS accepted_quotation_count,
     (SELECT COUNT(*)::int FROM expert_reviews WHERE reviewer_user_id=$1) AS review_count`, [userId, ACTIVE_REQUEST_STATUSES]);
-  const recent = await queryable.query(`SELECT id,title,service_type,service_category,status,moderation_status,required_by,created_at FROM service_requests WHERE requester_user_id=$1 ORDER BY created_at DESC,id DESC LIMIT 5`, [userId]);
+  const recent = await queryable.query(`SELECT id,title,service_type,service_category,service_type_other,status,moderation_status,required_by,created_at FROM service_requests WHERE requester_user_id=$1 ORDER BY created_at DESC,id DESC LIMIT 5`, [userId]);
   const op = summary.rows[0];
   const missingFormalRegistration = !profileId || (!row.verification_submitted_at && history.rows.length === 0);
   const hasImmutableHistory = [op.total_service_requests, op.vessel_count, op.accepted_quotation_count, op.review_count].some((value) => Number(value) > 0);

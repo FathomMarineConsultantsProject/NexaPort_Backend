@@ -4,10 +4,58 @@ import { deleteServiceRequestById } from "../services/serviceRequestService.js";
 import { createServiceRequestApprovedNotifications } from "../services/adminNotificationService.js";
 import { writeAdminAudit } from "../services/adminAuditService.js";
 
+const SERVICE_TYPES = new Set(["Audit", "Inspection", "Survey", "Other"]);
+
+const validateServiceSelection = ({ serviceType, serviceCategory, serviceTypeOther }) => {
+  const normalizedType = typeof serviceType === "string" ? serviceType.trim() : "";
+  const normalizedCategory = typeof serviceCategory === "string" ? serviceCategory.trim() : "";
+  const normalizedOther = typeof serviceTypeOther === "string" ? serviceTypeOther.trim() : "";
+  const fieldErrors = {};
+
+  if (!SERVICE_TYPES.has(normalizedType)) {
+    fieldErrors.serviceType = "Select a valid service type.";
+  }
+
+  if (normalizedType === "Other") {
+    if (!normalizedOther) {
+      fieldErrors.serviceTypeOther = "Please describe the required service.";
+    } else if (normalizedOther.length < 3) {
+      fieldErrors.serviceTypeOther = "Service details must be at least 3 characters.";
+    } else if (normalizedOther.length > 500) {
+      fieldErrors.serviceTypeOther = "Service details must be 500 characters or fewer.";
+    }
+  } else if (SERVICE_TYPES.has(normalizedType) && (!normalizedCategory || normalizedCategory === "Other")) {
+    fieldErrors.serviceCategory = "Select a valid service category.";
+  }
+
+  return {
+    fieldErrors,
+    serviceType: normalizedType,
+    serviceCategory: normalizedType === "Other" ? "Other" : normalizedCategory,
+    serviceTypeOther: normalizedType === "Other" ? normalizedOther : null,
+  };
+};
+
+const sendValidationError = (res, fieldErrors) => res.status(400).json({
+  success: false,
+  code: "SERVICE_REQUEST_VALIDATION_FAILED",
+  message: "Please correct the highlighted fields.",
+  field_errors: fieldErrors,
+});
+
+const serviceSummary = (request) => {
+  if (request.service_type !== "Other") {
+    return String(request.service_category || request.service_type || "").trim();
+  }
+  const details = String(request.service_type_other || "").trim();
+  return details ? `Other: ${details.slice(0, 120)}` : "Other";
+};
+
 const mapRequestRow = (row) => ({
   id: row.id,
   serviceType: row.service_type,
   serviceCategory: row.service_category,
+  serviceTypeOther: row.service_type_other ?? null,
   title: row.title,
   scopeOfWork: row.scope_of_work,
   urgency: row.urgency,
@@ -45,6 +93,8 @@ const mapRequestRow = (row) => ({
 
 const serializeApprovedServiceRequestForConsultant = (row) => ({
   id: row.id,
+  serviceType: row.service_type,
+  serviceTypeOther: row.service_type_other ?? null,
   inspectionType: row.inspection_type,
   vesselType: row.vessel_type,
   inspectionDate: row.inspection_date,
@@ -79,6 +129,7 @@ export const createServiceRequest = async (req, res) => {
     const {
       serviceType,
       serviceCategory,
+      serviceTypeOther,
       title,
       scopeOfWork,
       urgency,
@@ -96,11 +147,12 @@ export const createServiceRequest = async (req, res) => {
       requiredCertification,
     } = req.body;
 
-    if (!serviceType || !serviceCategory || !title || !scopeOfWork) {
-      return res.status(400).json({
-        success: false,
-        message: "serviceType, serviceCategory, title and scopeOfWork are required",
-      });
+    const serviceSelection = validateServiceSelection({ serviceType, serviceCategory, serviceTypeOther });
+    const fieldErrors = { ...serviceSelection.fieldErrors };
+    if (!String(title || "").trim()) fieldErrors.title = "Request title is required.";
+    if (!String(scopeOfWork || "").trim()) fieldErrors.scopeOfWork = "Scope of work is required.";
+    if (Object.keys(fieldErrors).length) {
+      return sendValidationError(res, fieldErrors);
     }
 
     await client.query("BEGIN");
@@ -122,6 +174,7 @@ export const createServiceRequest = async (req, res) => {
       INSERT INTO service_requests (
         service_type,
         service_category,
+        service_type_other,
         title,
         scope_of_work,
         urgency,
@@ -144,15 +197,16 @@ export const createServiceRequest = async (req, res) => {
       )
       VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,
-        $9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21
+        $9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22
       )
       RETURNING *
       `,
       [
-        serviceType,
-        serviceCategory,
-        title,
-        scopeOfWork,
+        serviceSelection.serviceType,
+        serviceSelection.serviceCategory,
+        serviceSelection.serviceTypeOther,
+        String(title).trim(),
+        String(scopeOfWork).trim(),
         urgency || "routine",
         budgetUsd || null,
         requiredBy || null,
@@ -187,7 +241,6 @@ export const createServiceRequest = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to create service request",
-      error: error.message,
     });
   } finally {
     client.release();
@@ -210,20 +263,26 @@ export const getServiceRequests = async (req, res) => {
         conditions.push(`(
           sr.service_category ILIKE $${values.length}
           OR sr.service_type ILIKE $${values.length}
+          OR sr.service_type_other ILIKE $${values.length}
           OR sr.vessel_type ILIKE $${values.length}
           OR sr.port_name ILIKE $${values.length}
         )`);
       }
       if (type && type !== "all") {
         values.push(type);
-        conditions.push(`LOWER(COALESCE(NULLIF(TRIM(sr.service_category), ''), sr.service_type)) = LOWER($${values.length})`);
+        conditions.push(`LOWER(sr.service_type) = LOWER($${values.length})`);
       }
 
       const result = await pool.query(
         `
         SELECT
           sr.id,
-          COALESCE(NULLIF(TRIM(sr.service_category), ''), NULLIF(TRIM(sr.service_type), '')) AS inspection_type,
+          sr.service_type,
+          sr.service_type_other,
+          CASE
+            WHEN sr.service_type = 'Other' THEN CONCAT('Other — ', sr.service_type_other)
+            ELSE COALESCE(NULLIF(TRIM(sr.service_category), ''), NULLIF(TRIM(sr.service_type), ''))
+          END AS inspection_type,
           sr.vessel_type,
           sr.required_by AS inspection_date,
           sr.port_name AS port_of_inspection
@@ -250,6 +309,9 @@ export const getServiceRequests = async (req, res) => {
         OR sr.port_name ILIKE $${values.length}
         OR sr.vessel_name ILIKE $${values.length}
         OR sr.service_category ILIKE $${values.length}
+        OR sr.service_type ILIKE $${values.length}
+        OR sr.service_type_other ILIKE $${values.length}
+        OR sr.scope_of_work ILIKE $${values.length}
       )`);
     }
 
@@ -324,7 +386,12 @@ export const getServiceRequestById = async (req, res) => {
         `
         SELECT
           sr.id,
-          COALESCE(NULLIF(TRIM(sr.service_category), ''), NULLIF(TRIM(sr.service_type), '')) AS inspection_type,
+          sr.service_type,
+          sr.service_type_other,
+          CASE
+            WHEN sr.service_type = 'Other' THEN CONCAT('Other — ', sr.service_type_other)
+            ELSE COALESCE(NULLIF(TRIM(sr.service_category), ''), NULLIF(TRIM(sr.service_type), ''))
+          END AS inspection_type,
           sr.vessel_type,
           sr.required_by AS inspection_date,
           sr.port_name AS port_of_inspection
@@ -505,8 +572,6 @@ export const updateServiceRequest = async (req, res) => {
     }
 
     const fieldMap = {
-      serviceType: "service_type",
-      serviceCategory: "service_category",
       title: "title",
       scopeOfWork: "scope_of_work",
       urgency: "urgency",
@@ -525,12 +590,33 @@ export const updateServiceRequest = async (req, res) => {
     };
     const clientAllowed = new Set([
       "serviceType", "serviceCategory", "title", "scopeOfWork", "urgency",
+      "serviceTypeOther",
       "budgetUsd", "requiredBy", "vesselName", "imoNumber", "vesselType",
       "flagState", "portName", "country", "eta", "locationSummary",
       "requiredCertification",
     ]);
     const updates = [];
     const values = [];
+    const serviceFields = ["serviceType", "serviceCategory", "serviceTypeOther"];
+    if (serviceFields.some((field) => field in req.body)) {
+      const serviceSelection = validateServiceSelection({
+        serviceType: "serviceType" in req.body ? req.body.serviceType : request.service_type,
+        serviceCategory: "serviceCategory" in req.body ? req.body.serviceCategory : request.service_category,
+        serviceTypeOther: "serviceTypeOther" in req.body ? req.body.serviceTypeOther : request.service_type_other,
+      });
+      if (Object.keys(serviceSelection.fieldErrors).length) {
+        await client.query("ROLLBACK");
+        return sendValidationError(res, serviceSelection.fieldErrors);
+      }
+      for (const [column, value] of [
+        ["service_type", serviceSelection.serviceType],
+        ["service_category", serviceSelection.serviceCategory],
+        ["service_type_other", serviceSelection.serviceTypeOther],
+      ]) {
+        values.push(value);
+        updates.push(`${column} = $${values.length}`);
+      }
+    }
     for (const [bodyField, column] of Object.entries(fieldMap)) {
       if (!(bodyField in req.body) || (roleId === 3 && !clientAllowed.has(bodyField))) continue;
       values.push(req.body[bodyField] === "" ? null : req.body[bodyField]);
@@ -562,7 +648,6 @@ export const updateServiceRequest = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to update service request",
-      error: error.message,
     });
   } finally {
     client.release();
@@ -590,7 +675,7 @@ export const approveServiceRequest = async (req, res) => {
       await client.query("ROLLBACK");
       return res.status(409).json({ success: false, code: "REQUEST_ALREADY_APPROVED", message: "Service request is already approved" });
     }
-    const inspectionType = String(request.service_category || request.service_type || "").trim();
+    const inspectionType = serviceSummary(request);
     const vesselType = String(request.vessel_type || "").trim();
     const port = String(request.port_name || "").trim();
     if (!inspectionType || !vesselType || !request.required_by || !port) {
