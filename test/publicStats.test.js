@@ -17,11 +17,11 @@ const response = () => ({
 test("public platform statistics require no JWT and return only aggregate counts", async () => {
   const original = pool.query;
   pool.query = async (sql) => {
-    assert.match(sql, /u\.role_id=2 AND u\.is_active=TRUE/);
-    assert.match(sql, /JOIN public\.experts e ON e\.user_id=u\.id/);
-    assert.match(sql, /public\.flag_inspectors WHERE COALESCE\(is_active,TRUE\)=TRUE/);
-    assert.match(sql, /public\.accredited_inspectors WHERE COALESCE\(is_active,TRUE\)=TRUE/);
-    assert.match(sql, /public\.appointed_ship_surveyors WHERE COALESCE\(is_active,TRUE\)=TRUE/);
+    assert.match(sql, /u\.role_id\s*=\s*2\s+AND\s+u\.is_active\s*=\s*TRUE/);
+    assert.match(sql, /JOIN public\.experts e\s+ON e\.user_id\s*=\s*u\.id/);
+    assert.match(sql, /public\.flag_inspectors\s+WHERE COALESCE\(is_active,\s*TRUE\)\s*=\s*TRUE/);
+    assert.match(sql, /public\.accredited_inspectors\s+WHERE COALESCE\(is_active,\s*TRUE\)\s*=\s*TRUE/);
+    assert.match(sql, /public\.appointed_ship_surveyors\s+WHERE COALESCE\(is_active,\s*TRUE\)\s*=\s*TRUE/);
     return { rows: [{ nexaport_consultants: 10, flag_inspectors: 20, accredited_inspectors: 30, appointed_ship_surveyors: 40 }] };
   };
   try {

@@ -23,6 +23,7 @@ import adminAdministrationRoutes from "./routes/adminAdministrationRoutes.js";
 import flagRoutes from "./routes/flagRoutes.js";
 import appointedSurveyorRoutes from "./routes/appointedSurveyorRoutes.js";
 import publicStatsRoutes from "./routes/publicStatsRoutes.js";
+import maritimeDirectoryRoutes from "./routes/maritimeDirectoryRoutes.js";
 import {
   accreditationSchemeRouter,
   accreditedInspectorRouter,
@@ -54,6 +55,7 @@ app.use("/api/public", publicStatsRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/client-onboarding", clientOnboardingRoutes);
 app.use("/api/admin/client-registrations", adminClientRegistrationRoutes);
+app.use("/api/admin/maritime-directory", maritimeDirectoryRoutes);
 app.use("/api/admin-notifications", adminNotificationRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/admin", adminAdministrationRoutes);
