@@ -4,10 +4,14 @@ import test from "node:test";
 import jwt from "jsonwebtoken";
 import { pool } from "../src/config/db.js";
 import {
+  approveClientRegistration,
+} from "../src/controllers/adminClientRegistrationController.js";
+import {
   confirmClientRegistrationDocument,
   createClientRegistrationDraft,
   presignClientRegistrationDocument,
 } from "../src/controllers/clientRegistrationController.js";
+import { allowRoles, requireAuth } from "../src/middlewares/authMiddleware.js";
 import {
   createRegistrationDraftToken,
   normalizeEmail,
@@ -27,6 +31,113 @@ const mockResponse = () => ({
   body: null,
   status(code) { this.statusCode = code; return this; },
   json(payload) { this.body = payload; return this; },
+});
+
+const runApproval = async ({ status = "pending", hasCompany = true, hasServices = true, documentCount = 0 } = {}) => {
+  const calls = [];
+  const documents = [
+    "company_registration_certificate",
+    "authorisation_letter",
+    "company_identification_or_tax_certificate",
+  ].slice(0, documentCount).map((document_category, index) => ({
+    id: index + 1,
+    document_category,
+    original_filename: `${document_category}.pdf`,
+    mime_type: "application/pdf",
+    size_bytes: 100,
+    is_current: true,
+    uploaded_at: new Date(0),
+  }));
+  const client = {
+    async query(sql, params) {
+      calls.push({ sql, params });
+      if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql)) return { rows: [] };
+      if (sql.includes("SELECT cp.*")) return { rows: [{ id: 42, user_id: 7, verification_status: status }] };
+      if (sql.includes("FROM client_companies")) return { rows: hasCompany ? [{ id: 1, client_profile_id: 42 }] : [] };
+      if (sql.includes("FROM client_onboarding_vessels")) return { rows: [] };
+      if (sql.includes("FROM client_required_services")) return { rows: hasServices ? [{ id: 1, service_name_snapshot: "Condition Inspection" }] : [] };
+      if (sql.includes("FROM client_verification_documents")) return { rows: documents };
+      if (sql.includes("FROM client_verification_events")) return { rows: [] };
+      if (sql.startsWith("UPDATE client_profiles") || sql.startsWith("INSERT INTO client_verification_events")) return { rows: [] };
+      throw new Error(`Unexpected approval query: ${sql}`);
+    },
+    release() {},
+  };
+  const originalConnect = pool.connect;
+  pool.connect = async () => client;
+  const res = mockResponse();
+  try {
+    await approveClientRegistration({ params: { id: "42" }, body: {}, user: { id: 99, role_id: 1 } }, res);
+  } finally {
+    pool.connect = originalConnect;
+  }
+  return { calls, res };
+};
+
+test("pending Client approval accepts zero, one, two, or three verification documents", async (t) => {
+  for (const documentCount of [0, 1, 2, 3]) {
+    await t.test(`${documentCount} documents`, async () => {
+      const { calls, res } = await runApproval({ documentCount });
+      assert.equal(res.statusCode, 200);
+      assert.equal(res.body.verification_status, "approved");
+      assert.equal(calls.some(({ sql }) => sql === "COMMIT"), true);
+      assert.equal(calls.some(({ sql }) => sql.startsWith("INSERT INTO client_verification_events")), true);
+      const update = calls.find(({ sql }) => sql.startsWith("UPDATE client_profiles"));
+      assert.match(update.sql, /verified_at=CURRENT_TIMESTAMP/);
+      assert.match(update.sql, /verified_by_user_id=\$1/);
+      assert.deepEqual(update.params, [99, null, 42]);
+    });
+  }
+});
+
+test("approval still requires company details and at least one service", async (t) => {
+  await t.test("missing company", async () => {
+    const { res } = await runApproval({ hasCompany: false });
+    assert.equal(res.statusCode, 409);
+    assert.equal(res.body.message, "Company details are required.");
+  });
+  await t.test("missing services", async () => {
+    const { res } = await runApproval({ hasServices: false });
+    assert.equal(res.statusCode, 409);
+    assert.equal(res.body.message, "At least one required service is required.");
+  });
+});
+
+test("approved and rejected Client registrations cannot be approved", async (t) => {
+  for (const status of ["approved", "rejected"]) {
+    await t.test(status, async () => {
+      const { res } = await runApproval({ status });
+      assert.equal(res.statusCode, 409);
+      assert.equal(res.body.message, "Only pending registrations can be approved.");
+    });
+  }
+});
+
+test("approval authorization rejects unauthenticated, Consultant, and Client requests", async () => {
+  const unauthenticated = mockResponse();
+  await requireAuth({ headers: {} }, unauthenticated, () => assert.fail("Unauthenticated request passed"));
+  assert.equal(unauthenticated.statusCode, 401);
+
+  const guard = allowRoles(1);
+  for (const role_id of [2, 3]) {
+    const denied = mockResponse();
+    guard({ user: { role_id } }, denied, () => assert.fail(`Role ${role_id} passed`));
+    assert.equal(denied.statusCode, 403);
+  }
+});
+
+test("approval no longer contains a verification-document eligibility check", async () => {
+  const controller = await readFile(new URL("../src/controllers/adminClientRegistrationController.js", import.meta.url), "utf8");
+  assert.doesNotMatch(controller, /All required current verification documents|DOCUMENT_CATEGORIES\.some/);
+});
+
+test("signed document download remains Super Admin-only and current-document scoped", async () => {
+  const routes = await readFile(new URL("../src/routes/adminClientRegistrationRoutes.js", import.meta.url), "utf8");
+  const controller = await readFile(new URL("../src/controllers/adminClientRegistrationController.js", import.meta.url), "utf8");
+  assert.match(routes, /router\.use\(requireAuth, allowRoles\(1\)\)/);
+  assert.match(routes, /documents\/:documentId\/download-url/);
+  assert.match(controller, /client_profile_id=\$2 AND is_current=TRUE/);
+  assert.match(controller, /createPresignedGetUrl/);
 });
 
 test("registration draft endpoint returns a signed token for an available normalized email without SMTP", async () => {

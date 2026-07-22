@@ -1,6 +1,6 @@
 import { pool } from "../config/db.js";
 import { createPresignedGetUrl } from "../utils/s3Presign.js";
-import { DOCUMENT_CATEGORIES, publicDocument } from "../services/clientDocumentService.js";
+import { publicDocument } from "../services/clientDocumentService.js";
 
 const validStatus = (value) => ["pending", "approved", "rejected"].includes(value);
 
@@ -70,9 +70,6 @@ export const approveClientRegistration = async (req, res) => {
     if (registration.profile.verification_status !== "pending") throw Object.assign(new Error("Only pending registrations can be approved."), { status: 409 });
     if (!registration.company) throw Object.assign(new Error("Company details are required."), { status: 409 });
     if (!registration.services.length) throw Object.assign(new Error("At least one required service is required."), { status: 409 });
-    const categories = new Set(registration.documents.map((document) => document.document_category));
-    if (DOCUMENT_CATEGORIES.some((category) => !categories.has(category))) throw Object.assign(new Error("All required current verification documents are required."), { status: 409 });
-
     for (const onboarding of registration.vessels) {
       if (onboarding.converted_vessel_id || !onboarding.imo_number) continue;
       if (!validImo(onboarding.imo_number)) throw Object.assign(new Error(`Invalid IMO number for ${onboarding.vessel_name}.`), { status: 409 });
