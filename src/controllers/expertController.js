@@ -212,7 +212,7 @@ export const createExpert = async (req, res) => {
         });
       }
     }
-
+    
     await client.query("BEGIN");
 
     const expertResult = await client.query(
@@ -346,11 +346,6 @@ export const updateExpert = async (req, res) => {
       languages,
     } = req.body;
 
-    const premiumValue =
-      Number(req.user.role_id) === 1
-        ? is_premium
-        : undefined;
-
     await client.query("BEGIN");
 
     const finalSpecialtyIds = Array.isArray(specialties)
@@ -401,7 +396,7 @@ export const updateExpert = async (req, res) => {
         day_rate_usd,
         years_experience,
         availability,
-        premiumValue,
+        is_premium,
         id,
       ]
     );
