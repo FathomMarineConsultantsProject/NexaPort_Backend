@@ -199,7 +199,8 @@ export const updateMaritimeEntity = async (entityId, payload, actorUserId) => {
     if (normalized.directoryTypes) { await replaceTypes(client, entityId, normalized.directoryTypes); changed.push("directory types"); }
     const collections = Object.keys(COLLECTIONS).filter((name) => payload[name] !== undefined);
     if (collections.length) { await writeCollections(client, entityId, payload, true); changed.push(...collections); }
-    await writeAdminAudit(client, { actorUserId, action: "maritime_directory_updated", targetType: "maritime_directory_entity", targetId: entityId, summary: `Updated sections: ${changed.join(", ") || "none"}` });
+    const currentTypes = await client.query(`SELECT directory_type FROM ${T.entityTypes} WHERE entity_id=$1 ORDER BY directory_type`, [entityId]);
+    await writeAdminAudit(client, { actorUserId, action: "maritime_directory_updated", targetType: "maritime_directory_entity", targetId: entityId, summary: `Updated sections: ${changed.join(", ") || "none"}; types: ${currentTypes.rows.map((row) => row.directory_type).join(", ")}` });
     await client.query("COMMIT");
     return await getMaritimeEntity(entityId);
   } catch (error) { await client.query("ROLLBACK"); throw error; }
