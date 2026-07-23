@@ -1,4 +1,3 @@
-import crypto from "crypto";
 import { pool } from "../config/db.js";
 
 const getExpertFullData = async (expertId) => {
