@@ -100,3 +100,27 @@ test("migrations preserve staging, normalize children, and map every supported e
   for (const type of ["service_provider", "ship_agent", "supplier", "shipyard", "tug_boat"]) assert.match(mapping, new RegExp(type));
   assert.match(mapping, /ON CONFLICT \(entity_id, source_record_key\) WHERE source_record_key IS NOT NULL/);
 });
+
+test("provider mapping promotes authenticated contacts and remains rerun-safe", async () => {
+  const mapping = await source("../Maritime_Directory_Migration/002_map_imported_provider_data.sql");
+  const update = mapping.slice(mapping.indexOf("UPDATE public.maritime_directory_entities"), mapping.indexOf("INSERT INTO public.maritime_directory_entities"));
+  const insert = mapping.slice(mapping.indexOf("INSERT INTO public.maritime_directory_entities"), mapping.indexOf("CREATE TEMP TABLE"));
+  for (const [column, key] of [
+    ["public_email", "public_business_email"],
+    ["public_phone", "public_business_phone"],
+    ["public_address", "public_address"],
+    ["city", "city"],
+  ]) {
+    assert.match(update, new RegExp(`${column} = COALESCE\\(NULLIF\\(btrim\\(e\\.${column}\\), ''\\), NULLIF\\(btrim\\(i\\.extra_data #>> '\\{authenticated_contacts,${key}\\}'\\), ''\\)\\)`));
+    assert.match(insert, new RegExp(`NULLIF\\(btrim\\(i\\.extra_data #>> '\\{authenticated_contacts,${key}\\}'\\), ''\\)`));
+  }
+  for (const column of ["country", "website"]) {
+    assert.match(update, new RegExp(`${column} = COALESCE\\(NULLIF\\(btrim\\(e\\.${column}\\), ''\\), NULLIF\\(btrim\\(i\\.${column}\\), ''\\)\\)`));
+    assert.match(insert, new RegExp(`NULLIF\\(btrim\\(i\\.${column}\\), ''\\)`));
+  }
+  assert.match(update, /extra_data = COALESCE\(e\.extra_data, '\{\}'::jsonb\) \|\| COALESCE\(i\.extra_data, '\{\}'::jsonb\)/);
+  assert.doesNotMatch(update, /review_status\s*=/);
+  assert.match(insert, /WHERE NOT EXISTS/);
+  assert.match(mapping, /ON CONFLICT \(entity_id, source_record_key\).*DO UPDATE/g);
+  assert.match(mapping, /staging_authenticated_email_without_canonical_email/);
+});
