@@ -124,3 +124,36 @@ test("provider mapping promotes authenticated contacts and remains rerun-safe", 
   assert.match(mapping, /ON CONFLICT \(entity_id, source_record_key\).*DO UPDATE/g);
   assert.match(mapping, /staging_authenticated_email_without_canonical_email/);
 });
+
+test("mapping replaces an imported canonical banner with a valid staging logo", async () => {
+  const mapping = await source("../Maritime_Directory_Migration/002_map_imported_provider_data.sql");
+  const update = mapping.slice(mapping.indexOf("UPDATE public.maritime_directory_entities"), mapping.indexOf("INSERT INTO public.maritime_directory_entities"));
+  assert.ok(update.indexOf("i.logo_url NOT ILIKE '%/company-banners/%'") < update.indexOf("e.logo_url ILIKE '%/company-banners/%'"));
+  assert.match(update, /WHEN e\.logo_url ILIKE '%\/company-banners\/%'[\s\S]*?THEN NULL/);
+  assert.match(mapping, /CASE WHEN NULLIF\(btrim\(i\.logo_url\), ''\) IS NOT NULL[\s\S]*?i\.logo_url NOT ILIKE '%\/company-banners\/%'[\s\S]*?THEN btrim\(i\.logo_url\) ELSE NULL END/);
+});
+
+test("mapping preserves a valid canonical logo when staging has no logo", async () => {
+  const mapping = await source("../Maritime_Directory_Migration/002_map_imported_provider_data.sql");
+  const update = mapping.slice(mapping.indexOf("UPDATE public.maritime_directory_entities"), mapping.indexOf("INSERT INTO public.maritime_directory_entities"));
+  assert.ok(update.indexOf("e.logo_url NOT ILIKE '%/company-banners/%'") < update.indexOf("i.logo_url NOT ILIKE '%/company-banners/%'"));
+  assert.match(update, /ELSE NULLIF\(btrim\(e\.logo_url\), ''\)/);
+});
+
+test("mapping preserves a non-empty manual_admin logo", async () => {
+  const mapping = await source("../Maritime_Directory_Migration/002_map_imported_provider_data.sql");
+  assert.match(mapping, /WHEN e\.data_source = 'manual_admin' AND NULLIF\(btrim\(e\.logo_url\), ''\) IS NOT NULL THEN btrim\(e\.logo_url\)/);
+});
+
+test("logo correction leaves authenticated contact mapping intact", async () => {
+  const mapping = await source("../Maritime_Directory_Migration/002_map_imported_provider_data.sql");
+  for (const key of ["public_business_email", "public_business_phone", "public_address", "city"]) {
+    assert.match(mapping, new RegExp(`authenticated_contacts,${key}`));
+  }
+  assert.match(mapping, /extra_data = COALESCE\(e\.extra_data, '\{\}'::jsonb\) \|\| COALESCE\(i\.extra_data, '\{\}'::jsonb\)/);
+});
+
+test("logo correction remains entity-rerun-safe", async () => {
+  const mapping = await source("../Maritime_Directory_Migration/002_map_imported_provider_data.sql");
+  assert.match(mapping, /WHERE NOT EXISTS \([\s\S]*?source_provider_id[\s\S]*?source_key[\s\S]*?source_url[\s\S]*?\);/);
+});
