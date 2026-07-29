@@ -7,6 +7,10 @@ import { deleteServiceRequestById } from "../src/services/serviceRequestService.
 const source = (relativePath) =>
   readFile(new URL(`../${relativePath}`, import.meta.url), "utf8");
 
+test("application entrypoint imports with every expert route export present", async () => {
+  await assert.doesNotReject(import("../src/app.js"));
+});
+
 test("role guard rejects non-Super Admins and admits role 1", () => {
   const guard = allowRoles(1);
   let nextCalled = false;
