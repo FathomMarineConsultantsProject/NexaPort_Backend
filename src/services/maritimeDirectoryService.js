@@ -116,6 +116,20 @@ const writeCollections = async (client, entityId, payload, partial = false) => {
 };
 
 const detailQueries = Object.entries(COLLECTIONS).map(([name, config]) => [name.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`), `SELECT * FROM ${config.table} WHERE entity_id=$1 ORDER BY created_at,id`]);
+const uniqueCollectionRows = (rows) => {
+  if (!Array.isArray(rows)) return [];
+  const seen = new Set();
+  return rows.filter((row) => {
+    const sourceKey = clean(row?.source_record_key);
+    const id = clean(row?.id);
+    const key = sourceKey ? `source:${sourceKey}` : id ? `id:${id}` : null;
+    if (!key || !seen.has(key)) {
+      if (key) seen.add(key);
+      return true;
+    }
+    return false;
+  });
+};
 
 export const getMaritimeEntity = async (entityId, queryable = pool) => {
   if (!UUID.test(String(entityId))) throw notFound();
@@ -123,7 +137,7 @@ export const getMaritimeEntity = async (entityId, queryable = pool) => {
   if (!entity.rows.length) throw notFound();
   const types = await queryable.query(`SELECT directory_type FROM ${T.entityTypes} WHERE entity_id=$1 ORDER BY directory_type`, [entityId]);
   const result = { entity: entity.rows[0], directory_types: types.rows.map((row) => row.directory_type) };
-  for (const [name, sql] of detailQueries) result[name] = (await queryable.query(sql, [entityId])).rows;
+  for (const [name, sql] of detailQueries) result[name] = uniqueCollectionRows((await queryable.query(sql, [entityId])).rows);
   return result;
 };
 

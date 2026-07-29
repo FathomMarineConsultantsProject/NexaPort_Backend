@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { allowRoles, requireAuth } from "../src/middlewares/authMiddleware.js";
-import { createMaritimeEntity, listMaritimeEntities, validateMaritimePayload } from "../src/services/maritimeDirectoryService.js";
+import { createMaritimeEntity, getMaritimeEntity, listMaritimeEntities, validateMaritimePayload } from "../src/services/maritimeDirectoryService.js";
 
 const ID = "123e4567-e89b-42d3-a456-426614174000";
 const source = (relativePath) => readFile(new URL(`../${relativePath}`, import.meta.url), "utf8");
@@ -25,6 +25,36 @@ test("routes apply Super Admin authorization to the entire module", async () => 
   const [routes, app] = await Promise.all([source("src/routes/maritimeDirectoryRoutes.js"), source("src/app.js")]);
   assert.match(routes, /router\.use\(requireAuth, allowRoles\(1\)\)/);
   assert.match(app, /app\.use\("\/api\/admin\/maritime-directory", maritimeDirectoryRoutes\)/);
+});
+
+test("detail uses separate child queries, returns arrays, and deduplicates stable records", async () => {
+  const duplicateId = "123e4567-e89b-42d3-a456-426614174001";
+  const calls = [];
+  const queryable = {
+    query: async (sql) => {
+      calls.push(sql);
+      if (/SELECT \* FROM public\.maritime_directory_entities/.test(sql)) return { rows: [{ id: ID, company_name: "Harbour Services" }] };
+      if (/SELECT directory_type/.test(sql)) return { rows: [{ directory_type: "supplier" }] };
+      if (/maritime_directory_services/.test(sql)) {
+        return { rows: [
+          { id: duplicateId, service_name: "Stores", service_type: "supplier" },
+          { id: duplicateId, service_name: "Stores", service_type: "service_provider" },
+          { id: "123e4567-e89b-42d3-a456-426614174002", source_record_key: "stable-service", service_name: "Repairs" },
+          { id: "123e4567-e89b-42d3-a456-426614174003", source_record_key: "stable-service", service_name: "Repairs" },
+        ] };
+      }
+      if (/maritime_directory_ports/.test(sql)) return { rows: [{ id: "123e4567-e89b-42d3-a456-426614174004", port_name: "Chennai" }] };
+      return { rows: null };
+    },
+  };
+  const detail = await getMaritimeEntity(ID, queryable);
+  assert.equal(detail.services.length, 2);
+  assert.equal(detail.ports.length, 1);
+  for (const name of ["services", "ports", "branches", "certifications", "class_approvals", "memberships", "products", "faqs"]) {
+    assert.ok(Array.isArray(detail[name]));
+  }
+  assert.equal(calls.filter((sql) => /maritime_directory_(services|ports|branches|certifications|class_approvals|memberships|products|faqs)/.test(sql)).length, 8);
+  assert.ok(calls.every((sql) => !(/maritime_directory_services/.test(sql) && /maritime_directory_ports/.test(sql))));
 });
 
 test("type allowlist rejects unknown values and permits multiple supported types", () => {
