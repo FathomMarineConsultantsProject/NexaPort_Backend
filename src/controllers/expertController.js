@@ -13,15 +13,194 @@ const EXPERT_PHOTO_TYPES = new Set([
 const EXPERT_PHOTO_MAX_BYTES = 3 * 1024 * 1024;
 const EXPERT_CV_MAX_BYTES = 5 * 1024 * 1024;
 const EXPERT_PHOTO_UPLOAD_EXPIRY_SECONDS = 300;
+const GENERATED_MEDIA_SUFFIX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(img|pdf)$/i;
+const flagSlugSql =
+  "LOWER(REGEXP_REPLACE(TRIM(mfs.name), '[^a-zA-Z0-9]+', '-', 'g'))";
+
+const normalizeSubmittedPorts = (ports) => {
+  if (!Array.isArray(ports)) {
+    const error = new Error("Ports must be an array");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const seen = new Set();
+  const normalized = [];
+
+  ports.forEach((port) => {
+    if (typeof port !== "string") {
+      const error = new Error("Ports must contain valid port names");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const clean = port.trim();
+    if (!clean || clean.length > 200) {
+      const error = new Error("Ports must contain valid port names");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const key = clean.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      normalized.push(clean);
+    }
+  });
+
+  return normalized;
+};
+
+const validateCanonicalPorts = async (client, submittedPorts) => {
+  const normalizedPorts = normalizeSubmittedPorts(submittedPorts);
+  if (!normalizedPorts.length) return [];
+
+  const normalizedNames = normalizedPorts.map((port) => port.toLowerCase());
+  const result = await client.query(
+    `
+    SELECT port_name
+    FROM ports
+    WHERE is_active = true
+      AND LOWER(TRIM(port_name)) = ANY($1::text[])
+    `,
+    [normalizedNames]
+  );
+
+  const canonicalByName = new Map(
+    result.rows.map((row) => [row.port_name.trim().toLowerCase(), row.port_name])
+  );
+
+  if (canonicalByName.size !== normalizedNames.length) {
+    const error = new Error("Every selected port must exist and be active");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return normalizedNames.map((name) => canonicalByName.get(name));
+};
+
+const optionalText = (value) => {
+  if (value === undefined) return undefined;
+  const clean = String(value ?? "").trim();
+  return clean || null;
+};
+
+const requiredText = (value) => {
+  if (value === undefined) return undefined;
+  return String(value ?? "").trim();
+};
+
+const jsonValue = (value, fallback) => {
+  if (value === undefined) return undefined;
+  return JSON.stringify(value ?? fallback);
+};
+
+const updateRegistrationDetails = async (client, expertId, details = {}) => {
+  if (!details || typeof details !== "object" || Array.isArray(details)) return;
+
+  const existing = await client.query(
+    `SELECT id FROM expert_registration_details WHERE expert_id = $1 LIMIT 1`,
+    [expertId]
+  );
+
+  if (!existing.rows.length) return;
+
+  const fieldMap = [
+    ["phone_number", requiredText(details.phone_number)],
+    ["mobile_number", optionalText(details.mobile_number)],
+    ["nationality", requiredText(details.nationality)],
+    ["employment_status", requiredText(details.employment_status)],
+    ["company_name", optionalText(details.company_name)],
+    ["dob_dd", requiredText(details.dob_dd)],
+    ["dob_mm", requiredText(details.dob_mm)],
+    ["dob_yyyy", requiredText(details.dob_yyyy)],
+    ["year_started", optionalText(details.year_started)],
+    ["heard_about", requiredText(details.heard_about)],
+    ["street1", requiredText(details.street1)],
+    ["street2", optionalText(details.street2)],
+    ["city", requiredText(details.city)],
+    ["postal_code", requiredText(details.postal_code)],
+    ["country", requiredText(details.country)],
+    ["state_region", requiredText(details.state_region)],
+    ["discipline", requiredText(details.discipline)],
+    ["rank", requiredText(details.rank)],
+    ["discipline_other", optionalText(details.discipline_other)],
+    ["rank_other", optionalText(details.rank_other)],
+    ["qualifications_other", optionalText(details.qualifications_other)],
+    ["vessel_types_other", optionalText(details.vessel_types_other)],
+    ["shoreside_experience_other", optionalText(details.shoreside_experience_other)],
+    ["surveying_experience_other", optionalText(details.surveying_experience_other)],
+    [
+      "vessel_type_surveying_experience_other",
+      optionalText(details.vessel_type_surveying_experience_other),
+    ],
+    ["accreditations_other", optionalText(details.accreditations_other)],
+    ["courses_completed_other", optionalText(details.courses_completed_other)],
+    ["qualifications", jsonValue(details.qualifications, [])],
+    [
+      "experience_by_qualification",
+      jsonValue(details.experience_by_qualification, {}),
+    ],
+    ["vessel_types", jsonValue(details.vessel_types, [])],
+    ["shoreside_experience", jsonValue(details.shoreside_experience, [])],
+    ["surveying_experience", jsonValue(details.surveying_experience, [])],
+    [
+      "vessel_type_surveying_experience",
+      jsonValue(details.vessel_type_surveying_experience, []),
+    ],
+    ["accreditations", jsonValue(details.accreditations, [])],
+    ["courses_completed", jsonValue(details.courses_completed, [])],
+    ["refs", jsonValue(details.refs, [])],
+    ["inspection_cost", requiredText(details.inspection_cost)],
+    [
+      "marketing_consent",
+      details.marketing_consent === undefined
+        ? undefined
+        : Boolean(details.marketing_consent),
+    ],
+  ].filter(([, value]) => value !== undefined);
+
+  if (!fieldMap.length) return;
+
+  const setSql = fieldMap
+    .map(([column], index) => `${column} = $${index + 1}`)
+    .join(", ");
+  const values = fieldMap.map(([, value]) => value);
+
+  await client.query(
+    `
+    UPDATE expert_registration_details
+    SET ${setSql}, updated_at = CURRENT_TIMESTAMP
+    WHERE expert_id = $${values.length + 1}
+    `,
+    [...values, expertId]
+  );
+};
 
 const getExpertFullData = async (expertId) => {
-  const expertResult = await pool.query(`SELECT * FROM experts WHERE id = $1`, [
-    expertId,
-  ]);
+  const expertResult = await pool.query(
+    `
+    SELECT e.*, u.email AS user_email, u.phone AS user_phone,
+      u.is_active AS user_is_active
+    FROM experts e
+    LEFT JOIN users u ON u.id = e.user_id
+    WHERE e.id = $1
+    `,
+    [expertId]
+  );
 
   if (!expertResult.rows.length) return null;
 
-  const [specialties, certifications, vesselTypes, languages, ports] =
+  const [
+    specialties,
+    certifications,
+    vesselTypes,
+    languages,
+    ports,
+    registrationDetails,
+    flagServices,
+  ] =
     await Promise.all([
       pool.query(
         `
@@ -57,7 +236,51 @@ const getExpertFullData = async (expertId) => {
       pool.query(`SELECT id, port_name FROM expert_ports WHERE expert_id = $1`, [
         expertId,
       ]),
+      pool.query(
+        `SELECT * FROM expert_registration_details WHERE expert_id = $1 LIMIT 1`,
+        [expertId]
+      ),
+      pool.query(
+        `
+        SELECT
+          ef.flag_id,
+          mfs.name AS flag_name,
+          ${flagSlugSql} AS flag_slug,
+          COALESCE(
+            JSON_AGG(
+              JSONB_BUILD_OBJECT(
+                'country', efc.country,
+                'region', efc.region,
+                'location', efc.location,
+                'coverage_note', efc.coverage_note
+              )
+              ORDER BY efc.country ASC, efc.region ASC, efc.location ASC
+            ) FILTER (WHERE efc.id IS NOT NULL),
+            '[]'
+          ) AS coverage
+        FROM expert_flags ef
+        JOIN master_flag_states mfs ON mfs.id = ef.flag_id
+        LEFT JOIN expert_flag_coverage efc
+          ON efc.expert_flag_id = ef.id
+          AND efc.is_active = true
+        WHERE ef.expert_id = $1
+          AND ef.is_active = true
+        GROUP BY ef.flag_id, mfs.name
+        ORDER BY mfs.name ASC
+        `,
+        [expertId]
+      ),
     ]);
+
+  const registrationRow = registrationDetails.rows[0] || null;
+  const {
+    photo_s3_key: photoS3Key,
+    cv_s3_key: cvS3Key,
+    ...safeRegistrationDetails
+  } = registrationRow || {};
+  const photo = photoS3Key
+    ? createPresignedGetUrl({ key: photoS3Key })
+    : null;
 
   return {
     ...expertResult.rows[0],
@@ -66,6 +289,11 @@ const getExpertFullData = async (expertId) => {
     vessel_types: vesselTypes.rows,
     languages: languages.rows,
     ports: ports.rows,
+    flag_services: flagServices.rows,
+    registration_details: registrationRow ? safeRegistrationDetails : null,
+    photo_url: photo?.url || null,
+    photo_expires_at: photo?.expiresAt || null,
+    has_cv: Boolean(cvS3Key),
   };
 };
 
@@ -111,6 +339,12 @@ export const getAllExperts = async (req, res) => {
       `
       SELECT 
         e.*,
+        u.email AS user_email,
+        u.phone AS user_phone,
+        u.is_active AS user_is_active,
+        erd.photo_s3_key,
+        erd.inspection_cost,
+        erd.company_name,
         COALESCE(
           JSON_AGG(DISTINCT JSONB_BUILD_OBJECT('id', ms.id, 'name', ms.name))
           FILTER (WHERE ms.id IS NOT NULL), '[]'
@@ -124,6 +358,8 @@ export const getAllExperts = async (req, res) => {
           FILTER (WHERE mc.id IS NOT NULL), '[]'
         ) AS certifications
       FROM experts e
+      LEFT JOIN users u ON u.id = e.user_id
+      LEFT JOIN expert_registration_details erd ON erd.expert_id = e.id
       LEFT JOIN expert_specialties es ON es.expert_id = e.id
       LEFT JOIN master_specialties ms ON ms.id = es.specialty_id
       LEFT JOIN expert_vessel_types evt ON evt.expert_id = e.id
@@ -131,16 +367,30 @@ export const getAllExperts = async (req, res) => {
       LEFT JOIN expert_certifications ec ON ec.expert_id = e.id
       LEFT JOIN master_certifications mc ON mc.id = ec.certification_id
       ${whereSql}
-      GROUP BY e.id
+      GROUP BY e.id, u.email, u.phone, u.is_active, erd.photo_s3_key,
+        erd.inspection_cost, erd.company_name
       ORDER BY e.created_at DESC
       `,
       values
     );
 
+    const experts = result.rows.map((row) => {
+      const { photo_s3_key: photoS3Key, ...expert } = row;
+      const photo = photoS3Key
+        ? createPresignedGetUrl({ key: photoS3Key })
+        : null;
+
+      return {
+        ...expert,
+        photo_url: photo?.url || null,
+        photo_expires_at: photo?.expiresAt || null,
+      };
+    });
+
     res.json({
       success: true,
-      count: result.rows.length,
-      data: result.rows,
+      count: experts.length,
+      data: experts,
     });
   } catch (error) {
     res.status(500).json({
@@ -195,6 +445,25 @@ const getExpertPhotoUpdateTarget = async (expertId) => {
   );
 
   return result.rows[0] || null;
+};
+
+const validateExpertMediaKey = (key, kind, expertId) => {
+  if (typeof key !== "string" || !key.trim()) return false;
+
+  const cleanKey = key.trim();
+  const extension = kind === "photo" ? "img" : "pdf";
+  const prefix = `consultant-registrations/${
+    kind === "photo" ? "photos" : "cvs"
+  }/${expertId}/`;
+  const suffix = cleanKey.slice(prefix.length);
+
+  return (
+    !cleanKey.includes("..") &&
+    !cleanKey.includes("\\") &&
+    cleanKey.startsWith(prefix) &&
+    GENERATED_MEDIA_SUFFIX.test(suffix) &&
+    suffix.toLowerCase().endsWith(`.${extension}`)
+  );
 };
 
 export const createExpertMediaUploadUrl = async (req, res) => {
@@ -635,9 +904,64 @@ export const updateExpert = async (req, res) => {
       vessel_types,
       ports,
       languages,
+      registration_details,
+      photo_s3_key,
+      cv_s3_key,
     } = req.body;
 
+    if (
+      photo_s3_key !== undefined &&
+      !validateExpertMediaKey(photo_s3_key, "photo", id)
+    ) {
+      const error = new Error("Invalid profile photo key");
+      error.statusCode = 400;
+      throw error;
+    }
+    if (
+      cv_s3_key !== undefined &&
+      !validateExpertMediaKey(cv_s3_key, "cv", id)
+    ) {
+      const error = new Error("Invalid CV key");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const canonicalPorts =
+      ports !== undefined ? await validateCanonicalPorts(client, ports) : null;
+
     await client.query("BEGIN");
+
+    if (photo_s3_key !== undefined || cv_s3_key !== undefined) {
+      const registration = await client.query(
+        `SELECT id FROM expert_registration_details WHERE expert_id = $1 LIMIT 1`,
+        [id]
+      );
+      if (!registration.rows.length) {
+        const error = new Error(
+          "Profile media update is not available for this consultant"
+        );
+        error.statusCode = 409;
+        throw error;
+      }
+
+      const mediaFields = [];
+      const mediaValues = [];
+      if (photo_s3_key !== undefined) {
+        mediaValues.push(photo_s3_key.trim());
+        mediaFields.push(`photo_s3_key = $${mediaValues.length}`);
+      }
+      if (cv_s3_key !== undefined) {
+        mediaValues.push(cv_s3_key.trim());
+        mediaFields.push(`cv_s3_key = $${mediaValues.length}`);
+      }
+      mediaValues.push(id);
+      await client.query(
+        `UPDATE expert_registration_details
+         SET ${mediaFields.join(", ")}, updated_at = CURRENT_TIMESTAMP
+         WHERE expert_id = $${mediaValues.length}`,
+        mediaValues
+      );
+    }
 
     const finalSpecialtyIds = Array.isArray(specialties)
       ? (await Promise.all(
@@ -736,13 +1060,15 @@ export const updateExpert = async (req, res) => {
     if (Array.isArray(ports)) {
       await client.query(`DELETE FROM expert_ports WHERE expert_id = $1`, [id]);
 
-      for (const portName of ports) {
+      for (const portName of canonicalPorts) {
         await client.query(
           `INSERT INTO expert_ports (expert_id, port_name) VALUES ($1, $2)`,
           [id, portName]
         );
       }
     }
+
+    await updateRegistrationDetails(client, id, registration_details);
 
     if (Array.isArray(languages)) {
       await client.query(`DELETE FROM expert_languages WHERE expert_id = $1`, [
@@ -769,9 +1095,9 @@ export const updateExpert = async (req, res) => {
   } catch (error) {
     await client.query("ROLLBACK");
 
-    res.status(500).json({
+    res.status(error.statusCode || 500).json({
       success: false,
-      message: "Failed to update expert",
+      message: error.statusCode ? error.message : "Failed to update expert",
       error: error.message,
     });
   } finally {
@@ -780,30 +1106,9 @@ export const updateExpert = async (req, res) => {
 };
 
 export const deleteExpert = async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const result = await pool.query(
-      `DELETE FROM experts WHERE id = $1 RETURNING *`,
-      [id]
-    );
-
-    if (!result.rows.length) {
-      return res.status(404).json({
-        success: false,
-        message: "Expert not found",
-      });
-    }
-
-    res.json({
-      success: true,
-      message: "Expert deleted successfully",
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Failed to delete expert",
-      error: error.message,
-    });
-  }
+  return res.status(410).json({
+    success: false,
+    code: "DEPENDENCY_AWARE_ADMIN_ENDPOINT_REQUIRED",
+    message: "Use the dependency-aware Super Admin Consultant deletion workflow",
+  });
 };
