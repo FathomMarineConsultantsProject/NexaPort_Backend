@@ -1,5 +1,27 @@
 import { pool } from "../config/db.js";
 
+const finiteNumber = (value) => {
+  const number = Number(value ?? 0);
+  return Number.isFinite(number) ? number : 0;
+};
+
+export const calculateQuotationTotals = (quote, adminMarkupUsd = 0) => {
+  const consultantTotalUsd = [
+    quote.total_quote_usd,
+    quote.travel_cost,
+    quote.accommodation_cost,
+    quote.report_fee,
+    quote.urgency_surcharge,
+  ].reduce((total, value) => total + finiteNumber(value), 0);
+  const markupUsd = finiteNumber(adminMarkupUsd);
+
+  return {
+    consultantTotalUsd,
+    markupUsd,
+    clientTotalUsd: consultantTotalUsd + markupUsd,
+  };
+};
+
 const mapQuotationRow = (row, user) => {
   const roleId = Number(user.role_id);
 
@@ -475,7 +497,8 @@ export const acceptQuotation = async (req, res) => {
 
     const quoteResult = await client.query(
       `
-      SELECT id, service_request_id, expert_id, total_quote_usd
+      SELECT id, service_request_id, expert_id, total_quote_usd,
+             travel_cost, accommodation_cost, report_fee, urgency_surcharge
       FROM quotations
       WHERE id = $1
       `,
@@ -492,9 +515,10 @@ export const acceptQuotation = async (req, res) => {
 
     const quote = quoteResult.rows[0];
 
-    const expertQuoteUsd = Number(quote.total_quote_usd || 0);
-    const markupUsd = Number(adminMarkupUsd || 0);
-    const clientTotalUsd = expertQuoteUsd + markupUsd;
+    const { markupUsd, clientTotalUsd } = calculateQuotationTotals(
+      quote,
+      adminMarkupUsd
+    );
 
     await client.query(
       `
