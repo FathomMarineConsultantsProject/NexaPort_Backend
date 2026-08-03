@@ -1,27 +1,44 @@
-import crypto from "crypto";
-import path from "path";
 import { pool } from "../config/db.js";
-import { createPresignedGetUrl, createPresignedPutUrl } from "../utils/s3Presign.js";
-import { readPrivateObject } from "../services/privateObjectService.js";
-import { extractPdfFields } from "../services/pdfExtractionService.js";
-import { extractXmlFields } from "../services/xmlExtractionService.js";
 import { normalizeFields } from "../services/templateFieldService.js";
 
-const FILES = {
-  pdf: { mimes: ["application/pdf"], extensions: [".pdf"], max: 10 * 1024 * 1024 },
-  xml: { mimes: ["application/xml", "text/xml"], extensions: [".xml"], max: 2 * 1024 * 1024 },
-};
+const SOURCE_TYPES = new Set(["pdf", "xml"]);
+const EXTRACTION_METHODS = new Set(["acroform", "text", "ocr", "nexaport_xml", "generic_xml", "manual"]);
+const FORBIDDEN_SOURCE_KEYS = new Set(["source_s3_key", "sourceS3Key", "key", "file", "fileName", "contentType", "size", "bytes", "base64", "sourceData", "rawPdf", "rawXml"]);
 const clean = (value, max = 255) => String(value ?? "").replace(/[<>\u0000-\u001f]/g, "").trim().slice(0, max);
 const id = (value) => Number.isInteger(Number(value)) && Number(value) > 0 ? Number(value) : null;
 const sendError = (res, error, fallback) => res.status(error.status || 500).json({ success: false, message: error.status ? error.message : fallback });
+const badRequest = (message) => Object.assign(new Error(message), { status: 400 });
+const templateSelect = `SELECT t.*,u.full_name AS consultant_name,u.email AS consultant_email,creator.full_name AS creator_name,creator.email AS creator_email FROM inspection_templates t LEFT JOIN experts e ON e.id=t.expert_id LEFT JOIN users u ON u.id=e.user_id JOIN users creator ON creator.id=t.created_by_user_id`;
 
-export function validateTemplateFile({ fileName, contentType, size }) {
-  const extension = path.extname(clean(fileName)).toLowerCase();
-  const sourceType = extension === ".pdf" ? "pdf" : extension === ".xml" ? "xml" : null;
-  const spec = FILES[sourceType];
-  if (!spec || !spec.extensions.includes(extension) || !spec.mimes.includes(String(contentType).toLowerCase())) return { error: "Upload a PDF (.pdf) or XML (.xml) file with a matching MIME type." };
-  if (!Number.isInteger(Number(size)) || Number(size) <= 0 || Number(size) > spec.max) return { error: `${sourceType.toUpperCase()} files must be ${sourceType === "pdf" ? "10" : "2"} MB or smaller.` };
-  return { sourceType, extension, max: spec.max };
+function rejectSourceContent(body = {}) {
+  const visit = (value) => {
+    if (typeof value === "string" && (/^data:application\/(?:pdf|xml)/i.test(value) || value.startsWith("%PDF-"))) throw badRequest("Original template file content is not accepted.");
+    if (!value || typeof value !== "object") return;
+    for (const [key, nested] of Object.entries(value)) {
+      if (FORBIDDEN_SOURCE_KEYS.has(key)) throw badRequest("Original template files and source-storage metadata are not accepted.");
+      visit(nested);
+    }
+  };
+  visit(body);
+}
+
+function normalizeLayout(input = {}, extractionMethod) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw badRequest("Template layout metadata must be an object.");
+  const method = extractionMethod || input.extractionMethod || input.extractionMode || "manual";
+  if (!EXTRACTION_METHODS.has(method)) throw badRequest("Extraction method is invalid.");
+  const pageCount = input.pageCount == null ? null : Number(input.pageCount);
+  if (pageCount !== null && (!Number.isInteger(pageCount) || pageCount < 1 || pageCount > 25)) throw badRequest("Template page count is invalid.");
+  return { extractionMethod: method, pageCount };
+}
+
+export function validateTemplatePayload(body = {}) {
+  rejectSourceContent(body);
+  const title = clean(body.title, 180);
+  if (!title) throw badRequest("Template title is required.");
+  if (!SOURCE_TYPES.has(body.sourceType)) throw badRequest("Template source type must be PDF or XML.");
+  const fields = normalizeFields(body.fields);
+  if (!fields.length) throw badRequest("At least one normalized field is required.");
+  return { title, description: clean(body.description, 2000) || null, sourceType: body.sourceType, fields, layout: normalizeLayout(body.layout, body.extractionMethod) };
 }
 
 export async function expertIdForUser(queryable, userId) {
@@ -30,107 +47,93 @@ export async function expertIdForUser(queryable, userId) {
   return result.rows[0].id;
 }
 
-async function templateForAccess(queryable, templateId, user, { ownerOnly = false } = {}) {
-  if (!id(templateId)) throw Object.assign(new Error("Template not found."), { status: 404 });
-  const expertId = Number(user.role_id) === 2 ? await expertIdForUser(queryable, user.id) : null;
-  if (ownerOnly && Number(user.role_id) !== 2) throw Object.assign(new Error("Super Admin access is view-only."), { status: 403 });
-  const result = await queryable.query(`SELECT t.*,u.full_name AS consultant_name,u.email AS consultant_email FROM inspection_templates t JOIN experts e ON e.id=t.expert_id JOIN users u ON u.id=e.user_id WHERE t.id=$1${expertId ? " AND t.expert_id=$2" : ""}`, expertId ? [templateId, expertId] : [templateId]);
-  if (!result.rows[0]) throw Object.assign(new Error("Template not found or access denied."), { status: 404 });
-  return result.rows[0];
+export function templatePermissions(template, roleId, expertId = null) {
+  const nexaport = template.template_scope === "nexaport";
+  const ownPrivate = !nexaport && Number(template.expert_id) === Number(expertId);
+  return {
+    canEdit: Number(roleId) === 1 ? nexaport : Number(roleId) === 2 && ownPrivate,
+    canArchive: Number(roleId) === 1 ? nexaport : Number(roleId) === 2 && ownPrivate,
+    canUse: Boolean(template.current_version_number) && template.status !== "archived" && (Number(roleId) === 1 ? nexaport : ownPrivate || (nexaport && template.status === "published")),
+    canDuplicate: Number(roleId) === 2 && nexaport && template.status === "published",
+  };
 }
 
-const publicTemplate = ({ source_s3_key, ...row }) => ({ ...row, has_source_file: Boolean(source_s3_key) });
+async function templateForAccess(queryable, templateId, user, { ownerOnly = false } = {}) {
+  if (!id(templateId)) throw Object.assign(new Error("Template not found."), { status: 404 });
+  const roleId = Number(user.role_id); const expertId = roleId === 2 ? await expertIdForUser(queryable, user.id) : null;
+  const template = (await queryable.query(`${templateSelect} WHERE t.id=$1`, [templateId])).rows[0];
+  const readable = template && (roleId === 1 || (template.template_scope === "private" && Number(template.expert_id) === Number(expertId)) || (template.template_scope === "nexaport" && template.status === "published"));
+  const editable = template && (roleId === 1 ? template.template_scope === "nexaport" : roleId === 2 && template.template_scope === "private" && Number(template.expert_id) === Number(expertId));
+  if (!(ownerOnly ? editable : readable)) throw Object.assign(new Error("Template not found or access denied."), { status: 404 });
+  return { ...template, permissions: templatePermissions(template, roleId, expertId) };
+}
+
+const publicTemplate = ({ source_s3_key, source_file_name, source_mime_type, source_file_size, permissions, ...row }) => ({ ...row, templateScope: row.template_scope, isNexaPortProvided: row.template_scope === "nexaport", permissions });
 
 export const listTemplates = async (req, res) => {
   try {
-    const expertId = Number(req.user.role_id) === 2 ? await expertIdForUser(pool, req.user.id) : null;
-    const result = await pool.query(`SELECT t.*,u.full_name AS consultant_name,u.email AS consultant_email FROM inspection_templates t JOIN experts e ON e.id=t.expert_id JOIN users u ON u.id=e.user_id${expertId ? " WHERE t.expert_id=$1" : ""} ORDER BY t.updated_at DESC`, expertId ? [expertId] : []);
-    return res.json({ success: true, data: result.rows.map(publicTemplate) });
+    const roleId = Number(req.user.role_id); const expertId = roleId === 2 ? await expertIdForUser(pool, req.user.id) : null;
+    const where = roleId === 2 ? " WHERE (t.template_scope='private' AND t.expert_id=$1) OR (t.template_scope='nexaport' AND t.status='published')" : "";
+    const result = await pool.query(`${templateSelect}${where} ORDER BY t.template_scope DESC,t.updated_at DESC`, expertId ? [expertId] : []);
+    return res.json({ success: true, data: result.rows.map((row) => publicTemplate({ ...row, permissions: templatePermissions(row, roleId, expertId) })) });
   } catch (error) { return sendError(res, error, "Unable to load templates."); }
 };
 
-export const createTemplateUploadUrl = async (req, res) => {
-  try {
-    const expertId = await expertIdForUser(pool, req.user.id);
-    const validation = validateTemplateFile(req.body || {});
-    if (validation.error) return res.status(400).json({ success: false, message: validation.error });
-    const fileName = clean(req.body.fileName, 180);
-    const key = `inspection-templates/experts/${expertId}/sources/${crypto.randomUUID()}${validation.extension}`;
-    return res.json({ success: true, data: { uploadUrl: createPresignedPutUrl({ key, contentType: req.body.contentType, expiresIn: 300 }), key, sourceType: validation.sourceType, expiresIn: 300, fileName } });
-  } catch (error) { return sendError(res, error, "Private template upload is not configured."); }
-};
-
 export const createTemplate = async (req, res) => {
+  const client = await pool.connect();
   try {
-    const expertId = await expertIdForUser(pool, req.user.id);
-    const { title, description, key, fileName, contentType, size, sourceType } = req.body || {};
-    const validation = validateTemplateFile({ fileName, contentType, size });
-    if (validation.error || validation.sourceType !== sourceType || !String(key).startsWith(`inspection-templates/experts/${expertId}/sources/`)) return res.status(400).json({ success: false, message: validation.error || "Template object key is invalid." });
-    if (!clean(title, 180)) return res.status(400).json({ success: false, message: "Template title is required." });
-    const uploaded = await readPrivateObject(key, validation.max);
-    if (uploaded.length !== Number(size) || (sourceType === "pdf" ? !uploaded.subarray(0, 5).equals(Buffer.from("%PDF-")) : !uploaded.toString("utf8", 0, 500).replace(/^\uFEFF?\s*/, "").startsWith("<"))) return res.status(400).json({ success: false, message: "Uploaded source does not match the confirmed file metadata." });
-    const result = await pool.query(`INSERT INTO inspection_templates (expert_id,title,description,source_type,source_s3_key,source_file_name,source_mime_type,source_file_size,status,extraction_status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'draft','pending') RETURNING *`, [expertId, clean(title, 180), clean(description, 2000) || null, sourceType, key, clean(fileName, 180), contentType, Number(size)]);
-    return res.status(201).json({ success: true, data: publicTemplate(result.rows[0]) });
-  } catch (error) { return sendError(res, error, "Unable to create template."); }
+    const payload = validateTemplatePayload(req.body || {}); const roleId = Number(req.user.role_id);
+    const expertId = roleId === 2 ? await expertIdForUser(client, req.user.id) : null; const scope = roleId === 1 ? "nexaport" : "private"; const status = scope === "private" ? "published" : "draft";
+    await client.query("BEGIN");
+    const created = await client.query("INSERT INTO inspection_templates (expert_id,template_scope,created_by_user_id,title,description,source_type,status,extraction_status,current_version_number,has_photo_fields) VALUES ($1,$2,$3,$4,$5,$6,$7,'complete',1,$8) RETURNING *", [expertId, scope, req.user.id, payload.title, payload.description, payload.sourceType, status, payload.fields.some((field) => field.type === "photo")]);
+    const version = await client.query("INSERT INTO inspection_template_versions (template_id,version_number,fields_jsonb,layout_jsonb,created_by_user_id) VALUES ($1,1,$2,$3,$4) RETURNING *", [created.rows[0].id, JSON.stringify(payload.fields), JSON.stringify(payload.layout), req.user.id]);
+    await client.query("COMMIT");
+    const row = created.rows[0]; return res.status(201).json({ success: true, data: { ...publicTemplate({ ...row, permissions: templatePermissions(row, roleId, expertId) }), versions: [version.rows[0]] } });
+  } catch (error) { try { await client.query("ROLLBACK"); } catch { /* no open transaction */ } return sendError(res, error, "Unable to create template."); }
+  finally { client.release(); }
 };
 
 export const getTemplate = async (req, res) => {
-  try {
-    const template = await templateForAccess(pool, req.params.id, req.user);
-    const versions = await pool.query("SELECT id,template_id,version_number,fields_jsonb,layout_jsonb,created_by_user_id,created_at FROM inspection_template_versions WHERE template_id=$1 ORDER BY version_number DESC", [template.id]);
-    return res.json({ success: true, data: { ...publicTemplate(template), versions: versions.rows } });
-  } catch (error) { return sendError(res, error, "Unable to load template."); }
-};
-
-export const getTemplateSourceUrl = async (req, res) => {
-  try { const template = await templateForAccess(pool, req.params.id, req.user); return res.json({ success: true, data: createPresignedGetUrl({ key: template.source_s3_key, expiresInSeconds: 300 }) }); }
-  catch (error) { return sendError(res, error, "Unable to create source download URL."); }
+  try { const template = await templateForAccess(pool, req.params.id, req.user); const versions = await pool.query("SELECT id,template_id,version_number,fields_jsonb,layout_jsonb,created_by_user_id,created_at FROM inspection_template_versions WHERE template_id=$1 ORDER BY version_number DESC", [template.id]); return res.json({ success: true, data: { ...publicTemplate(template), versions: versions.rows } }); }
+  catch (error) { return sendError(res, error, "Unable to load template."); }
 };
 
 export const updateTemplate = async (req, res) => {
   try {
-    const template = await templateForAccess(pool, req.params.id, req.user, { ownerOnly: true });
-    const title = req.body.title === undefined ? template.title : clean(req.body.title, 180);
+    rejectSourceContent(req.body || {}); const template = await templateForAccess(pool, req.params.id, req.user, { ownerOnly: true }); const title = req.body.title === undefined ? template.title : clean(req.body.title, 180);
     if (!title) return res.status(400).json({ success: false, message: "Template title is required." });
-    const status = req.body.status === "archived" ? "archived" : template.status;
-    const result = await pool.query("UPDATE inspection_templates SET title=$1,description=$2,status=$3,archived_at=CASE WHEN $3='archived' THEN CURRENT_TIMESTAMP ELSE archived_at END,updated_at=CURRENT_TIMESTAMP WHERE id=$4 RETURNING *", [title, req.body.description === undefined ? template.description : clean(req.body.description, 2000) || null, status, template.id]);
-    return res.json({ success: true, data: publicTemplate(result.rows[0]) });
+    const requestedStatus = ["draft", "published", "archived"].includes(req.body.status) ? req.body.status : template.status;
+    if (template.status === "published" && requestedStatus === "draft") { const completed = await pool.query("SELECT 1 FROM inspection_reports WHERE template_id=$1 AND status='completed' LIMIT 1", [template.id]); if (completed.rows.length) return res.status(409).json({ success: false, message: "A template with completed reports cannot return to draft." }); }
+    const row = (await pool.query("UPDATE inspection_templates SET title=$1,description=$2,status=$3,archived_at=CASE WHEN $3='archived' THEN CURRENT_TIMESTAMP ELSE NULL END,updated_at=CURRENT_TIMESTAMP WHERE id=$4 RETURNING *", [title, req.body.description === undefined ? template.description : clean(req.body.description, 2000) || null, requestedStatus, template.id])).rows[0];
+    return res.json({ success: true, data: publicTemplate({ ...row, permissions: templatePermissions(row, req.user.role_id, template.expert_id) }) });
   } catch (error) { return sendError(res, error, "Unable to update template."); }
-};
-
-export const extractTemplate = async (req, res) => {
-  const client = await pool.connect();
-  let template;
-  try {
-    template = await templateForAccess(client, req.params.id, req.user, { ownerOnly: true });
-    await client.query("UPDATE inspection_templates SET extraction_status='processing',extraction_error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=$1", [template.id]);
-    const bytes = await readPrivateObject(template.source_s3_key, template.source_type === "pdf" ? FILES.pdf.max : FILES.xml.max);
-    const extraction = template.source_type === "pdf" ? await extractPdfFields(bytes) : extractXmlFields(bytes);
-    await client.query("BEGIN");
-    const locked = await client.query("SELECT current_version_number FROM inspection_templates WHERE id=$1 FOR UPDATE", [template.id]);
-    const version = Number(locked.rows[0].current_version_number) + 1;
-    const created = await client.query("INSERT INTO inspection_template_versions (template_id,version_number,fields_jsonb,layout_jsonb,created_by_user_id) VALUES ($1,$2,$3,$4,$5) RETURNING *", [template.id, version, JSON.stringify(extraction.fields), JSON.stringify({ extractionMode: extraction.mode, pageCount: extraction.pageCount || null, message: extraction.message || null }), req.user.id]);
-    await client.query("UPDATE inspection_templates SET extraction_status='complete',current_version_number=$1,has_photo_fields=$2,updated_at=CURRENT_TIMESTAMP WHERE id=$3", [version, extraction.fields.some((field) => field.type === "photo"), template.id]);
-    await client.query("COMMIT");
-    return res.json({ success: true, data: { ...extraction, version: created.rows[0] } });
-  } catch (error) {
-    try { await client.query("ROLLBACK"); if (template) await client.query("UPDATE inspection_templates SET extraction_status='failed',extraction_error=$1,updated_at=CURRENT_TIMESTAMP WHERE id=$2", [clean(error.message, 500), template.id]); } catch { /* preserve original error */ }
-    const safe = error.status ? error : Object.assign(new Error(template?.source_type === "pdf" ? "The PDF is password-protected or malformed." : "The XML file could not be processed."), { status: 400 });
-    return sendError(res, safe, "Unable to extract fields.");
-  } finally { client.release(); }
 };
 
 export const createTemplateVersion = async (req, res) => {
   const client = await pool.connect();
   try {
-    const template = await templateForAccess(client, req.params.id, req.user, { ownerOnly: true });
-    const fields = normalizeFields(req.body.fields);
-    await client.query("BEGIN");
-    const locked = await client.query("SELECT current_version_number FROM inspection_templates WHERE id=$1 FOR UPDATE", [template.id]);
-    const version = Number(locked.rows[0].current_version_number) + 1;
-    const created = await client.query("INSERT INTO inspection_template_versions (template_id,version_number,fields_jsonb,layout_jsonb,created_by_user_id) VALUES ($1,$2,$3,$4,$5) RETURNING *", [template.id, version, JSON.stringify(fields), JSON.stringify(req.body.layout || {}), req.user.id]);
-    await client.query("UPDATE inspection_templates SET current_version_number=$1,has_photo_fields=$2,status='published',updated_at=CURRENT_TIMESTAMP WHERE id=$3", [version, fields.some((field) => field.type === "photo"), template.id]);
+    rejectSourceContent(req.body || {}); const template = await templateForAccess(client, req.params.id, req.user, { ownerOnly: true }); const fields = normalizeFields(req.body.fields);
+    if (!fields.length) throw badRequest("At least one normalized field is required.");
+    const layout = normalizeLayout(req.body.layout);
+    await client.query("BEGIN"); const locked = await client.query("SELECT current_version_number FROM inspection_templates WHERE id=$1 FOR UPDATE", [template.id]); const version = Number(locked.rows[0].current_version_number) + 1;
+    const created = await client.query("INSERT INTO inspection_template_versions (template_id,version_number,fields_jsonb,layout_jsonb,created_by_user_id) VALUES ($1,$2,$3,$4,$5) RETURNING *", [template.id, version, JSON.stringify(fields), JSON.stringify(layout), req.user.id]);
+    const status = template.template_scope === "private" ? "published" : template.status; await client.query("UPDATE inspection_templates SET current_version_number=$1,has_photo_fields=$2,status=$3,extraction_status='complete',updated_at=CURRENT_TIMESTAMP WHERE id=$4", [version, fields.some((field) => field.type === "photo"), status, template.id]);
     await client.query("COMMIT"); return res.status(201).json({ success: true, data: created.rows[0] });
-  } catch (error) { await client.query("ROLLBACK"); return sendError(res, error, "Unable to save template version."); }
+  } catch (error) { try { await client.query("ROLLBACK"); } catch { /* no open transaction */ } return sendError(res, error, "Unable to save template version."); }
+  finally { client.release(); }
+};
+
+export const duplicateTemplate = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const expertId = await expertIdForUser(client, req.user.id); const source = (await client.query(`${templateSelect} WHERE t.id=$1 AND t.template_scope='nexaport' AND t.status='published'`, [req.params.id])).rows[0];
+    if (!source?.current_version_number) return res.status(404).json({ success: false, message: "Published NexaPort template not found." });
+    const sourceVersion = (await client.query("SELECT fields_jsonb,layout_jsonb FROM inspection_template_versions WHERE template_id=$1 AND version_number=$2", [source.id, source.current_version_number])).rows[0];
+    await client.query("BEGIN");
+    const copied = await client.query("INSERT INTO inspection_templates (expert_id,template_scope,created_by_user_id,title,description,source_type,status,extraction_status,current_version_number,has_photo_fields) VALUES ($1,'private',$2,$3,$4,$5,'published','complete',1,$6) RETURNING *", [expertId, req.user.id, `${source.title} Copy`.slice(0, 180), source.description, source.source_type, source.has_photo_fields]);
+    const version = await client.query("INSERT INTO inspection_template_versions (template_id,version_number,fields_jsonb,layout_jsonb,created_by_user_id) VALUES ($1,1,$2,$3,$4) RETURNING *", [copied.rows[0].id, JSON.stringify(sourceVersion.fields_jsonb), JSON.stringify(sourceVersion.layout_jsonb), req.user.id]);
+    await client.query("COMMIT"); const row = copied.rows[0];
+    return res.status(201).json({ success: true, data: { ...publicTemplate({ ...row, permissions: templatePermissions(row, 2, expertId) }), versions: [version.rows[0]] } });
+  } catch (error) { try { await client.query("ROLLBACK"); } catch { /* no open transaction */ } return sendError(res, error, "Unable to duplicate template."); }
   finally { client.release(); }
 };

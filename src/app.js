@@ -33,7 +33,21 @@ import {
 
 const app = express();
 
-app.use(cors());
+export const allowedCorsOrigins = new Set([
+  "http://localhost:5173",
+  "http://localhost:5174",
+  process.env.FRONTEND_URL,
+  ...(process.env.CORS_ALLOWED_ORIGINS || "").split(","),
+].map((origin) => origin?.trim()).filter(Boolean));
+export const corsOptions = {
+  origin(origin, callback) { callback(null, !origin || allowedCorsOrigins.has(origin)); },
+  credentials: true,
+  methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Authorization", "Content-Type"],
+  optionsSuccessStatus: 204,
+};
+
+app.use(cors(corsOptions));
 app.use(helmet());
 app.use(morgan("dev"));
 app.use(express.json());

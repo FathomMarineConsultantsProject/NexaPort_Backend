@@ -39,23 +39,8 @@ function finishPages(pdf, font) {
   });
 }
 
-export async function generateReportPdf({ sourceMode, sourceBytes, title, fields, values, photos = [], consultant, serviceRequest }) {
-  let pdf;
-  if (sourceMode === "acroform" && sourceBytes) {
-    pdf = await PDFDocument.load(sourceBytes, { ignoreEncryption: false });
-    const form = pdf.getForm();
-    for (const field of fields) {
-      if (!field.sourceFieldName || ["photo", "section_heading"].includes(field.type)) continue;
-      try {
-        const target = form.getField(field.sourceFieldName); const value = values[field.fieldKey];
-        if (field.type === "checkbox") value ? target.check() : target.uncheck();
-        else if (["select", "yes_no"].includes(field.type) && target.select) target.select(printable(value));
-        else target.setText(printable(value));
-      } catch { /* an approved source field may have been removed from a later PDF revision */ }
-    }
-    form.flatten();
-  } else {
-    pdf = await PDFDocument.create();
+export async function generateReportPdf({ title, fields, values, photos = [], consultant, serviceRequest }) {
+    const pdf = await PDFDocument.create();
     const font = await pdf.embedFont(StandardFonts.Helvetica); const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
     let page; let y;
     const newPage = () => { page = pdf.addPage([595.28, 841.89]); y = 785; drawAnchor(page, 43, y - 1); page.drawText("NexaPort", { x: 66, y, font: bold, size: 20, color: NAVY }); page.drawLine({ start: { x: 42, y: y - 10 }, end: { x: 553, y: y - 10 }, thickness: 2, color: TEAL }); y -= 44; };
@@ -74,9 +59,8 @@ export async function generateReportPdf({ sourceMode, sourceBytes, title, fields
       for (const line of lines) { page.drawText(line.slice(0, 105), { x: 42, y, font, size: 11, color: NAVY }); y -= 13; }
       y -= 10;
     }
-  }
-  const font = await pdf.embedFont(StandardFonts.Helvetica); const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
-  await addEvidencePages(pdf, photos, font, bold);
-  finishPages(pdf, font);
+  const evidenceFont = await pdf.embedFont(StandardFonts.Helvetica); const evidenceBold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  await addEvidencePages(pdf, photos, evidenceFont, evidenceBold);
+  finishPages(pdf, evidenceFont);
   return Buffer.from(await pdf.save());
 }
