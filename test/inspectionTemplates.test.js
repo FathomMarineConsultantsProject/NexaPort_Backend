@@ -1,0 +1,38 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import test from "node:test";
+import { PDFDocument, StandardFonts } from "pdf-lib";
+import { extractPdfFields } from "../src/services/pdfExtractionService.js";
+import { extractXmlFields } from "../src/services/xmlExtractionService.js";
+import { missingRequiredFields, normalizeFields, validateReportValues } from "../src/services/templateFieldService.js";
+import { validateTemplateFile } from "../src/controllers/templateController.js";
+
+const source = async (file) => readFile(new URL(file, import.meta.url), "utf8");
+const validPdf = { fileName: "inspection.pdf", contentType: "application/pdf", size: 1024 };
+const validXml = { fileName: "inspection.xml", contentType: "application/xml", size: 1024 };
+
+test("role 3 cannot access Templates", async () => assert.match(await source("../src/routes/templateRoutes.js"), /allowRoles\(1, 2\)/));
+test("role 2 lists only own templates", async () => assert.match(await source("../src/controllers/templateController.js"), /WHERE t\.expert_id=\$1/));
+test("role 1 list retains all templates", async () => assert.match(await source("../src/controllers/templateController.js"), /expertId \? " WHERE t\.expert_id=\$1" : ""/));
+test("role 1 cannot edit templates", async () => assert.match(await source("../src/controllers/templateController.js"), /Super Admin access is view-only/));
+test("cross-consultant template access is scoped", async () => assert.match(await source("../src/controllers/templateController.js"), /AND t\.expert_id=\$2/));
+test("PDF MIME and extension are validated", () => { assert.equal(validateTemplateFile(validPdf).sourceType, "pdf"); assert.ok(validateTemplateFile({ ...validPdf, contentType: "text/plain" }).error); });
+test("XML MIME and extension are validated", () => { assert.equal(validateTemplateFile(validXml).sourceType, "xml"); assert.ok(validateTemplateFile({ ...validXml, fileName: "inspection.pdf" }).error); });
+test("PDF size limit is enforced", () => assert.ok(validateTemplateFile({ ...validPdf, size: 10 * 1024 * 1024 + 1 }).error));
+test("XML size limit is enforced", () => assert.ok(validateTemplateFile({ ...validXml, size: 2 * 1024 * 1024 + 1 }).error));
+test("XML DOCTYPE is rejected", () => assert.throws(() => extractXmlFields(Buffer.from('<!DOCTYPE x><x/>')), /DOCTYPE/));
+test("XML entity declaration is rejected", () => assert.throws(() => extractXmlFields(Buffer.from('<!ENTITY x "y"><x/>')), /entity/));
+test("fillable PDF fields are extracted", async () => { const pdf = await PDFDocument.create(); const page = pdf.addPage(); const field = pdf.getForm().createTextField("vessel_name"); field.addToPage(page, { x: 20, y: 20, width: 100, height: 20 }); const result = await extractPdfFields(Buffer.from(await pdf.save())); assert.equal(result.mode, "acroform"); assert.equal(result.fields[0].sourceFieldName, "vessel_name"); });
+test("non-fillable PDF candidate labels are extracted", async () => { const pdf = await PDFDocument.create(); const page = pdf.addPage(); const font = await pdf.embedFont(StandardFonts.Helvetica); page.drawText("Vessel Name:", { x: 20, y: 700, font }); page.drawText("Inspection Date:", { x: 20, y: 670, font }); const result = await extractPdfFields(Buffer.from(await pdf.save())); assert.equal(result.mode, "text"); assert.ok(result.fields.length >= 1); });
+test("scanned PDF returns manual fallback", async () => { const pdf = await PDFDocument.create(); pdf.addPage(); const result = await extractPdfFields(Buffer.from(await pdf.save())); assert.equal(result.mode, "manual"); assert.match(result.message, /Add fields manually/); });
+test("malformed PDF rejects without process crash", async () => await assert.rejects(extractPdfFields(Buffer.from("not a pdf"))));
+test("template versions are inserted, not updated", async () => { const text = await source("../src/controllers/templateController.js"); assert.match(text, /INSERT INTO inspection_template_versions/); assert.doesNotMatch(text, /UPDATE inspection_template_versions/); });
+test("reports snapshot an exact version id", async () => assert.match(await source("../src/controllers/reportController.js"), /template_version_id/));
+test("unknown report field keys are rejected", () => assert.throws(() => validateReportValues(normalizeFields([{ label: "Known" }]), { unknown: "x" }), /Unknown report field key/));
+test("photo uploads require a photo field", async () => assert.match(await source("../src/controllers/reportController.js"), /Photo uploads require a configured photo field/));
+test("cross-consultant reports are scoped", async () => assert.match(await source("../src/controllers/reportController.js"), /AND r\.expert_id=\$2/));
+test("Super Admin can view all reports", async () => assert.match(await source("../src/routes/reportRoutes.js"), /allowRoles\(1, 2\)/));
+test("generated report storage uses private owned keys", async () => assert.match(await source("../src/controllers/reportController.js"), /inspection-reports\/experts\/\$\{report\.expert_id\}/));
+test("download URL is temporary", async () => assert.match(await source("../src/controllers/reportController.js"), /expiresInSeconds: 300/));
+test("old reports remain linked to their saved template version", async () => { const sql = await source("../sql/inspection_templates_001_create_tables.sql"); assert.match(sql, /template_version_id BIGINT NOT NULL/); assert.match(sql, /ON DELETE RESTRICT/); });
+test("required photos and values are validated", () => { const fields = normalizeFields([{ label: "Name", required: true }, { label: "Photo", type: "photo", required: true }]); assert.equal(missingRequiredFields(fields, {}, new Set()).length, 2); });

@@ -24,6 +24,8 @@ import flagRoutes from "./routes/flagRoutes.js";
 import appointedSurveyorRoutes from "./routes/appointedSurveyorRoutes.js";
 import publicStatsRoutes from "./routes/publicStatsRoutes.js";
 import maritimeDirectoryRoutes from "./routes/maritimeDirectoryRoutes.js";
+import templateRoutes from "./routes/templateRoutes.js";
+import reportRoutes from "./routes/reportRoutes.js";
 import {
   accreditationSchemeRouter,
   accreditedInspectorRouter,
@@ -71,5 +73,7 @@ app.use("/api/service-requests", serviceRequestRoutes);
 app.use("/api/quotations", quotationRoutes);
 app.use("/api/experts", expertReviewRoutes);
 app.use("/api/dashboard", dashboardRoutes);
+app.use("/api/templates", templateRoutes);
+app.use("/api/reports", reportRoutes);
 
 export default app;
