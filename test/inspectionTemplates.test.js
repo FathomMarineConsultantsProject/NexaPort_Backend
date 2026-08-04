@@ -3,8 +3,11 @@ import { once } from "node:events";
 import { readFile } from "node:fs/promises";
 import test, { after, before } from "node:test";
 import app, { allowedCorsOrigins, corsOptions, normalizeCorsOrigin } from "../src/app.js";
+import { pool } from "../src/config/db.js";
 import { missingRequiredFields, normalizeFields, validateReportValues } from "../src/services/templateFieldService.js";
-import { templatePermissions, validateTemplatePayload } from "../src/controllers/templateController.js";
+import { createTemplate, listTemplates, sendTemplateError, templatePermissions, validateTemplatePayload } from "../src/controllers/templateController.js";
+import { listReports } from "../src/controllers/reportController.js";
+import { mapFieldsWithOpenRouter, normalizeMappingEvidence } from "../src/services/openRouterTemplateService.js";
 
 const source = async (file) => readFile(new URL(file, import.meta.url), "utf8");
 const payload = { title: "Checklist", sourceType: "pdf", extractionMethod: "text", fields: [{ fieldKey: "vessel_name", label: "Vessel Name", fieldType: "text", required: false, section: "Vessel", sortOrder: 0 }] };
@@ -96,3 +99,32 @@ test("configured deployed origins remain supported", async () => assert.match(aw
 test("unknown report field keys are rejected", () => assert.throws(() => validateReportValues(normalizeFields([{ label: "Known" }]), { unknown: "x" }), /Unknown report field key/));
 test("required photos and values remain validated", () => { const fields = normalizeFields([{ label: "Name", required: true }, { label: "Photo", type: "photo", required: true }]); assert.equal(missingRequiredFields(fields, {}, new Set()).length, 2); });
 test("the standalone patch preserves columns and only drops NOT NULL", async () => { const sql = await source("../sql/inspection_templates_004_remove_source_persistence_requirement.sql"); assert.match(sql, /BEGIN;[\s\S]*DROP NOT NULL[\s\S]*COMMIT;/); assert.doesNotMatch(sql, /DROP COLUMN|DELETE FROM/); });
+test("runtime alignment patch is transactional, rerun-safe and preserves records", async () => { const sql = await source("../sql/inspection_templates_005_align_runtime_schema.sql"); assert.match(sql, /BEGIN;[\s\S]*COMMIT;/); assert.match(sql, /ADD COLUMN IF NOT EXISTS template_scope/); assert.match(sql, /created_by_user_id/); assert.match(sql, /source_type IN \('pdf','xml','docx','xlsx'\)/); assert.doesNotMatch(sql, /DROP TABLE|DROP COLUMN|DELETE FROM/); });
+
+const responseRecorder = () => ({ statusCode: 200, body: null, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; } });
+
+test("template and report lists use the aligned runtime schema without failing", async () => {
+  const original = pool.query; pool.query = async () => ({ rows: [] });
+  try { const templates = responseRecorder(); const reports = responseRecorder(); await listTemplates({ user: { id: 1, role_id: 1 } }, templates); await listReports({ user: { id: 1, role_id: 1 } }, reports); assert.equal(templates.body.success, true); assert.equal(reports.body.success, true); }
+  finally { pool.query = original; }
+});
+
+for (const roleId of [1, 2]) test(`${roleId === 1 ? "Super Admin" : "Consultant"} template creation commits one transaction and releases the client`, async () => {
+  const original = pool.connect; const calls = []; let released = false;
+  const client = { query: async (sql) => { calls.push(sql); if (sql.startsWith("SELECT id FROM experts")) return { rows: [{ id: 9 }] }; if (sql.startsWith("INSERT INTO inspection_templates")) return { rows: [{ id: 12, expert_id: roleId === 2 ? 9 : null, template_scope: roleId === 1 ? "nexaport" : "private", status: roleId === 1 ? "draft" : "published", current_version_number: 1 }] }; if (sql.startsWith("INSERT INTO inspection_template_versions")) return { rows: [{ id: 20, version_number: 1 }] }; return { rows: [] }; }, release: () => { released = true; } };
+  pool.connect = async () => client;
+  try { const res = responseRecorder(); await createTemplate({ user: { id: 4, role_id: roleId }, body: payload }, res); assert.equal(res.statusCode, 201); assert.equal(calls.filter((sql) => sql === "BEGIN").length, 1); assert.equal(calls.filter((sql) => sql === "COMMIT").length, 1); assert.equal(released, true); }
+  finally { pool.connect = original; }
+});
+
+test("missing runtime schema returns the operational update message", () => { const res = responseRecorder(); sendTemplateError(res, { code: "42703", column: "template_scope" }, "fallback"); assert.equal(res.statusCode, 503); assert.equal(res.body.message, "Inspection Templates database update has not been installed."); });
+test("role 3 cannot map fields", async () => { const routes = await source("../src/routes/templateRoutes.js"); assert.match(routes, /router\.use\(requireAuth, allowRoles\(1, 2\)\)/); assert.match(routes, /post\("\/map-fields"/); });
+test("OpenRouter key remains backend-only", async () => { const frontend = await source("../../NexaPort_Frontend/src/api/templateApi.js"); assert.doesNotMatch(frontend, /OPENROUTER_API_KEY|Bearer/); });
+
+const mappingEvidence = { documentTitle: "Dock", sourceType: "pdf", pagesOrSheets: [{ name: "Page 1", lines: [{ text: "Decking in good condition? Yes No" }] }] };
+const mappedOutput = { sections: [{ sectionKey: "dock", title: "Dock", sortOrder: 1 }], fields: [{ fieldKey: "decking_good", label: "Decking in good condition?", fieldType: "yes_no", required: false, sectionKey: "dock", sortOrder: 1, options: ["Yes", "No"], confidence: 0.98, sourceText: "Decking in good condition? Yes No" }], warnings: [] };
+
+test("mapping makes exactly one strict ZDR OpenRouter request", async () => { let calls = 0; let requestBody; const fetchImpl = async (_url, options) => { calls += 1; requestBody = JSON.parse(options.body); return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(mappedOutput) } }] }) }; }; const result = await mapFieldsWithOpenRouter(mappingEvidence, { fetchImpl, env: { OPENROUTER_API_KEY: "test", NODE_ENV: "development" } }); assert.equal(calls, 1); assert.equal(result.fields.length, 1); assert.equal(requestBody.response_format.type, "json_schema"); assert.equal(requestBody.response_format.json_schema.strict, true); assert.deepEqual(requestBody.provider, { require_parameters: true, zdr: true }); });
+test("invalid structured output is rejected without retry", async () => { let calls = 0; await assert.rejects(() => mapFieldsWithOpenRouter(mappingEvidence, { fetchImpl: async () => { calls += 1; return { ok: true, json: async () => ({ choices: [{ message: { content: "{}" } }] }) }; }, env: { OPENROUTER_API_KEY: "test" } }), /invalid structured output/); assert.equal(calls, 1); });
+for (const status of [402, 429]) test(`OpenRouter ${status} is not retried`, async () => { let calls = 0; await assert.rejects(() => mapFieldsWithOpenRouter(mappingEvidence, { fetchImpl: async () => { calls += 1; return { ok: false, status }; }, env: { OPENROUTER_API_KEY: "test" } })); assert.equal(calls, 1); });
+test("source bytes are rejected before OpenRouter is called", async () => { let calls = 0; assert.throws(() => normalizeMappingEvidence({ ...mappingEvidence, bytes: [1, 2] }), /bytes and files/); await assert.rejects(() => mapFieldsWithOpenRouter({ ...mappingEvidence, base64: "AA==" }, { fetchImpl: async () => { calls += 1; }, env: { OPENROUTER_API_KEY: "test" } }), /bytes and files/); assert.equal(calls, 0); });

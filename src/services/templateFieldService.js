@@ -1,6 +1,6 @@
 import crypto from "crypto";
 
-export const FIELD_TYPES = ["text", "textarea", "number", "date", "checkbox", "yes_no", "select", "photo", "section_heading"];
+export const FIELD_TYPES = ["text", "textarea", "number", "date", "checkbox", "yes_no", "select", "signature", "photo", "section_heading"];
 const clean = (value, max = 200) => String(value ?? "").replace(/[<>\u0000-\u001f]/g, "").trim().slice(0, max);
 
 export function normalizeFields(input, { keepKeys = true } = {}) {

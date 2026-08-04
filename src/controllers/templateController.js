@@ -1,12 +1,20 @@
 import { pool } from "../config/db.js";
 import { normalizeFields } from "../services/templateFieldService.js";
+import { mapFieldsWithOpenRouter } from "../services/openRouterTemplateService.js";
 
-const SOURCE_TYPES = new Set(["pdf", "xml"]);
+const SOURCE_TYPES = new Set(["pdf", "xml", "docx", "xlsx"]);
 const EXTRACTION_METHODS = new Set(["acroform", "text", "ocr", "nexaport_xml", "generic_xml", "manual"]);
 const FORBIDDEN_SOURCE_KEYS = new Set(["source_s3_key", "sourceS3Key", "key", "file", "fileName", "contentType", "size", "bytes", "base64", "sourceData", "rawPdf", "rawXml"]);
 const clean = (value, max = 255) => String(value ?? "").replace(/[<>\u0000-\u001f]/g, "").trim().slice(0, max);
 const id = (value) => Number.isInteger(Number(value)) && Number(value) > 0 ? Number(value) : null;
-const sendError = (res, error, fallback) => res.status(error.status || 500).json({ success: false, message: error.status ? error.message : fallback });
+const RUNTIME_COLUMNS = new Set(["template_scope", "created_by_user_id", "expert_id", "source_s3_key", "source_file_name", "source_mime_type", "source_file_size"]);
+const isRuntimeSchemaError = (error) => ["42P01", "42703"].includes(error?.code) || (error?.code === "23502" && RUNTIME_COLUMNS.has(error?.column)) || (error?.code === "23514" && /^inspection_templates_(?:scope|source_type)/.test(error?.constraint || ""));
+export const sendTemplateError = (res, error, fallback, operation = "templates") => {
+  if (!error?.status) console.error("Inspection Templates backend error", { operation, name: error?.name, code: error?.code, table: error?.table, column: error?.column, constraint: error?.constraint });
+  if (isRuntimeSchemaError(error)) return res.status(503).json({ success: false, message: "Inspection Templates database update has not been installed." });
+  return res.status(error?.status || 500).json({ success: false, message: error?.status ? error.message : fallback });
+};
+const sendError = (res, error, fallback) => sendTemplateError(res, error, fallback);
 const badRequest = (message) => Object.assign(new Error(message), { status: 400 });
 const templateSelect = `SELECT t.*,u.full_name AS consultant_name,u.email AS consultant_email,creator.full_name AS creator_name,creator.email AS creator_email FROM inspection_templates t LEFT JOIN experts e ON e.id=t.expert_id LEFT JOIN users u ON u.id=e.user_id JOIN users creator ON creator.id=t.created_by_user_id`;
 
@@ -35,7 +43,7 @@ export function validateTemplatePayload(body = {}) {
   rejectSourceContent(body);
   const title = clean(body.title, 180);
   if (!title) throw badRequest("Template title is required.");
-  if (!SOURCE_TYPES.has(body.sourceType)) throw badRequest("Template source type must be PDF or XML.");
+  if (!SOURCE_TYPES.has(body.sourceType)) throw badRequest("Template source type must be PDF, XML, DOCX or XLSX.");
   const fields = normalizeFields(body.fields);
   if (!fields.length) throw badRequest("At least one normalized field is required.");
   return { title, description: clean(body.description, 2000) || null, sourceType: body.sourceType, fields, layout: normalizeLayout(body.layout, body.extractionMethod) };
@@ -77,6 +85,11 @@ export const listTemplates = async (req, res) => {
     const result = await pool.query(`${templateSelect}${where} ORDER BY t.template_scope DESC,t.updated_at DESC`, expertId ? [expertId] : []);
     return res.json({ success: true, data: result.rows.map((row) => publicTemplate({ ...row, permissions: templatePermissions(row, roleId, expertId) })) });
   } catch (error) { return sendError(res, error, "Unable to load templates."); }
+};
+
+export const mapTemplateFields = async (req, res) => {
+  try { return res.json({ success: true, data: await mapFieldsWithOpenRouter(req.body || {}) }); }
+  catch (error) { return sendError(res, error, "Unable to map template fields."); }
 };
 
 export const createTemplate = async (req, res) => {

@@ -3,7 +3,7 @@ import path from "path";
 import sharp from "sharp";
 import { pool } from "../config/db.js";
 import { createPresignedGetUrl, createPresignedPutUrl } from "../utils/s3Presign.js";
-import { expertIdForUser } from "./templateController.js";
+import { expertIdForUser, sendTemplateError } from "./templateController.js";
 import { missingRequiredFields, validateReportValues } from "../services/templateFieldService.js";
 import { generateReportPdf } from "../services/pdfGenerationService.js";
 import { readPrivateObject, writePrivateObject } from "../services/privateObjectService.js";
@@ -11,7 +11,7 @@ import { readPrivateObject, writePrivateObject } from "../services/privateObject
 const IMAGE_TYPES = { "image/jpeg": [".jpg", ".jpeg"], "image/png": [".png"], "image/webp": [".webp"] };
 const clean = (value, max = 255) => String(value ?? "").replace(/[<>\u0000-\u001f]/g, "").trim().slice(0, max);
 const validId = (value) => Number.isInteger(Number(value)) && Number(value) > 0 ? Number(value) : null;
-const sendError = (res, error, fallback) => res.status(error.status || 500).json({ success: false, message: error.status ? error.message : fallback });
+const sendError = (res, error, fallback) => sendTemplateError(res, error, fallback, "reports");
 
 async function reportForAccess(queryable, reportId, user, { ownerOnly = false } = {}) {
   if (!validId(reportId)) throw Object.assign(new Error("Report not found."), { status: 404 });
