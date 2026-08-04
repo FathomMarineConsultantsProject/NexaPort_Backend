@@ -33,14 +33,18 @@ import {
 
 const app = express();
 
+export const normalizeCorsOrigin = (origin) =>
+  origin?.trim().replace(/\/+$/, "");
+
 export const allowedCorsOrigins = new Set([
   "http://localhost:5173",
   "http://localhost:5174",
+  "https://nexa-port-frontend.vercel.app",
   process.env.FRONTEND_URL,
   ...(process.env.CORS_ALLOWED_ORIGINS || "").split(","),
-].map((origin) => origin?.trim()).filter(Boolean));
+].map(normalizeCorsOrigin).filter(Boolean));
 export const corsOptions = {
-  origin(origin, callback) { callback(null, !origin || allowedCorsOrigins.has(origin)); },
+  origin(origin, callback) { callback(null, !origin || allowedCorsOrigins.has(normalizeCorsOrigin(origin))); },
   credentials: true,
   methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Authorization", "Content-Type"],
