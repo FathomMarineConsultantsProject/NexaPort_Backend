@@ -79,7 +79,7 @@ export async function normalizeLocalMedia(rawBody, fields) {
   catch { throw Object.assign(new Error("The local media payload is invalid."), { status: 400 }); }
   if (!Array.isArray(body.media) || body.media.length > 20) throw Object.assign(new Error("The local media payload is invalid."), { status: 400 });
   return Promise.all(body.media.map(async (item) => {
-    const field = fields.find((candidate) => candidate.fieldKey === item?.fieldKey && ["photo", "signature"].includes(candidate.type));
+    const field = fields.find((candidate) => candidate.fieldKey === item?.fieldKey && (candidate.type === "photo" || candidate.type === "signature" || /signature/i.test(candidate.label || "")));
     const mimeType = String(item?.mimeType || "").toLowerCase();
     const match = String(item?.dataUrl || "").match(/^data:(image\/(?:jpeg|png|webp));base64,([a-z0-9+/=]+)$/i);
     if (!field || !IMAGE_TYPES.has(mimeType) || match?.[1].toLowerCase() !== mimeType) throw Object.assign(new Error("A report image is invalid."), { status: 400 });
@@ -90,7 +90,7 @@ export async function normalizeLocalMedia(rawBody, fields) {
     if (!["jpeg", "png", "webp"].includes(metadata.format)) throw Object.assign(new Error("A report image is invalid."), { status: 400 });
     let outputType = mimeType;
     if (mimeType === "image/webp") { bytes = await sharp(bytes).jpeg({ quality: 88 }).toBuffer(); outputType = "image/jpeg"; }
-    return { fieldKey: field.fieldKey, type: field.type, label: field.label, caption: field.captionEnabled ? clean(item.caption, 500) : "", mimeType: outputType, bytes };
+    return { fieldKey: field.fieldKey, type: /signature/i.test(field.label || "") ? "signature" : field.type, label: field.label, caption: field.captionEnabled ? clean(item.caption, 500) : "", mimeType: outputType, bytes };
   }));
 }
 
@@ -100,8 +100,8 @@ export const generateReport = async (req, res) => {
     const media = await normalizeLocalMedia(req.body, report.fields_jsonb);
     const missing = missingRequiredFields(report.fields_jsonb, report.values_jsonb, new Set(media.map((item) => item.fieldKey)));
     if (missing.length) return res.status(400).json({ success: false, message: `Complete required fields: ${missing.join(", ")}` });
-    const serviceRequest = report.service_request_id ? (await pool.query("SELECT id,title FROM service_requests WHERE id=$1", [report.service_request_id])).rows[0] : null;
-    const bytes = await generateReportPdf({ title: report.title, fields: report.fields_jsonb, values: report.values_jsonb, photos: media, consultant: { full_name: report.consultant_name, email: report.consultant_email }, serviceRequest });
+    const serviceRequest = report.service_request_id ? (await pool.query("SELECT id,title,vessel_name,imo_number,port_name FROM service_requests WHERE id=$1", [report.service_request_id])).rows[0] : null;
+    const bytes = await generateReportPdf({ title: report.title, fields: report.fields_jsonb, values: report.values_jsonb, photos: media, serviceRequest, status: "completed", versionNumber: report.version_number });
     const ownerPath = report.expert_id ? `experts/${report.expert_id}` : `platform/tests/${report.created_by_user_id}`;
     const key = `inspection-reports/${ownerPath}/reports/${report.id}/generated/report-v${report.version_number}-${crypto.randomUUID()}.pdf`;
     await writePrivateObject(key, "application/pdf", bytes);
