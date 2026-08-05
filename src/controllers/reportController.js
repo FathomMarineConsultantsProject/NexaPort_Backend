@@ -1,14 +1,13 @@
 import crypto from "crypto";
-import path from "path";
 import sharp from "sharp";
 import { pool } from "../config/db.js";
-import { createPresignedGetUrl, createPresignedPutUrl } from "../utils/s3Presign.js";
+import { createPresignedGetUrl } from "../utils/s3Presign.js";
 import { expertIdForUser, sendTemplateError } from "./templateController.js";
 import { missingRequiredFields, validateReportValues } from "../services/templateFieldService.js";
 import { generateReportPdf } from "../services/pdfGenerationService.js";
-import { readPrivateObject, writePrivateObject } from "../services/privateObjectService.js";
+import { writePrivateObject } from "../services/privateObjectService.js";
 
-const IMAGE_TYPES = { "image/jpeg": [".jpg", ".jpeg"], "image/png": [".png"], "image/webp": [".webp"] };
+const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const clean = (value, max = 255) => String(value ?? "").replace(/[<>\u0000-\u001f]/g, "").trim().slice(0, max);
 const validId = (value) => Number.isInteger(Number(value)) && Number(value) > 0 ? Number(value) : null;
 const sendError = (res, error, fallback) => sendTemplateError(res, error, fallback, "reports");
@@ -60,8 +59,7 @@ export const listReports = async (req, res) => {
 export const getReport = async (req, res) => {
   try {
     const report = await reportForAccess(pool, req.params.id, req.user);
-    const photos = await pool.query("SELECT id,field_key,caption,sort_order,uploaded_at FROM inspection_report_photos WHERE report_id=$1 ORDER BY sort_order,uploaded_at", [report.id]);
-    return res.json({ success: true, data: { ...publicReport(report), photos: photos.rows } });
+    return res.json({ success: true, data: publicReport(report) });
   } catch (error) { return sendError(res, error, "Unable to load report."); }
 };
 
@@ -75,52 +73,35 @@ export const updateReport = async (req, res) => {
   } catch (error) { return sendError(res, error, "Unable to save report."); }
 };
 
-function validatePhoto(body) {
-  const contentType = String(body?.contentType || "").toLowerCase(); const extension = path.extname(clean(body?.fileName)).toLowerCase(); const allowed = IMAGE_TYPES[contentType];
-  if (!allowed?.includes(extension)) return "Upload a JPEG, PNG, or WebP image with a matching extension.";
-  if (!Number.isInteger(Number(body?.size)) || Number(body.size) <= 0 || Number(body.size) > 5 * 1024 * 1024) return "Photos must be 5 MB or smaller.";
-  return null;
+export async function normalizeLocalMedia(rawBody, fields) {
+  let body;
+  try { body = JSON.parse(Buffer.isBuffer(rawBody) ? rawBody.toString("utf8") : "{}"); }
+  catch { throw Object.assign(new Error("The local media payload is invalid."), { status: 400 }); }
+  if (!Array.isArray(body.media) || body.media.length > 20) throw Object.assign(new Error("The local media payload is invalid."), { status: 400 });
+  return Promise.all(body.media.map(async (item) => {
+    const field = fields.find((candidate) => candidate.fieldKey === item?.fieldKey && ["photo", "signature"].includes(candidate.type));
+    const mimeType = String(item?.mimeType || "").toLowerCase();
+    const match = String(item?.dataUrl || "").match(/^data:(image\/(?:jpeg|png|webp));base64,([a-z0-9+/=]+)$/i);
+    if (!field || !IMAGE_TYPES.has(mimeType) || match?.[1].toLowerCase() !== mimeType) throw Object.assign(new Error("A report image is invalid."), { status: 400 });
+    let bytes = Buffer.from(match[2], "base64");
+    if (!bytes.length || bytes.length > 5 * 1024 * 1024) throw Object.assign(new Error("Report images must be 5 MB or smaller."), { status: 400 });
+    let metadata;
+    try { metadata = await sharp(bytes).metadata(); } catch { throw Object.assign(new Error("A report image could not be read."), { status: 400 }); }
+    if (!["jpeg", "png", "webp"].includes(metadata.format)) throw Object.assign(new Error("A report image is invalid."), { status: 400 });
+    let outputType = mimeType;
+    if (mimeType === "image/webp") { bytes = await sharp(bytes).jpeg({ quality: 88 }).toBuffer(); outputType = "image/jpeg"; }
+    return { fieldKey: field.fieldKey, type: field.type, label: field.label, caption: field.captionEnabled ? clean(item.caption, 500) : "", mimeType: outputType, bytes };
+  }));
 }
-
-export const createPhotoUploadUrl = async (req, res) => {
-  try {
-    const report = await reportForAccess(pool, req.params.id, req.user, { ownerOnly: true }); const field = report.fields_jsonb.find((item) => item.fieldKey === req.body?.fieldKey && item.type === "photo");
-    if (!field) return res.status(400).json({ success: false, message: "Photo uploads require a configured photo field." });
-    const error = validatePhoto(req.body); if (error) return res.status(400).json({ success: false, message: error });
-    const ownerPath = report.expert_id ? `experts/${report.expert_id}` : `platform/tests/${report.created_by_user_id}`;
-    const extension = path.extname(clean(req.body.fileName)).toLowerCase(); const key = `inspection-reports/${ownerPath}/reports/${report.id}/photos/${field.fieldKey}/${crypto.randomUUID()}${extension}`;
-    return res.json({ success: true, data: { uploadUrl: createPresignedPutUrl({ key, contentType: req.body.contentType, expiresIn: 300 }), key, expiresIn: 300 } });
-  } catch (error) { return sendError(res, error, "Private photo upload is not configured."); }
-};
-
-export const registerPhoto = async (req, res) => {
-  try {
-    const report = await reportForAccess(pool, req.params.id, req.user, { ownerOnly: true }); const field = report.fields_jsonb.find((item) => item.fieldKey === req.body?.fieldKey && item.type === "photo");
-    const ownerPath = report.expert_id ? `experts/${report.expert_id}` : `platform/tests/${report.created_by_user_id}`;
-    const prefix = `inspection-reports/${ownerPath}/reports/${report.id}/photos/${field?.fieldKey}/`;
-    if (!field || !String(req.body?.key).startsWith(prefix)) return res.status(400).json({ success: false, message: "Photo object key is invalid." });
-    const uploaded = await readPrivateObject(req.body.key, 5 * 1024 * 1024);
-    try { const metadata = await sharp(uploaded).metadata(); if (!["jpeg", "png", "webp"].includes(metadata.format)) throw new Error(); } catch { return res.status(400).json({ success: false, message: "Uploaded object is not a valid JPEG, PNG, or WebP image." }); }
-    const created = await pool.query("INSERT INTO inspection_report_photos (report_id,field_key,photo_s3_key,caption,sort_order) VALUES ($1,$2,$3,$4,$5) RETURNING id,field_key,caption,sort_order,uploaded_at", [report.id, field.fieldKey, req.body.key, field.captionEnabled ? clean(req.body.caption, 500) || null : null, Number(req.body.sortOrder) || 0]);
-    return res.status(201).json({ success: true, data: created.rows[0] });
-  } catch (error) { return sendError(res, error, "Unable to register photo."); }
-};
 
 export const generateReport = async (req, res) => {
   try {
     const report = await reportForAccess(pool, req.params.id, req.user, { ownerOnly: true });
-    const photoRows = await pool.query("SELECT p.*,COALESCE(p.caption,'') AS caption FROM inspection_report_photos p WHERE p.report_id=$1 ORDER BY p.sort_order,p.uploaded_at", [report.id]);
-    const missing = missingRequiredFields(report.fields_jsonb, report.values_jsonb, new Set(photoRows.rows.map((photo) => photo.field_key)));
+    const media = await normalizeLocalMedia(req.body, report.fields_jsonb);
+    const missing = missingRequiredFields(report.fields_jsonb, report.values_jsonb, new Set(media.map((item) => item.fieldKey)));
     if (missing.length) return res.status(400).json({ success: false, message: `Complete required fields: ${missing.join(", ")}` });
-    const photos = await Promise.all(photoRows.rows.map(async (photo) => {
-      const extension = path.extname(photo.photo_s3_key).toLowerCase();
-      let bytes = await readPrivateObject(photo.photo_s3_key, 5 * 1024 * 1024);
-      let mimeType = extension === ".png" ? "image/png" : "image/jpeg";
-      if (extension === ".webp") { bytes = await sharp(bytes).jpeg({ quality: 88 }).toBuffer(); mimeType = "image/jpeg"; }
-      return { label: report.fields_jsonb.find((field) => field.fieldKey === photo.field_key)?.label, caption: photo.caption, mimeType, bytes };
-    }));
     const serviceRequest = report.service_request_id ? (await pool.query("SELECT id,title FROM service_requests WHERE id=$1", [report.service_request_id])).rows[0] : null;
-    const bytes = await generateReportPdf({ title: report.title, fields: report.fields_jsonb, values: report.values_jsonb, photos, consultant: { full_name: report.consultant_name, email: report.consultant_email }, serviceRequest });
+    const bytes = await generateReportPdf({ title: report.title, fields: report.fields_jsonb, values: report.values_jsonb, photos: media, consultant: { full_name: report.consultant_name, email: report.consultant_email }, serviceRequest });
     const ownerPath = report.expert_id ? `experts/${report.expert_id}` : `platform/tests/${report.created_by_user_id}`;
     const key = `inspection-reports/${ownerPath}/reports/${report.id}/generated/report-v${report.version_number}-${crypto.randomUUID()}.pdf`;
     await writePrivateObject(key, "application/pdf", bytes);

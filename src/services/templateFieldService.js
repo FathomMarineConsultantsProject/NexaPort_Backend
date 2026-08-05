@@ -47,13 +47,13 @@ export function validateReportValues(fields, values = {}) {
   const normalized = {};
   for (const [key, value] of Object.entries(values)) {
     const field = allowed.get(key);
-    if (["photo", "section_heading"].includes(field.type)) continue;
+    if (["photo", "signature", "section_heading"].includes(field.type)) continue;
     if (field.type === "checkbox") normalized[key] = Boolean(value);
     else normalized[key] = clean(value, 5000);
   }
   return normalized;
 }
 
-export function missingRequiredFields(fields, values, photoKeys = new Set()) {
-  return fields.filter((field) => field.required && (field.type === "photo" ? !photoKeys.has(field.fieldKey) : field.type !== "section_heading" && (values[field.fieldKey] === undefined || values[field.fieldKey] === "" || values[field.fieldKey] === false))).map((field) => field.label);
+export function missingRequiredFields(fields, values, mediaKeys = new Set()) {
+  return fields.filter((field) => field.required && (["photo", "signature"].includes(field.type) ? !mediaKeys.has(field.fieldKey) : field.type !== "section_heading" && (values[field.fieldKey] === undefined || values[field.fieldKey] === "" || values[field.fieldKey] === false))).map((field) => field.label);
 }

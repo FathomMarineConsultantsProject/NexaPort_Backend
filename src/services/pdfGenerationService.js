@@ -21,7 +21,7 @@ function drawAnchor(page, x, y) {
 async function addEvidencePages(pdf, photos, font, bold) {
   for (const photo of photos) {
     let image;
-    try { image = photo.mimeType === "image/png" ? await pdf.embedPng(photo.bytes) : await pdf.embedJpg(photo.bytes); } catch { continue; }
+    try { image = photo.mimeType === "image/png" ? await pdf.embedPng(photo.bytes) : await pdf.embedJpg(photo.bytes); } catch { throw new Error(`Unable to embed ${photo.label || "report image"}.`); }
     const page = pdf.addPage([595.28, 841.89]);
     page.drawText(photo.label || "Photo evidence", { x: 48, y: 785, font: bold, size: 16, color: NAVY });
     const scaled = image.scaleToFit(499, 620);
@@ -52,7 +52,7 @@ export async function generateReportPdf({ title, fields, values, photos = [], co
     page.drawText(`Generated: ${new Date().toISOString()}`, { x: 42, y, font, size: 9, color: MUTED }); y -= 30;
     let section = null;
     for (const field of fields) {
-      if (field.type === "photo") continue;
+      if (["photo", "signature"].includes(field.type)) continue;
       if (field.section !== section || field.type === "section_heading") { section = field.section; ensure(30); page.drawText(printable(field.type === "section_heading" ? field.label : section), { x: 42, y, font: bold, size: 13, color: NAVY }); y -= 20; if (field.type === "section_heading") continue; }
       const lines = wrap(values[field.fieldKey] ?? field.defaultValue);
       ensure(27 + lines.length * 13); page.drawText(printable(field.label).slice(0, 90), { x: 42, y, font: bold, size: 9, color: MUTED }); y -= 14;

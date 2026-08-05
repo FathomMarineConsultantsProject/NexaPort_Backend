@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import { readFile } from "node:fs/promises";
 import test, { after, before } from "node:test";
+import { PDFDocument } from "pdf-lib";
 import app, { allowedCorsOrigins, corsOptions, normalizeCorsOrigin } from "../src/app.js";
 import { pool } from "../src/config/db.js";
 import { missingRequiredFields, normalizeFields, validateReportValues } from "../src/services/templateFieldService.js";
 import { createTemplate, listTemplates, sendTemplateError, templatePermissions, validateTemplatePayload } from "../src/controllers/templateController.js";
-import { listReports } from "../src/controllers/reportController.js";
+import { listReports, normalizeLocalMedia } from "../src/controllers/reportController.js";
+import { generateReportPdf } from "../src/services/pdfGenerationService.js";
 import { mapFieldsWithOpenRouter, normalizeMappingEvidence } from "../src/services/openRouterTemplateService.js";
 
 const source = async (file) => readFile(new URL(file, import.meta.url), "utf8");
@@ -50,7 +52,9 @@ test("template responses omit legacy source metadata", async () => { const text 
 test("shared template duplication copies JSON but no source object", async () => { const text = await source("../src/controllers/templateController.js"); assert.match(text, /sourceVersion\.fields_jsonb/); assert.doesNotMatch(text, /writePrivateObject|copiedKey/); });
 test("template versions are inserted and never updated", async () => { const text = await source("../src/controllers/templateController.js"); assert.match(text, /INSERT INTO inspection_template_versions/); assert.doesNotMatch(text, /UPDATE inspection_template_versions/); });
 test("report generation does not read a template source", async () => { const text = await source("../src/controllers/reportController.js"); assert.doesNotMatch(text, /source_s3_key|sourceBytes/); });
-test("report photo uploads remain active", async () => assert.match(await source("../src/controllers/reportController.js"), /createPhotoUploadUrl[\s\S]*createPresignedPutUrl/));
+test("report media is accepted only for one-time PDF generation", async () => { const controller = await source("../src/controllers/reportController.js"); const routes = await source("../src/routes/reportRoutes.js"); assert.doesNotMatch(controller + routes, /inspection_report_photos|photo-upload-url|createPresignedPutUrl/); assert.match(routes, /application\/vnd\.nexaport\.report\+json/); assert.match(controller, /normalizeLocalMedia/); });
+test("one-time local media is validated and normalized in memory", async () => { const fields = normalizeFields([{ fieldKey: "photo_evidence", label: "Photo evidence", type: "photo", captionEnabled: true }]); const dataUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="; const media = await normalizeLocalMedia(Buffer.from(JSON.stringify({ media: [{ fieldKey: "photo_evidence", mimeType: "image/png", dataUrl, caption: "Bow" }] })), fields); assert.equal(media[0].caption, "Bow"); assert.equal(media[0].mimeType, "image/png"); assert.ok(Buffer.isBuffer(media[0].bytes)); await assert.rejects(() => normalizeLocalMedia(Buffer.from(JSON.stringify({ media: [{ fieldKey: "unknown", mimeType: "image/png", dataUrl }] })), fields), /invalid/); });
+test("the generated PDF embeds locally supplied image media", async () => { const fields = normalizeFields([{ fieldKey: "photo_evidence", label: "Photo evidence", type: "photo" }]); const bytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"); const output = await generateReportPdf({ title: "Media fixture", fields, values: {}, photos: [{ fieldKey: "photo_evidence", label: "Photo evidence", mimeType: "image/png", bytes }] }); const pdf = await PDFDocument.load(output); assert.equal(pdf.getPageCount(), 2); assert.ok(output.length > 1000); });
 test("generated report PDF private storage remains active", async () => { const text = await source("../src/controllers/reportController.js"); assert.match(text, /generated\/report-v/); assert.match(text, /writePrivateObject\(key, "application\/pdf"/); });
 test("generated report download URLs remain temporary", async () => assert.match(await source("../src/controllers/reportController.js"), /expiresInSeconds: 300/));
 test("deployed frontend and localhost CORS origins are allowed", async () => {
