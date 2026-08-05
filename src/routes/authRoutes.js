@@ -12,6 +12,7 @@ import {
   presignClientRegistrationDocument,
   registerClient,
 } from "../controllers/clientRegistrationController.js";
+import { registerCompany } from "../controllers/maritimeCompanyController.js";
 
 const router = express.Router();
 
@@ -22,6 +23,7 @@ router.post("/client-registration/documents/confirm", confirmClientRegistrationD
 router.post("/register-client", registerClient);
 router.post("/register-consultant/upload-url", presignConsultantUpload);
 router.post("/register-consultant", registerConsultant);
+router.post("/register-maritime-company", registerCompany);
 router.post("/login", login);
 router.get("/me", requireAuth, getMe);
 router.post(

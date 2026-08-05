@@ -1,6 +1,7 @@
 import { pool } from "../config/db.js";
 import { MARITIME_DIRECTORY_TABLES, MARITIME_DIRECTORY_TYPES } from "../config/maritimeDirectorySchema.js";
 import { writeAdminAudit } from "./adminAuditService.js";
+import { createPresignedGetUrl } from "../utils/s3Presign.js";
 
 const T = MARITIME_DIRECTORY_TABLES;
 const TYPE_SET = new Set(MARITIME_DIRECTORY_TYPES);
@@ -81,7 +82,7 @@ export const validateMaritimePayload = (payload, { partial = false } = {}) => {
   return { company, directoryTypes: types ? [...new Set(types)] : undefined };
 };
 
-const uniqueSlug = async (client, companyName, excludeId = null) => {
+export const uniqueSlug = async (client, companyName, excludeId = null) => {
   const base = clean(companyName).toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 80) || "directory-entry";
   for (let suffix = 0; suffix < 10000; suffix += 1) {
     const slug = suffix ? `${base}-${suffix + 1}` : base;
@@ -91,12 +92,12 @@ const uniqueSlug = async (client, companyName, excludeId = null) => {
   throw Object.assign(new Error("Unable to generate a unique directory slug."), { status: 409, code: "MARITIME_DIRECTORY_SLUG_CONFLICT" });
 };
 
-const replaceTypes = async (client, entityId, types) => {
+export const replaceTypes = async (client, entityId, types) => {
   await client.query(`DELETE FROM ${T.entityTypes} WHERE entity_id=$1`, [entityId]);
   for (const type of types) await client.query(`INSERT INTO ${T.entityTypes} (entity_id,directory_type) VALUES ($1,$2)`, [entityId, type]);
 };
 
-const writeCollections = async (client, entityId, payload, partial = false) => {
+export const writeCollections = async (client, entityId, payload, partial = false) => {
   for (const [name, config] of Object.entries(COLLECTIONS)) {
     if (partial && payload[name] === undefined) continue;
     const rows = payload[name] || [];
@@ -136,7 +137,9 @@ export const getMaritimeEntity = async (entityId, queryable = pool) => {
   const entity = await queryable.query(`SELECT * FROM ${T.entities} WHERE id=$1`, [entityId]);
   if (!entity.rows.length) throw notFound();
   const types = await queryable.query(`SELECT directory_type FROM ${T.entityTypes} WHERE entity_id=$1 ORDER BY directory_type`, [entityId]);
-  const result = { entity: entity.rows[0], directory_types: types.rows.map((row) => row.directory_type) };
+  const { logo_s3_key: logoKey, ...safeEntity } = entity.rows[0];
+  if (logoKey) safeEntity.logo_url = createPresignedGetUrl({ key: logoKey }).url;
+  const result = { entity: safeEntity, directory_types: types.rows.map((row) => row.directory_type) };
   for (const [name, sql] of detailQueries) result[name] = uniqueCollectionRows((await queryable.query(sql, [entityId])).rows);
   return result;
 };
@@ -161,7 +164,7 @@ export const listMaritimeEntities = async (query, queryable = pool) => {
   const where = conditions.join(" AND ");
   const count = await queryable.query(`SELECT COUNT(*)::int AS total FROM ${T.entities} e WHERE ${where}`, values);
   values.push(limit, (page - 1) * limit);
-  const data = await queryable.query(`SELECT e.id,e.company_name,e.slug,e.logo_url,e.country,e.city,e.public_email,e.public_phone,e.website,
+  const data = await queryable.query(`SELECT e.id,e.company_name,e.slug,e.logo_url,e.logo_s3_key,e.country,e.city,e.public_email,e.public_phone,e.website,
     CASE WHEN length(coalesce(e.description,''))>180 THEN left(e.description,177)||'...' ELSE e.description END AS description_excerpt,
     ARRAY(SELECT mt.directory_type FROM ${T.entityTypes} mt WHERE mt.entity_id=e.id ORDER BY mt.directory_type) AS directory_types,
     e.review_status,e.is_active,e.data_source,e.created_at,e.updated_at,
@@ -170,7 +173,7 @@ export const listMaritimeEntities = async (query, queryable = pool) => {
     (SELECT COUNT(*)::int FROM ${T.branches} b WHERE b.entity_id=e.id) AS branch_count
     FROM ${T.entities} e WHERE ${where} ORDER BY e.company_name,e.id LIMIT $${values.length - 1} OFFSET $${values.length}`, values);
   const total = count.rows[0].total;
-  return { data: data.rows, pagination: { page, limit, total, pages: Math.ceil(total / limit) } };
+  return { data: data.rows.map(({ logo_s3_key: logoKey, ...row }) => ({ ...row, logo_url: logoKey ? createPresignedGetUrl({ key: logoKey }).url : row.logo_url })), pagination: { page, limit, total, pages: Math.ceil(total / limit) } };
 };
 
 export const createMaritimeEntity = async (payload, actorUserId, database = pool) => {

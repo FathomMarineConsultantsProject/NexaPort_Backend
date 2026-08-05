@@ -146,9 +146,12 @@ export const login = async (req, res) => {
     const result = await pool.query(
       `
       SELECT u.id, u.full_name, u.email, u.username, u.password_hash, u.role_id,
-             u.phone, u.is_active, cp.verification_status
+             u.phone, u.is_active, COALESCE(cp.verification_status, mde.review_status) AS verification_status,
+             CASE WHEN mca.user_id IS NOT NULL THEN 'maritime_company' END AS account_type
       FROM users u
       LEFT JOIN client_profiles cp ON cp.user_id = u.id
+      LEFT JOIN public.maritime_company_accounts mca ON mca.user_id = u.id
+      LEFT JOIN public.maritime_directory_entities mde ON mde.id = mca.entity_id
       WHERE u.email = $1 OR u.username = $1
       `,
       [identifier.toLowerCase()]
@@ -206,9 +209,12 @@ export const getMe = async (req, res) => {
     const result = await pool.query(
       `
       SELECT u.id, u.full_name, u.email, u.username, u.role_id, u.phone,
-             u.is_active, u.created_at, cp.verification_status
+             u.is_active, u.created_at, COALESCE(cp.verification_status, mde.review_status) AS verification_status,
+             CASE WHEN mca.user_id IS NOT NULL THEN 'maritime_company' END AS account_type
       FROM users u
       LEFT JOIN client_profiles cp ON cp.user_id = u.id
+      LEFT JOIN public.maritime_company_accounts mca ON mca.user_id = u.id
+      LEFT JOIN public.maritime_directory_entities mde ON mde.id = mca.entity_id
       WHERE u.id = $1
       `,
       [req.user.id]
@@ -222,7 +228,9 @@ export const getMe = async (req, res) => {
             verification_status:
               Number(result.rows[0].role_id) === 3
                 ? result.rows[0].verification_status || "missing"
-                : null,
+                : result.rows[0].account_type === "maritime_company"
+                  ? result.rows[0].verification_status
+                  : null,
           }
         : null,
     });

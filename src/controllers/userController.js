@@ -5,6 +5,7 @@ const roleName = (roleId) => {
   if (Number(roleId) === 1) return "Super Admin";
   if (Number(roleId) === 2) return "Expert";
   if (Number(roleId) === 3) return "Client";
+  if (Number(roleId) === 4) return "Maritime Company";
   return "User";
 };
 
