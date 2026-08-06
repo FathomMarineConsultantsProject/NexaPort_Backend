@@ -40,16 +40,26 @@ const validateAccount = (account = {}) => {
   return { fullName, email, username, password, phone: clean(account.phone) || null };
 };
 
-const validateSingleCompanyType = (types) => {
-  if (!Array.isArray(types) || types.length !== 1 || !COMPANY_TYPES.has(types[0])) {
-    throw invalid({ directoryTypes: "Choose exactly one company type." });
+const validateCompanyTypes = (types) => {
+  if (!Array.isArray(types) || types.length === 0) {
+    throw invalid({ directoryTypes: "Select at least one company type." });
   }
+  const unique = [...new Set(types.map(clean).filter(Boolean))];
+  if (unique.length > 3) {
+    throw invalid({ directoryTypes: "Select at most three company types." });
+  }
+  for (const type of unique) {
+    if (!COMPANY_TYPES.has(type)) {
+      throw invalid({ directoryTypes: `Invalid company type: ${type}` });
+    }
+  }
+  return unique;
 };
 
 export const registerMaritimeCompany = async (payload, database = pool) => {
   const account = validateAccount(payload?.account);
   const normalized = validateMaritimePayload(payload);
-  validateSingleCompanyType(normalized.directoryTypes);
+  const directoryTypes = validateCompanyTypes(normalized.directoryTypes);
   const client = await database.connect();
   try {
     await client.query("BEGIN");
@@ -73,11 +83,11 @@ export const registerMaritimeCompany = async (payload, database = pool) => {
       [...values, slug, user.id]
     );
     const entityId = entityResult.rows[0].id;
-    await replaceTypes(client, entityId, normalized.directoryTypes);
+    await replaceTypes(client, entityId, directoryTypes);
     await writeCollections(client, entityId, payload);
     await client.query(
       `INSERT INTO public.maritime_company_accounts (user_id,entity_id,primary_type) VALUES ($1,$2,$3)`,
-      [user.id, entityId, normalized.directoryTypes[0]]
+      [user.id, entityId, directoryTypes[0]]
     );
     await client.query("COMMIT");
     return { user: { ...user, account_type: "maritime_company", verification_status: "pending" }, entityId };
@@ -110,12 +120,13 @@ export const getOwnedMaritimeCompany = async (userId) => {
 export const updateOwnedMaritimeCompany = async (userId, payload) => {
   const account = await getMaritimeCompanyAccount(userId);
   if (!account) throw Object.assign(new Error("Company profile not found."), { status: 404 });
-  if (payload?.directoryTypes !== undefined && (payload.directoryTypes.length !== 1 || payload.directoryTypes[0] !== account.primary_type)) {
-    throw invalid({ directoryTypes: "The registered company type cannot be changed." });
+  let directoryTypes;
+  if (payload?.directoryTypes !== undefined) {
+    directoryTypes = validateCompanyTypes(payload.directoryTypes);
   }
   const company = { ...(payload?.company || {}) };
   delete company.logoUrl;
-  return updateMaritimeEntity(account.entity_id, { ...payload, company, directoryTypes: [account.primary_type] }, userId);
+  return updateMaritimeEntity(account.entity_id, { ...payload, company, ...(directoryTypes ? { directoryTypes } : {}) }, userId);
 };
 
 const validateLogo = ({ contentType, size }) => {

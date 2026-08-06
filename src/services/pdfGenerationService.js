@@ -56,6 +56,25 @@ function makeRows(fields, values, font, bold) {
 }
 
 export async function generateReportPdf({ title, fields, values, photos = [], serviceRequest, status = "completed", versionNumber = 1, generatedAt = new Date() }) {
+  const photoCounts = new Map();
+  for (const item of photos) {
+    if (item.fieldKey) {
+      photoCounts.set(item.fieldKey, (photoCounts.get(item.fieldKey) || 0) + 1);
+    }
+  }
+  for (const field of fields) {
+    if (field.type === "photo") {
+      const count = photoCounts.get(field.fieldKey) || 0;
+      const max = Number(field.maxPhotos) || 1;
+      if (count > max) {
+        throw Object.assign(new Error(`Maximum ${max} photo${max === 1 ? "" : "s"} allowed for ${field.label}.`), { status: 400 });
+      }
+      if (field.required && count === 0) {
+        throw Object.assign(new Error(`Required photo field "${field.label}" requires at least one image.`), { status: 400 });
+      }
+    }
+  }
+
   const pdf = await PDFDocument.create();
   const font = await pdf.embedFont(StandardFonts.Helvetica); const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
   let page; let y; let currentSection = ""; let checklistNumber = 0;

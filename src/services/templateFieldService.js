@@ -23,6 +23,18 @@ export function normalizeFields(input, { keepKeys = true } = {}) {
     const coordinates = raw.sourceCoordinates;
     if (coordinates != null && (!coordinates || typeof coordinates !== "object" || Array.isArray(coordinates) || ![coordinates.x, coordinates.y, coordinates.width, coordinates.height].every((value) => Number.isFinite(Number(value))) || Number(coordinates.width) <= 0 || Number(coordinates.height) <= 0)) throw Object.assign(new Error(`Field ${index + 1} has invalid source coordinates.`), { status: 400 });
     if (raw.options != null && !Array.isArray(raw.options)) throw Object.assign(new Error(`Field ${index + 1} options must be an array.`), { status: 400 });
+    let maxPhotos = undefined;
+    if (type === "photo") {
+      if (raw?.maxPhotos != null) {
+        const num = Number(raw.maxPhotos);
+        if (!Number.isInteger(num) || num < 1 || num > 10) {
+          throw Object.assign(new Error(`Field "${label}" has invalid maxPhotos. Must be between 1 and 10.`), { status: 400 });
+        }
+        maxPhotos = num;
+      } else {
+        maxPhotos = 1;
+      }
+    }
     return {
       fieldKey,
       label,
@@ -39,6 +51,7 @@ export function normalizeFields(input, { keepKeys = true } = {}) {
         ? { x: Number(coordinates.x), y: Number(coordinates.y), width: Number(coordinates.width), height: Number(coordinates.height) }
         : null,
       captionEnabled: type === "photo" && Boolean(raw?.captionEnabled),
+      maxPhotos,
     };
   }).sort((a, b) => a.sortOrder - b.sortOrder).map((field, index) => ({ ...field, sortOrder: index }));
 }

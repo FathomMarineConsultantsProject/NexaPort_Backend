@@ -2,7 +2,7 @@ import { pool } from "../config/db.js";
 import { normalizeFields } from "../services/templateFieldService.js";
 import { mapFieldsWithOpenRouter } from "../services/openRouterTemplateService.js";
 
-const SOURCE_TYPES = new Set(["pdf", "xml", "docx", "xlsx"]);
+const SOURCE_TYPES = new Set(["pdf", "xml", "docx", "xlsx", "manual"]);
 const EXTRACTION_METHODS = new Set(["acroform", "text", "ocr", "nexaport_xml", "generic_xml", "manual"]);
 const FORBIDDEN_SOURCE_KEYS = new Set(["source_s3_key", "sourceS3Key", "key", "file", "fileName", "contentType", "size", "bytes", "base64", "sourceData", "rawPdf", "rawXml"]);
 const clean = (value, max = 255) => String(value ?? "").replace(/[<>\u0000-\u001f]/g, "").trim().slice(0, max);
@@ -43,9 +43,9 @@ export function validateTemplatePayload(body = {}) {
   rejectSourceContent(body);
   const title = clean(body.title, 180);
   if (!title) throw badRequest("Template title is required.");
-  if (!SOURCE_TYPES.has(body.sourceType)) throw badRequest("Template source type must be PDF, XML, DOCX or XLSX.");
-  const fields = normalizeFields(body.fields);
-  if (!fields.length) throw badRequest("At least one normalized field is required.");
+  if (!SOURCE_TYPES.has(body.sourceType)) throw badRequest("Template source type must be PDF, XML, DOCX, XLSX or manual.");
+  const fields = normalizeFields(body.fields || []);
+  if (!fields.length && body.sourceType !== "manual") throw badRequest("At least one normalized field is required.");
   return { title, description: clean(body.description, 2000) || null, sourceType: body.sourceType, fields, layout: normalizeLayout(body.layout, body.extractionMethod) };
 }
 

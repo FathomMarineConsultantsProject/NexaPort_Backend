@@ -77,12 +77,20 @@ export async function normalizeLocalMedia(rawBody, fields) {
   let body;
   try { body = JSON.parse(Buffer.isBuffer(rawBody) ? rawBody.toString("utf8") : "{}"); }
   catch { throw Object.assign(new Error("The local media payload is invalid."), { status: 400 }); }
-  if (!Array.isArray(body.media) || body.media.length > 20) throw Object.assign(new Error("The local media payload is invalid."), { status: 400 });
+  if (!Array.isArray(body.media) || body.media.length > 50) throw Object.assign(new Error("The local media payload is invalid."), { status: 400 });
+  const counts = new Map();
   return Promise.all(body.media.map(async (item) => {
     const field = fields.find((candidate) => candidate.fieldKey === item?.fieldKey && (candidate.type === "photo" || candidate.type === "signature" || /signature/i.test(candidate.label || "")));
     const mimeType = String(item?.mimeType || "").toLowerCase();
     const match = String(item?.dataUrl || "").match(/^data:(image\/(?:jpeg|png|webp));base64,([a-z0-9+/=]+)$/i);
     if (!field || !IMAGE_TYPES.has(mimeType) || match?.[1].toLowerCase() !== mimeType) throw Object.assign(new Error("A report image is invalid."), { status: 400 });
+    const fieldKind = /signature/i.test(field.label || "") ? "signature" : field.type;
+    const maxPhotos = fieldKind === "photo" ? (Number(field.maxPhotos) || 1) : 1;
+    const currentCount = (counts.get(field.fieldKey) || 0) + 1;
+    if (currentCount > maxPhotos) {
+      throw Object.assign(new Error(`Maximum ${maxPhotos} photo${maxPhotos === 1 ? "" : "s"} allowed for ${field.label}.`), { status: 400 });
+    }
+    counts.set(field.fieldKey, currentCount);
     let bytes = Buffer.from(match[2], "base64");
     if (!bytes.length || bytes.length > 5 * 1024 * 1024) throw Object.assign(new Error("Report images must be 5 MB or smaller."), { status: 400 });
     let metadata;
@@ -90,7 +98,7 @@ export async function normalizeLocalMedia(rawBody, fields) {
     if (!["jpeg", "png", "webp"].includes(metadata.format)) throw Object.assign(new Error("A report image is invalid."), { status: 400 });
     let outputType = mimeType;
     if (mimeType === "image/webp") { bytes = await sharp(bytes).jpeg({ quality: 88 }).toBuffer(); outputType = "image/jpeg"; }
-    return { fieldKey: field.fieldKey, type: /signature/i.test(field.label || "") ? "signature" : field.type, label: field.label, caption: field.captionEnabled ? clean(item.caption, 500) : "", mimeType: outputType, bytes };
+    return { fieldKey: field.fieldKey, type: fieldKind, label: field.label, caption: field.captionEnabled ? clean(item.caption, 500) : "", mimeType: outputType, bytes };
   }));
 }
 
