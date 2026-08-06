@@ -7,16 +7,75 @@ const EXTRACTION_METHODS = new Set(["acroform", "text", "ocr", "nexaport_xml", "
 const FORBIDDEN_SOURCE_KEYS = new Set(["source_s3_key", "sourceS3Key", "key", "file", "fileName", "contentType", "size", "bytes", "base64", "sourceData", "rawPdf", "rawXml"]);
 const clean = (value, max = 255) => String(value ?? "").replace(/[<>\u0000-\u001f]/g, "").trim().slice(0, max);
 const id = (value) => Number.isInteger(Number(value)) && Number(value) > 0 ? Number(value) : null;
-const RUNTIME_COLUMNS = new Set(["template_scope", "created_by_user_id", "expert_id", "source_s3_key", "source_file_name", "source_mime_type", "source_file_size"]);
-const isRuntimeSchemaError = (error) => ["42P01", "42703"].includes(error?.code) || (error?.code === "23502" && RUNTIME_COLUMNS.has(error?.column)) || (error?.code === "23514" && /^inspection_templates_(?:scope|source_type)/.test(error?.constraint || ""));
+const COMMIT_HASH = "cbbbeb5efa3db24102871bd70d6ae2d8ddd0b041";
+
+const isDbUnavailable = (error) =>
+  error?.code === "ECONNREFUSED" ||
+  error?.code === "57P01" ||
+  (typeof error?.code === "string" && error.code.startsWith("08"));
+
+const isSchemaMissing = (error) =>
+  error?.code === "42P01" || error?.code === "42703";
+
 export const sendTemplateError = (res, error, fallback, operation = "templates") => {
-  if (!error?.status) console.error("Inspection Templates backend error", { operation, name: error?.name, code: error?.code, table: error?.table, column: error?.column, constraint: error?.constraint });
-  if (isRuntimeSchemaError(error)) return res.status(503).json({ success: false, message: "Inspection Templates database update has not been installed." });
-  return res.status(error?.status || 500).json({ success: false, message: error?.status ? error.message : fallback });
+  const code = error?.code || null;
+  const status = error?.status || null;
+
+  if (!status) {
+    console.error("Inspection Templates backend error", {
+      operation,
+      name: error?.name,
+      code: error?.code,
+      message: error?.message,
+      table: error?.table,
+      column: error?.column,
+      constraint: error?.constraint,
+      commitHash: COMMIT_HASH,
+    });
+  }
+
+  if (isSchemaMissing(error)) {
+    const diagCode = code === "42P01" ? "TEMPLATES_SCHEMA_MISSING_TABLE" : "TEMPLATES_SCHEMA_MISSING_COLUMN";
+    return res.status(503).json({
+      success: false,
+      code: diagCode,
+      message: "Inspection Templates database update has not been installed.",
+    });
+  }
+
+  if (isDbUnavailable(error)) {
+    return res.status(503).json({
+      success: false,
+      code: "TEMPLATES_DATABASE_UNAVAILABLE",
+      message: "Inspection Templates database service is temporarily unavailable.",
+    });
+  }
+
+  if (code === "23514" || code === "23502" || code === "23503") {
+    return res.status(status || 400).json({
+      success: false,
+      code: "TEMPLATES_SCHEMA_CONSTRAINT_MISMATCH",
+      message: status ? error.message : "The request violated a database integrity constraint.",
+    });
+  }
+
+  if (code === "23505") {
+    return res.status(status || 409).json({
+      success: false,
+      code: "TEMPLATES_SCHEMA_CONSTRAINT_MISMATCH",
+      message: status ? error.message : "A record with matching details already exists.",
+    });
+  }
+
+  return res.status(status || 500).json({
+    success: false,
+    message: status ? error.message : fallback,
+  });
 };
+
 const sendError = (res, error, fallback) => sendTemplateError(res, error, fallback);
 const badRequest = (message) => Object.assign(new Error(message), { status: 400 });
-const templateSelect = `SELECT t.*,u.full_name AS consultant_name,u.email AS consultant_email,creator.full_name AS creator_name,creator.email AS creator_email FROM inspection_templates t LEFT JOIN experts e ON e.id=t.expert_id LEFT JOIN users u ON u.id=e.user_id JOIN users creator ON creator.id=t.created_by_user_id`;
+const templateSelect = `SELECT t.*,u.full_name AS consultant_name,u.email AS consultant_email,creator.full_name AS creator_name,creator.email AS creator_email FROM inspection_templates t LEFT JOIN experts e ON e.id=t.expert_id LEFT JOIN users u ON u.id=e.user_id LEFT JOIN users creator ON creator.id=t.created_by_user_id`;
 
 function rejectSourceContent(body = {}) {
   const visit = (value) => {
@@ -97,8 +156,9 @@ export const createTemplate = async (req, res) => {
   try {
     const payload = validateTemplatePayload(req.body || {}); const roleId = Number(req.user.role_id);
     const expertId = roleId === 2 ? await expertIdForUser(client, req.user.id) : null; const scope = roleId === 1 ? "nexaport" : "private"; const status = scope === "private" ? "published" : "draft";
+    const extractionMethod = payload.layout.extractionMethod || "manual";
     await client.query("BEGIN");
-    const created = await client.query("INSERT INTO inspection_templates (expert_id,template_scope,created_by_user_id,title,description,source_type,status,extraction_status,current_version_number,has_photo_fields) VALUES ($1,$2,$3,$4,$5,$6,$7,'complete',1,$8) RETURNING *", [expertId, scope, req.user.id, payload.title, payload.description, payload.sourceType, status, payload.fields.some((field) => field.type === "photo")]);
+    const created = await client.query("INSERT INTO inspection_templates (expert_id,template_scope,created_by_user_id,title,description,source_type,extraction_method,status,extraction_status,current_version_number,has_photo_fields) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'complete',1,$9) RETURNING *", [expertId, scope, req.user.id, payload.title, payload.description, payload.sourceType, extractionMethod, status, payload.fields.some((field) => field.type === "photo")]);
     const version = await client.query("INSERT INTO inspection_template_versions (template_id,version_number,fields_jsonb,layout_jsonb,created_by_user_id) VALUES ($1,1,$2,$3,$4) RETURNING *", [created.rows[0].id, JSON.stringify(payload.fields), JSON.stringify(payload.layout), req.user.id]);
     await client.query("COMMIT");
     const row = created.rows[0]; return res.status(201).json({ success: true, data: { ...publicTemplate({ ...row, permissions: templatePermissions(row, roleId, expertId) }), versions: [version.rows[0]] } });
@@ -143,7 +203,8 @@ export const duplicateTemplate = async (req, res) => {
     if (!source?.current_version_number) return res.status(404).json({ success: false, message: "Published NexaPort template not found." });
     const sourceVersion = (await client.query("SELECT fields_jsonb,layout_jsonb FROM inspection_template_versions WHERE template_id=$1 AND version_number=$2", [source.id, source.current_version_number])).rows[0];
     await client.query("BEGIN");
-    const copied = await client.query("INSERT INTO inspection_templates (expert_id,template_scope,created_by_user_id,title,description,source_type,status,extraction_status,current_version_number,has_photo_fields) VALUES ($1,'private',$2,$3,$4,$5,'published','complete',1,$6) RETURNING *", [expertId, req.user.id, `${source.title} Copy`.slice(0, 180), source.description, source.source_type, source.has_photo_fields]);
+    const createdExtractionMethod = source.extraction_method || "manual";
+    const copied = await client.query("INSERT INTO inspection_templates (expert_id,template_scope,created_by_user_id,title,description,source_type,extraction_method,status,extraction_status,current_version_number,has_photo_fields) VALUES ($1,'private',$2,$3,$4,$5,$6,'published','complete',1,$7) RETURNING *", [expertId, req.user.id, `${source.title} Copy`.slice(0, 180), source.description, source.source_type, createdExtractionMethod, source.has_photo_fields]);
     const version = await client.query("INSERT INTO inspection_template_versions (template_id,version_number,fields_jsonb,layout_jsonb,created_by_user_id) VALUES ($1,1,$2,$3,$4) RETURNING *", [copied.rows[0].id, JSON.stringify(sourceVersion.fields_jsonb), JSON.stringify(sourceVersion.layout_jsonb), req.user.id]);
     await client.query("COMMIT"); const row = copied.rows[0];
     return res.status(201).json({ success: true, data: { ...publicTemplate({ ...row, permissions: templatePermissions(row, 2, expertId) }), versions: [version.rows[0]] } });
