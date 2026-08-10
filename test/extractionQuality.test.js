@@ -96,6 +96,17 @@ describe('Extraction Quality Tests - Backend', () => {
         assert.equal(result.fields[0].sourceText, 'Decking in good condition? Yes No');
     });
 
+    test('drops an ungrounded AI field without losing grounded fields', async () => {
+        const input = { documentTitle: 'Checklist', sourceType: 'docx', pagesOrSheets: [{ name: 'Document', lines: [{ text: 'Are emergency fire pumps operable? Yes No', order: 4, blockType: 'checklist_row', tableIndex: 0, rowIndex: 2 }] }] };
+        const output = { sections: [{ sectionKey: 'part_b2', title: 'Part B2', sortOrder: 99 }], fields: [
+            { fieldKey: 'fire_pumps', label: 'Are emergency fire pumps operable?', fieldType: 'yes_no', required: false, sectionKey: 'part_b2', sortOrder: 99, options: ['Yes', 'No'], sourceText: 'Are emergency fire pumps operable? Yes No', sourceBlockOrder: 4, tableIndex: 0, rowIndex: 2 },
+            { fieldKey: 'invented', label: 'Invented field', fieldType: 'text', required: false, sectionKey: 'part_b2', sortOrder: 0, options: [], sourceText: 'not present' }
+        ] };
+        const result = await mapFieldsWithOpenRouter(input, { fetchImpl: async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(output) } }] }) }), env });
+        assert.deepEqual(result.fields.map((field) => field.fieldKey), ['fire_pumps']);
+        assert.equal(result.fields[0].sourceBlockOrder, 4);
+    });
+
     test('Large PDF limit message test', async () => {
         const code = await source('../../NexaPort_Frontend/src/pages/TemplateEditorPage.jsx').catch(() => '');
         if (code) {
