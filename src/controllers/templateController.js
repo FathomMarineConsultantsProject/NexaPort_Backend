@@ -70,6 +70,7 @@ export const sendTemplateError = (res, error, fallback, operation = "templates")
   return res.status(status || 500).json({
     success: false,
     message: status ? error.message : fallback,
+    ...(Array.isArray(error?.fieldErrors) ? { fieldErrors: error.fieldErrors } : {}),
   });
 };
 
@@ -103,7 +104,7 @@ export function validateTemplatePayload(body = {}) {
   const title = clean(body.title, 180);
   if (!title) throw badRequest("Template title is required.");
   if (!SOURCE_TYPES.has(body.sourceType)) throw badRequest("Template source type must be PDF, XML, DOCX, XLSX or manual.");
-  const fields = normalizeFields(body.fields || []);
+  const fields = normalizeFields(body.fields || [], { sourceType: body.sourceType });
   if (!fields.length && body.sourceType !== "manual") throw badRequest("At least one normalized field is required.");
   return { title, description: clean(body.description, 2000) || null, sourceType: body.sourceType, fields, layout: normalizeLayout(body.layout, body.extractionMethod) };
 }
@@ -185,7 +186,7 @@ export const updateTemplate = async (req, res) => {
 export const createTemplateVersion = async (req, res) => {
   const client = await pool.connect();
   try {
-    rejectSourceContent(req.body || {}); const template = await templateForAccess(client, req.params.id, req.user, { ownerOnly: true }); const fields = normalizeFields(req.body.fields);
+    rejectSourceContent(req.body || {}); const template = await templateForAccess(client, req.params.id, req.user, { ownerOnly: true }); const fields = normalizeFields(req.body.fields, { sourceType: template.source_type });
     if (!fields.length) throw badRequest("At least one normalized field is required.");
     const layout = normalizeLayout(req.body.layout);
     await client.query("BEGIN"); const locked = await client.query("SELECT current_version_number FROM inspection_templates WHERE id=$1 FOR UPDATE", [template.id]); const version = Number(locked.rows[0].current_version_number) + 1;
