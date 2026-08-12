@@ -14,6 +14,15 @@ export function sanitizeFieldSourceMetadata(raw = {}, sourceType) {
   if (sourceType === "docx") { for (const [target, value] of [["sourceBlockOrder", raw.sourceBlockOrder], ["sourceTableIndex", raw.sourceTableIndex ?? raw.tableIndex], ["sourceRow", raw.sourceRow ?? raw.rowIndex], ["sourceColumn", raw.sourceColumn ?? raw.columnIndex]]) { const number = integer(value); if (number !== undefined) field[target] = number; } }
   if (sourceType === "xlsx") { if (typeof raw.sourceSheet === "string" && raw.sourceSheet.trim()) field.sourceSheet = clean(raw.sourceSheet, 120); for (const [target, value] of [["sourceRow", raw.sourceRow ?? raw.rowIndex], ["sourceColumn", raw.sourceColumn ?? raw.columnIndex]]) { const number = integer(value); if (number !== undefined) field[target] = number; } }
   if (sourceType === "xml") { if (typeof raw.sourceElementPath === "string" && raw.sourceElementPath.trim().startsWith("/")) field.sourceElementPath = clean(raw.sourceElementPath, 500); const number = integer(raw.sourceBlockOrder); if (number !== undefined) field.sourceBlockOrder = number; }
+  if (Array.isArray(raw.evidenceRefs)) field.evidenceRefs = [...new Set(raw.evidenceRefs.filter((value) => /^block-\d+$/.test(value)))].slice(0, 50);
+  if (raw.confidence != null && Number.isFinite(Number(raw.confidence))) field.confidence = Math.max(0, Math.min(1, Number(raw.confidence)));
+  if (raw.reviewWarning || raw.warning) field.reviewWarning = clean(raw.reviewWarning || raw.warning, 300) || null;
+  if (raw.sourceLocation && typeof raw.sourceLocation === "object" && !Array.isArray(raw.sourceLocation)) field.sourceLocation = {
+    blockId: /^block-\d+$/.test(raw.sourceLocation.blockId || "") ? raw.sourceLocation.blockId : null,
+    globalOrder: integer(raw.sourceLocation.globalOrder), pageNumber: integer(raw.sourceLocation.pageNumber), sheetIndex: integer(raw.sourceLocation.sheetIndex),
+    sheetName: clean(raw.sourceLocation.sheetName, 120) || null, rowIndex: integer(raw.sourceLocation.rowIndex), columnIndex: integer(raw.sourceLocation.columnIndex),
+    tableIndex: integer(raw.sourceLocation.tableIndex), elementPath: clean(raw.sourceLocation.elementPath, 500) || null,
+  };
   return field;
 }
 
@@ -59,9 +68,10 @@ export function normalizeFields(input, { keepKeys = true, sourceType } = {}) {
       defaultValue: type === "checkbox" ? Boolean(raw?.defaultValue) : type === "system_identity" ? "NexaPort Inspector" : clean(raw?.defaultValue, 1000),
       options: type === "select" ? [...new Set((raw?.options || []).map((value) => clean(value, 100)).filter(Boolean))].slice(0, 50) : [],
       sourceFieldName: clean(raw?.sourceFieldName, 200) || null,
-      sourcePageNumber: Number.isInteger(Number(raw?.sourcePageNumber)) && Number(raw.sourcePageNumber) > 0 && Number(raw.sourcePageNumber) <= 25 ? Number(raw.sourcePageNumber) : null,
+      sourcePageNumber: Number.isInteger(Number(raw?.sourcePageNumber)) && Number(raw.sourcePageNumber) > 0 ? Number(raw.sourcePageNumber) : null,
       sourceCoordinates: raw.sourceCoordinates || null,
       sourceBlockOrder: raw.sourceBlockOrder ?? null, sourceTableIndex: raw.sourceTableIndex ?? null, sourceRow: raw.sourceRow ?? null, sourceColumn: raw.sourceColumn ?? null, sourceSheet: raw.sourceSheet ?? null, sourceElementPath: raw.sourceElementPath ?? null,
+      evidenceRefs: raw.evidenceRefs || [], confidence: raw.confidence ?? null, reviewWarning: raw.reviewWarning ?? null, sourceLocation: raw.sourceLocation ?? null,
       captionEnabled: type === "photo" && Boolean(raw?.captionEnabled),
       maxPhotos,
     });

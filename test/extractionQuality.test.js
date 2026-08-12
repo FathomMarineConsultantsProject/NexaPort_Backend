@@ -27,14 +27,12 @@ describe('Extraction Quality Tests - Backend', () => {
         assert.ok(Array.isArray(line.cells));
     });
 
-    test('System prompt includes XLSX/DOCX instructions', async () => {
+    test('System prompt requires complete grounded classification', async () => {
         const code = await source('../src/services/openRouterTemplateService.js');
-        assert.ok(code.includes('cell coordinate labels'), 'missing coordinate labels instruction');
-        assert.ok(code.includes('abbreviation'), 'missing abbreviation instruction');
-        assert.ok(code.includes('instructional'), 'missing instructional instruction');
-        assert.ok(code.includes('concatenate'), 'missing concatenate instruction');
-        assert.ok(code.includes('date serial'), 'missing date serial instruction');
-        assert.ok(code.includes('textarea'), 'missing textarea instruction');
+        assert.ok(code.includes('Process ALL supplied readable blocks'));
+        assert.ok(code.includes('Classify every non-context block'));
+        assert.ok(code.includes('instructions or item/reference codes into fields'));
+        assert.ok(code.includes('Every field must cite evidenceRefs'));
     });
 
     test('Evidence validation still rejects forbidden keys', () => {
@@ -57,10 +55,7 @@ describe('Extraction Quality Tests - Backend', () => {
             ]}]
         };
 
-        const mappedOutput = {
-            sections: [{ sectionKey: 'inspection', title: 'Inspection', sortOrder: 1 }],
-            fields: [{ fieldKey: 'hull_condition', label: 'Hull condition', fieldType: 'select', required: false, sectionKey: 'inspection', sortOrder: 1, options: ['Good', 'Fair', 'Poor'], sourceText: 'Hull condition Good Fair Poor' }]
-        };
+        const mappedOutput = { documentTitle: 'Test Document', sections: [{ sectionKey: 'inspection', title: 'Inspection', sourceOrder: 0, evidenceRefs: ['block-0'] }], fields: [{ fieldKey: 'hull_condition', label: 'Hull condition', fieldType: 'select', required: false, sectionKey: 'inspection', sourceOrder: 0, options: ['Good', 'Fair', 'Poor'], sourceText: 'Hull condition Good Fair Poor', evidenceRefs: ['block-0'], confidence: .9, warning: '' }], classifications: [{ blockId: 'block-0', classification: 'field', reason: 'Checklist' }], notes: [], referenceData: [], warnings: [], unmappedBlocks: [] };
 
         let requestBody;
         const fetchImpl = async (_url, options) => {
@@ -74,7 +69,7 @@ describe('Extraction Quality Tests - Backend', () => {
         assert.equal(result.fields[0].fieldType, 'select');
         // Verify structured metadata was sent in the evidence
         const sent = JSON.parse(requestBody.messages[1].content);
-        assert.equal(sent.pagesOrSheets[0].lines[0].blockType, 'checklist_row');
+        assert.equal(sent.chunk.blocks[0].metadata.blockType, 'checklist_row');
     });
 
     test('Mocked mapping preserves field sourceText evidence', async () => {
@@ -84,10 +79,7 @@ describe('Extraction Quality Tests - Backend', () => {
             pagesOrSheets: [{ name: 'Page 1', lines: [{ text: 'Decking in good condition? Yes No' }] }]
         };
 
-        const mappedOutput = {
-            sections: [{ sectionKey: 'dock', title: 'Dock', sortOrder: 1 }],
-            fields: [{ fieldKey: 'decking_good', label: 'Decking in good condition?', fieldType: 'yes_no', required: false, sectionKey: 'dock', sortOrder: 1, options: ['Yes', 'No'], sourceText: 'Decking in good condition? Yes No' }]
-        };
+        const mappedOutput = { documentTitle: 'Dock Check', sections: [{ sectionKey: 'dock', title: 'Dock', sourceOrder: 0, evidenceRefs: ['block-0'] }], fields: [{ fieldKey: 'decking_good', label: 'Decking in good condition?', fieldType: 'yes_no', required: false, sectionKey: 'dock', sourceOrder: 0, options: ['Yes', 'No'], sourceText: 'Decking in good condition? Yes No', evidenceRefs: ['block-0'], confidence: .9, warning: '' }], classifications: [{ blockId: 'block-0', classification: 'field', reason: 'Question' }], notes: [], referenceData: [], warnings: [], unmappedBlocks: [] };
 
         const result = await mapFieldsWithOpenRouter(input, {
             fetchImpl: async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(mappedOutput) } }] }) }),
@@ -98,13 +90,13 @@ describe('Extraction Quality Tests - Backend', () => {
 
     test('drops an ungrounded AI field without losing grounded fields', async () => {
         const input = { documentTitle: 'Checklist', sourceType: 'docx', pagesOrSheets: [{ name: 'Document', lines: [{ text: 'Are emergency fire pumps operable? Yes No', order: 4, blockType: 'checklist_row', tableIndex: 0, rowIndex: 2 }] }] };
-        const output = { sections: [{ sectionKey: 'part_b2', title: 'Part B2', sortOrder: 99 }], fields: [
-            { fieldKey: 'fire_pumps', label: 'Are emergency fire pumps operable?', fieldType: 'yes_no', required: false, sectionKey: 'part_b2', sortOrder: 99, options: ['Yes', 'No'], sourceText: 'Are emergency fire pumps operable? Yes No', sourceBlockOrder: 4, tableIndex: 0, rowIndex: 2 },
-            { fieldKey: 'invented', label: 'Invented field', fieldType: 'text', required: false, sectionKey: 'part_b2', sortOrder: 0, options: [], sourceText: 'not present' }
-        ] };
+        const output = { documentTitle: 'Checklist', sections: [{ sectionKey: 'part_b2', title: 'Part B2', sourceOrder: 4, evidenceRefs: ['block-0'] }], fields: [
+            { fieldKey: 'fire_pumps', label: 'Are emergency fire pumps operable?', fieldType: 'yes_no', required: false, sectionKey: 'part_b2', sourceOrder: 4, options: ['Yes', 'No'], sourceText: 'Are emergency fire pumps operable? Yes No', evidenceRefs: ['block-0'], confidence: .9, warning: '' },
+            { fieldKey: 'invented', label: 'Invented field', fieldType: 'text', required: false, sectionKey: 'part_b2', sourceOrder: 0, options: [], sourceText: 'not present', evidenceRefs: ['block-0'], confidence: .2, warning: '' }
+        ], classifications: [{ blockId: 'block-0', classification: 'field', reason: 'Question' }], notes: [], referenceData: [], warnings: [], unmappedBlocks: [] };
         const result = await mapFieldsWithOpenRouter(input, { fetchImpl: async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(output) } }] }) }), env });
         assert.deepEqual(result.fields.map((field) => field.fieldKey), ['fire_pumps']);
-        assert.equal(result.fields[0].sourceBlockOrder, 4);
+        assert.equal(result.fields[0].sourceOrder, 0);
     });
 
     test('Large PDF limit message test', async () => {

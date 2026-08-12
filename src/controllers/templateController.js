@@ -1,6 +1,6 @@
 import { pool } from "../config/db.js";
 import { normalizeFields } from "../services/templateFieldService.js";
-import { mapFieldsWithOpenRouter } from "../services/openRouterTemplateService.js";
+import { analyseTemplateSource, mapFieldsWithOpenRouter } from "../services/openRouterTemplateService.js";
 
 const SOURCE_TYPES = new Set(["pdf", "xml", "docx", "xlsx", "manual"]);
 const EXTRACTION_METHODS = new Set(["acroform", "text", "ocr", "nexaport_xml", "generic_xml", "manual"]);
@@ -95,7 +95,7 @@ function normalizeLayout(input = {}, extractionMethod) {
   const method = extractionMethod || input.extractionMethod || input.extractionMode || "manual";
   if (!EXTRACTION_METHODS.has(method)) throw badRequest("Extraction method is invalid.");
   const pageCount = input.pageCount == null ? null : Number(input.pageCount);
-  if (pageCount !== null && (!Number.isInteger(pageCount) || pageCount < 1 || pageCount > 25)) throw badRequest("Template page count is invalid.");
+  if (pageCount !== null && (!Number.isInteger(pageCount) || pageCount < 1 || pageCount > 10000)) throw badRequest("Template page count is invalid.");
   return { extractionMethod: method, pageCount };
 }
 
@@ -150,6 +150,12 @@ export const listTemplates = async (req, res) => {
 export const mapTemplateFields = async (req, res) => {
   try { return res.json({ success: true, data: await mapFieldsWithOpenRouter(req.body || {}) }); }
   catch (error) { return sendError(res, error, "Unable to map template fields."); }
+};
+
+export const analyseTemplate = async (req, res) => {
+  const controller = new AbortController(); req.once("aborted", () => controller.abort());
+  try { return res.json({ success: true, data: await analyseTemplateSource(req.body || {}, { signal: controller.signal }) }); }
+  catch (error) { return sendError(res, error, "Unable to analyse template source."); }
 };
 
 export const createTemplate = async (req, res) => {
