@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { isProvenanceOnlyLabel } from "../utils/templateProvenance.js";
 
 export const FIELD_TYPES = ["text", "textarea", "number", "date", "checkbox", "yes_no", "select", "signature", "photo", "section_heading", "system_identity"];
 const clean = (value, max = 200) => String(value ?? "").replace(/[<>\u0000-\u001f]/g, "").trim().slice(0, max);
@@ -34,6 +35,9 @@ export function normalizeFields(input, { keepKeys = true, sourceType } = {}) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) { errors.push(fieldError(index, suppliedKey, "field", "Field configuration is invalid.")); return; }
     const label = clean(raw?.label, 160);
     if (!label) { errors.push(fieldError(index, suppliedKey, "label", "Field label is required.")); return; }
+    if (isProvenanceOnlyLabel(label)) { errors.push(fieldError(index, suppliedKey, "label", "Field label must describe the source control, not its source location.")); return; }
+    const section = clean(raw?.section || "General", 100);
+    if (isProvenanceOnlyLabel(section)) { errors.push(fieldError(index, suppliedKey, "section", "Field section must describe the document section, not its source location.")); return; }
     const requestedType = raw.type ?? raw.fieldType ?? "text";
     if (!FIELD_TYPES.includes(requestedType)) { errors.push(fieldError(index, suppliedKey, "type", "Field has an unsupported type.")); return; }
     if (typeof raw.required !== "undefined" && typeof raw.required !== "boolean") { errors.push(fieldError(index, suppliedKey, "required", "Required must be true or false.")); return; }
@@ -63,7 +67,7 @@ export function normalizeFields(input, { keepKeys = true, sourceType } = {}) {
       type,
       fieldType: type,
       required: Boolean(raw?.required),
-      section: clean(raw?.section || "General", 100),
+      section,
       sortOrder: Number.isFinite(Number(raw?.sortOrder)) ? Number(raw.sortOrder) : index,
       defaultValue: type === "checkbox" ? Boolean(raw?.defaultValue) : type === "system_identity" ? "NexaPort Inspector" : clean(raw?.defaultValue, 1000),
       options: type === "select" ? [...new Set((raw?.options || []).map((value) => clean(value, 100)).filter(Boolean))].slice(0, 50) : [],

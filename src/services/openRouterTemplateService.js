@@ -1,3 +1,5 @@
+import { isProvenanceOnlyLabel } from "../utils/templateProvenance.js";
+
 const SOURCE_TYPES = new Set(["pdf", "xml", "docx", "xlsx"]);
 const FIELD_TYPES = new Set(["text", "textarea", "number", "date", "checkbox", "yes_no", "select", "signature", "photo", "section_heading", "system_identity"]);
 const CLASSIFICATIONS = new Set(["field", "section", "instruction", "reference", "decorative", "unmapped", "failed"]);
@@ -11,14 +13,14 @@ const canonical = (value) => clean(value, 20000).normalize("NFKC").replace(/[‐
 const clampEnv = (value, fallback, min, max) => { const number = Number(value); return Number.isFinite(number) ? Math.min(max, Math.max(min, Math.round(number))) : fallback; };
 
 const evidenceRefSchema = { type: "array", items: { type: "string" } };
-const sectionSchema = { type: "object", additionalProperties: false, required: ["sectionKey", "title", "sourceOrder", "evidenceRefs"], properties: { sectionKey: { type: "string" }, title: { type: "string" }, sourceOrder: { type: "integer" }, evidenceRefs: evidenceRefSchema } };
-const fieldSchema = { type: "object", additionalProperties: false, required: ["fieldKey", "label", "fieldType", "required", "sectionKey", "sourceOrder", "options", "maxPhotos", "sourceText", "evidenceRefs", "confidence", "warning"], properties: { fieldKey: { type: "string" }, label: { type: "string" }, fieldType: { enum: [...FIELD_TYPES] }, required: { type: "boolean" }, sectionKey: { type: "string" }, sourceOrder: { type: "integer" }, options: { type: "array", items: { type: "string" } }, maxPhotos: { type: "integer", minimum: 1, maximum: 10 }, sourceText: { type: "string" }, evidenceRefs: evidenceRefSchema, confidence: { type: "number", minimum: 0, maximum: 1 }, warning: { type: "string" } } };
+const sectionSchema = { type: "object", additionalProperties: false, required: ["sectionKey", "title", "order"], properties: { sectionKey: { type: "string" }, title: { type: "string" }, order: { type: "integer" }, evidenceRefs: evidenceRefSchema } };
+const fieldSchema = { type: "object", additionalProperties: false, required: ["fieldKey", "label", "fieldType", "sectionKey", "required", "options", "order", "evidenceRefs", "confidence"], properties: { fieldKey: { type: "string" }, label: { type: "string" }, fieldType: { enum: [...FIELD_TYPES] }, required: { type: "boolean" }, sectionKey: { type: "string" }, order: { type: "integer" }, options: { type: "array", items: { type: "string" } }, maxPhotos: { type: "integer", minimum: 1, maximum: 10 }, sourceText: { type: "string" }, evidenceRefs: evidenceRefSchema, confidence: { type: "number", minimum: 0, maximum: 1 }, warning: { type: "string" } } };
 const classificationSchema = { type: "object", additionalProperties: false, required: ["blockId", "classification", "reason"], properties: { blockId: { type: "string" }, classification: { enum: [...CLASSIFICATIONS].filter((item) => item !== "failed") }, reason: { type: "string" } } };
 const evidenceItemSchema = { type: "object", additionalProperties: false, required: ["text", "evidenceRefs"], properties: { text: { type: "string" }, evidenceRefs: evidenceRefSchema } };
 
 const mappingOutputSchema = {
-  name: "template_document_mapping", strict: true,
-  schema: { type: "object", additionalProperties: false, required: ["documentTitle", "sections", "fields", "classifications", "notes", "referenceData", "warnings", "unmappedBlocks"], properties: {
+  name: "template_document_mapping", strict: false,
+  schema: { type: "object", additionalProperties: false, required: ["sections", "fields", "warnings"], properties: {
     documentTitle: { type: "string" }, sections: { type: "array", items: sectionSchema }, fields: { type: "array", items: fieldSchema }, classifications: { type: "array", items: classificationSchema }, notes: { type: "array", items: evidenceItemSchema }, referenceData: { type: "array", items: evidenceItemSchema }, warnings: { type: "array", items: { type: "string" } }, unmappedBlocks: { type: "array", items: classificationSchema },
   } },
 };
@@ -89,33 +91,53 @@ function sourceLocation(block) {
   return { blockId: block?.id, globalOrder: block?.globalOrder, pageNumber: location.pageNumber ?? null, sheetIndex: location.sheetIndex ?? null, sheetName: location.sheetName ?? null, rowIndex: location.rowIndex ?? metadata.rowIndex ?? null, columnIndex: location.columnIndex ?? null, tableIndex: location.tableIndex ?? metadata.tableIndex ?? null, elementPath: location.elementPath ?? null, bounds: location.bounds ?? null };
 }
 
-function validateMapping(value, blocks, allowedEvidenceRefs = null) {
+const ABBREVIATIONS = new Map([["temp", "temperature"], ["lv", "level"], ["qty", "quantity"], ["q'ty", "quantity"], ["press", "pressure"], ["sign", "signature"]]);
+const semanticWords = (value) => canonical(value).replace(/[_/()[\]{}:;,.!?+*=\\-]+/g, " ").split(/\s+/).filter(Boolean).map((word) => ABBREVIATIONS.get(word) || word);
+const semanticGrounded = (needle, haystack) => {
+  const wanted = semanticWords(needle); const available = semanticWords(haystack);
+  if (!wanted.length || !available.length) return false;
+  const wantedText = wanted.join(" "); const availableText = available.join(" ");
+  if (availableText.includes(wantedText) || wantedText.includes(availableText)) return true;
+  const availableSet = new Set(available); return wanted.filter((word) => availableSet.has(word)).length / wanted.length >= 0.6;
+};
+const slug = (value, fallback = "field") => canonical(value).replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 60) || fallback;
+const uniqueKey = (requested, sectionKey, label, used) => {
+  const valid = /^[a-zA-Z][a-zA-Z0-9_-]{0,79}$/.test(requested || "") ? requested : `${slug(sectionKey, "general")}_${slug(label)}`;
+  let candidate = valid; let suffix = 2;
+  if (used.has(candidate)) candidate = `${slug(sectionKey, "general")}_${slug(label)}`;
+  while (used.has(candidate)) candidate = `${slug(sectionKey, "general")}_${slug(label)}_${suffix++}`;
+  return candidate.slice(0, 80);
+};
+
+export function validateMapping(value, blocks, allowedEvidenceRefs = null) {
   if (!value || !Array.isArray(value.sections) || !Array.isArray(value.fields)) throw fail("The configured model returned unsupported structured output.", 502);
   const blockMap = new Map(blocks.map((block) => [block.id, block])); const validIds = allowedEvidenceRefs || new Set(blockMap.keys()); const warnings = (value.warnings || []).map((item) => clean(item, 500)).filter(Boolean);
   const sectionKeys = new Set(); const sections = [];
   for (const section of value.sections) {
-    const sectionKey = clean(section?.sectionKey, 80); const title = clean(section?.title, 160); if (!/^[a-z][a-z0-9_]{0,79}$/.test(sectionKey) || sectionKeys.has(sectionKey) || !title || !validateEvidenceRefs(section.evidenceRefs, validIds)) continue;
-    sectionKeys.add(sectionKey); const order = Math.min(...section.evidenceRefs.map((id) => blockMap.get(id)?.globalOrder ?? Number(section.sourceOrder) ?? Number.MAX_SAFE_INTEGER)); sections.push({ sectionKey, title, sourceOrder: order, evidenceRefs: [...new Set(section.evidenceRefs)] });
+    const sectionKey = clean(section?.sectionKey, 80); const title = clean(section?.title, 160); const refs = [...new Set(section?.evidenceRefs || [])].filter((id) => validIds.has(id));
+    if (!/^[a-z][a-z0-9_]{0,79}$/.test(sectionKey) || sectionKeys.has(sectionKey) || !title || isProvenanceOnlyLabel(title)) continue;
+    sectionKeys.add(sectionKey); const order = refs.length ? Math.min(...refs.map((id) => blockMap.get(id)?.globalOrder ?? Number(section.order ?? section.sourceOrder) ?? Number.MAX_SAFE_INTEGER)) : Number(section.order ?? section.sourceOrder) || 0; sections.push({ sectionKey, title, sourceOrder: order, evidenceRefs: refs });
   }
   if (!sections.length) { sectionKeys.add("general"); sections.push({ sectionKey: "general", title: "General", sourceOrder: 0, evidenceRefs: [...validIds].slice(0, 1) }); }
   const fields = []; const fieldKeys = new Set();
   for (const field of value.fields) {
-    const refs = [...new Set(field?.evidenceRefs || [])]; const refBlocks = refs.map((id) => blockMap.get(id)).filter(Boolean); const sourceText = clean(field?.sourceText, 2000); const source = canonical(sourceText); const groundedText = !blockMap.size || refBlocks.some((block) => canonical(block.text).includes(source) || source.includes(canonical(block.text)));
-    if (!/^[a-zA-Z][a-zA-Z0-9_-]{0,79}$/.test(field?.fieldKey || "") || fieldKeys.has(field.fieldKey) || !FIELD_TYPES.has(field.fieldType) || !clean(field.label, 160) || !validateEvidenceRefs(refs, validIds) || !source || !groundedText) { warnings.push(`Dropped ungrounded or invalid field: ${clean(field?.label || field?.fieldKey, 160) || "unknown"}`); continue; }
-    const sectionKey = sectionKeys.has(field.sectionKey) ? field.sectionKey : sections[0].sectionKey; const earliest = refBlocks.sort((a, b) => a.globalOrder - b.globalOrder)[0]; fieldKeys.add(field.fieldKey);
-    fields.push({ fieldKey: field.fieldKey, label: clean(field.label, 160), fieldType: field.fieldType, required: Boolean(field.required), sectionKey, sourceOrder: earliest?.globalOrder ?? (Number(field.sourceOrder) || 0), options: (field.options || []).map((item) => clean(item, 100)).filter(Boolean).slice(0, 50), maxPhotos: field.fieldType === "photo" ? Math.max(1, Math.min(10, Number(field.maxPhotos) || 1)) : undefined, sourceText, evidenceRefs: refs, confidence: Math.max(0, Math.min(1, Number(field.confidence) || 0)), warning: clean(field.warning, 300), sourceLocation: sourceLocation(earliest) });
+    const refs = [...new Set(field?.evidenceRefs || [])]; const refBlocks = refs.map((id) => blockMap.get(id)).filter(Boolean); const label = clean(field.label, 160); const sourceText = clean(field?.sourceText, 2000); const evidenceText = refBlocks.map((block) => block.text).join(" "); const groundedText = !blockMap.size || semanticGrounded(sourceText || label, evidenceText);
+    if (!FIELD_TYPES.has(field.fieldType) || !label || isProvenanceOnlyLabel(label) || !validateEvidenceRefs(refs, validIds) || !groundedText) { warnings.push(`Dropped ungrounded or invalid field: ${label || clean(field?.fieldKey, 160) || "unknown"}`); continue; }
+    const sectionKey = sectionKeys.has(field.sectionKey) ? field.sectionKey : sections[0].sectionKey; const earliest = refBlocks.sort((a, b) => a.globalOrder - b.globalOrder)[0];
+    const fieldKey = uniqueKey(clean(field?.fieldKey, 80), sectionKey, label, fieldKeys); fieldKeys.add(fieldKey);
+    fields.push({ fieldKey, label, fieldType: field.fieldType, required: Boolean(field.required), sectionKey, sourceOrder: earliest?.globalOrder ?? (Number(field.order ?? field.sourceOrder) || 0), options: (field.options || []).map((item) => clean(item, 100)).filter(Boolean).slice(0, 50), maxPhotos: field.fieldType === "photo" ? Math.max(1, Math.min(10, Number(field.maxPhotos) || 1)) : undefined, sourceText: sourceText || label, evidenceRefs: refs, confidence: Math.max(0, Math.min(1, Number(field.confidence) || 0)), warning: clean(field.warning, 300), sourceLocation: sourceLocation(earliest) });
   }
   const classifications = []; const classified = new Set();
   for (const item of value.classifications || []) if (validIds.has(item.blockId) && CLASSIFICATIONS.has(item.classification) && !classified.has(item.blockId)) { classified.add(item.blockId); classifications.push({ blockId: item.blockId, classification: item.classification, reason: clean(item.reason, 300) || "Classified by AI." }); }
   if (blockMap.size) for (const block of blocks) if (!block.contextOnly && !classified.has(block.id)) classifications.push({ blockId: block.id, classification: "unmapped", reason: "The model did not return a classification for this readable block." });
   const evidenceItems = (items) => (items || []).filter((item) => validateEvidenceRefs(item.evidenceRefs, validIds)).map((item) => ({ text: clean(item.text, 1000), evidenceRefs: [...new Set(item.evidenceRefs)] }));
   const unmappedBlocks = classifications.filter((item) => item.classification === "unmapped");
-  return { documentTitle: clean(value.documentTitle, 180), sections: sections.sort((a, b) => a.sourceOrder - b.sourceOrder), fields: fields.sort((a, b) => a.sourceOrder - b.sourceOrder).map((field, sortOrder) => ({ ...field, sortOrder })), classifications, notes: evidenceItems(value.notes), referenceData: evidenceItems(value.referenceData), warnings, unmappedBlocks };
+  return { documentTitle: clean(value.documentTitle, 180), sections: sections.sort((a, b) => a.sourceOrder - b.sourceOrder), fields: fields.sort((a, b) => a.sourceOrder - b.sourceOrder).map((field, sortOrder) => ({ ...field, sortOrder })), classifications, notes: evidenceItems(value.notes), referenceData: evidenceItems(value.referenceData), warnings, unmappedBlocks, diagnostics: { rawMappedFields: value.fields.length, acceptedMappedFields: fields.length } };
 }
 
 const prompts = {
   context: "Read every supplied block. Return a grounded document outline, glossary, abbreviations, response codes, repeated table-header meanings, document identity and cross references. Do not extract fields in this pass. Every context item must cite evidenceRefs from the supplied block IDs.",
-  map: "Process ALL supplied readable blocks using the supplied global document context. Classify every non-context block exactly once as field, section, instruction, reference, decorative, or unmapped. Extract grounded sections and fields including metadata, checklist questions, yes/no and yes/no/N-A controls, dates, signatures, narrative inputs, status/select fields, and explicit photo/evidence requirements. Never invent a field, merge separate controls, turn instructions or item/reference codes into fields, or reorder source content. Every field must cite evidenceRefs and sourceText copied from its evidence. Use photo only when the source explicitly requests a photo/image; set maxPhotos from the source from 1 to 10, defaulting to 1 when unspecified. Return uncertain content as unmapped.",
+  map: "Process ALL supplied readable blocks using the supplied global document context. Classify every non-context block exactly once as field, section, instruction, reference, decorative, or unmapped. Extract grounded sections and form controls: text, textarea, number, date, checkbox, yes_no, select, signature and explicit photo/evidence inputs. Repeated labels in different sections are separate fields and need section-aware unique keys. Internal source metadata such as block IDs, cell addresses/ranges, XML paths, filenames and PDF coordinates are provenance only: never use them as labels or sections. Never invent a field, merge separate controls, turn instructions or item/reference codes into fields, or reorder source content. Every field must cite evidenceRefs; sourceText is optional supporting text. Use photo only when explicitly requested. Return uncertain content as unmapped.",
   consolidate: "Consolidate the supplied compact chunk results. Reconcile section names and true semantic duplicates while preserving every evidence reference and source order. Do not invent fields, drop coverage, or reorder for aesthetics. Return no block classifications; chunk classifications are already authoritative.",
 };
 
