@@ -1,6 +1,6 @@
 import { pool } from "../config/db.js";
 import { normalizeFields } from "../services/templateFieldService.js";
-import { analyseTemplateSource, mapFieldsWithOpenRouter } from "../services/openRouterTemplateService.js";
+import { analyseTemplate as analyseTemplateWithAi, mapFieldsWithAi } from "../services/templateAiProviderService.js";
 
 const SOURCE_TYPES = new Set(["pdf", "xml", "docx", "xlsx", "manual"]);
 const EXTRACTION_METHODS = new Set(["acroform", "text", "ocr", "nexaport_xml", "generic_xml", "manual"]);
@@ -148,14 +148,19 @@ export const listTemplates = async (req, res) => {
 };
 
 export const mapTemplateFields = async (req, res) => {
-  try { return res.json({ success: true, data: await mapFieldsWithOpenRouter(req.body || {}) }); }
+  try { return res.json({ success: true, data: await mapFieldsWithAi(req.body || {}) }); }
   catch (error) { return sendError(res, error, "Unable to map template fields."); }
 };
 
 export const analyseTemplate = async (req, res) => {
   const controller = new AbortController(); req.once("aborted", () => controller.abort());
-  try { return res.json({ success: true, data: await analyseTemplateSource(req.body || {}, { signal: controller.signal }) }); }
-  catch (error) { return sendError(res, error, "Unable to analyse template source."); }
+  try {
+    const data = await analyseTemplateWithAi(req.body || {}, { signal: controller.signal });
+    console.info("Template extraction diagnostics:", { primaryProvider: "gemini", primaryModel: process.env.GEMINI_TEMPLATE_MODEL || "gemini-3.6-flash", parsedBlocks: req.body?.chunk?.blocks?.length || 0, singleRequestEligible: Boolean(req.body?.singleRequestEligible), providerUsed: data.providerUsed, modelUsed: data.modelUsed, providerReturnedFields: data.diagnostics?.rawMappedFields ?? data.fields?.length ?? 0, acceptedFields: data.diagnostics?.acceptedMappedFields ?? data.fields?.length ?? 0, fallbackUsed: data.fallbackUsed, fallbackReason: data.fallbackReason, finalFields: data.fields?.length ?? 0 });
+    const { providerUsed, modelUsed, fallbackUsed, fallbackReason, ...publicData } = data;
+    return res.json({ success: true, data: publicData });
+  }
+  catch (error) { if (["configuration_error", "authentication_error", "application_error"].includes(error?.reason)) console.error("Template extraction configuration/application error", { reason: error.reason, status: error.status }); return sendError(res, error, "Unable to analyse template source."); }
 };
 
 export const createTemplate = async (req, res) => {

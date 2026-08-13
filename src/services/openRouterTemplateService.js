@@ -7,14 +7,15 @@ const FORBIDDEN_KEYS = /^(?:bytes|base64|file|blob|buffer|sourceData|rawPdf|rawX
 const MAX_BLOCKS = 160;
 const MAX_TEXT_CHARS = 60000;
 
-const fail = (message, status = 400, retryable = false) => Object.assign(new Error(message), { status, retryable });
+export const templateAiFailure = (message, status = 400, retryable = false, reason = "application_error") => Object.assign(new Error(message), { status, retryable, reason });
+const fail = templateAiFailure;
 const clean = (value, max = 2000) => String(value ?? "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").trim().slice(0, max);
 const canonical = (value) => clean(value, 20000).normalize("NFKC").replace(/[‐‑‒–—―]/g, "-").replace(/\s+/g, " ").toLowerCase();
 const clampEnv = (value, fallback, min, max) => { const number = Number(value); return Number.isFinite(number) ? Math.min(max, Math.max(min, Math.round(number))) : fallback; };
 
 const evidenceRefSchema = { type: "array", items: { type: "string" } };
 const sectionSchema = { type: "object", additionalProperties: false, required: ["sectionKey", "title", "order"], properties: { sectionKey: { type: "string" }, title: { type: "string" }, order: { type: "integer" }, evidenceRefs: evidenceRefSchema } };
-const fieldSchema = { type: "object", additionalProperties: false, required: ["fieldKey", "label", "fieldType", "sectionKey", "required", "options", "order", "evidenceRefs", "confidence"], properties: { fieldKey: { type: "string" }, label: { type: "string" }, fieldType: { enum: [...FIELD_TYPES] }, required: { type: "boolean" }, sectionKey: { type: "string" }, order: { type: "integer" }, options: { type: "array", items: { type: "string" } }, maxPhotos: { type: "integer", minimum: 1, maximum: 10 }, sourceText: { type: "string" }, evidenceRefs: evidenceRefSchema, confidence: { type: "number", minimum: 0, maximum: 1 }, warning: { type: "string" } } };
+const fieldSchema = { type: "object", additionalProperties: false, required: ["fieldKey", "label", "fieldType", "sectionKey", "required", "options", "order", "evidenceRefs"], properties: { fieldKey: { type: "string" }, label: { type: "string" }, fieldType: { enum: [...FIELD_TYPES] }, required: { type: "boolean" }, sectionKey: { type: "string" }, order: { type: "integer" }, options: { type: "array", items: { type: "string" } }, maxPhotos: { type: "integer", minimum: 1, maximum: 10 }, sourceText: { type: "string" }, evidenceRefs: evidenceRefSchema, confidence: { type: "number", minimum: 0, maximum: 1 }, warning: { type: "string" } } };
 const classificationSchema = { type: "object", additionalProperties: false, required: ["blockId", "classification", "reason"], properties: { blockId: { type: "string" }, classification: { enum: [...CLASSIFICATIONS].filter((item) => item !== "failed") }, reason: { type: "string" } } };
 const evidenceItemSchema = { type: "object", additionalProperties: false, required: ["text", "evidenceRefs"], properties: { text: { type: "string" }, evidenceRefs: evidenceRefSchema } };
 
@@ -135,27 +136,28 @@ export function validateMapping(value, blocks, allowedEvidenceRefs = null) {
   return { documentTitle: clean(value.documentTitle, 180), sections: sections.sort((a, b) => a.sourceOrder - b.sourceOrder), fields: fields.sort((a, b) => a.sourceOrder - b.sourceOrder).map((field, sortOrder) => ({ ...field, sortOrder })), classifications, notes: evidenceItems(value.notes), referenceData: evidenceItems(value.referenceData), warnings, unmappedBlocks, diagnostics: { rawMappedFields: value.fields.length, acceptedMappedFields: fields.length } };
 }
 
-const prompts = {
+export const templateAiPrompts = {
   context: "Read every supplied block. Return a grounded document outline, glossary, abbreviations, response codes, repeated table-header meanings, document identity and cross references. Do not extract fields in this pass. Every context item must cite evidenceRefs from the supplied block IDs.",
-  map: "Process ALL supplied readable blocks using the supplied global document context. Classify every non-context block exactly once as field, section, instruction, reference, decorative, or unmapped. Extract grounded sections and form controls: text, textarea, number, date, checkbox, yes_no, select, signature and explicit photo/evidence inputs. Repeated labels in different sections are separate fields and need section-aware unique keys. Internal source metadata such as block IDs, cell addresses/ranges, XML paths, filenames and PDF coordinates are provenance only: never use them as labels or sections. Never invent a field, merge separate controls, turn instructions or item/reference codes into fields, or reorder source content. Every field must cite evidenceRefs; sourceText is optional supporting text. Use photo only when explicitly requested. Return uncertain content as unmapped.",
+  map: "Convert the complete supplied maritime document content into reusable NexaPort template fields. Process ALL supplied readable blocks and read ALL logical content. Identify everything an inspector must enter, record, answer, select, sign, or upload. Classify every non-context block as field, section, instruction, reference, decorative, or unmapped. Use only text, textarea, number, date, checkbox, yes_no, select, signature, and photo field types. Remarks, comments and observations are textarea; signatures are signature; Yes/No is yes_no; Yes/No/N/A is select; explicit photograph requests are photo. For photo fields use a stated count from 1 to 10, otherwise maxPhotos 1. Repeated labels in different sections are separate fields and need section-aware unique keys: never globally deduplicate them. Internal source metadata such as block IDs, cell addresses/ranges, row or column numbers, XML paths, DOCX part filenames and PDF coordinates is provenance only: never use it as a visible label, section, question or description. Never invent a field, merge separate controls, turn instructions or item/reference codes into fields, or reorder source content. Every field must cite evidenceRefs from actual supplied blocks; sourceText is optional. Return uncertain content as unmapped.",
   consolidate: "Consolidate the supplied compact chunk results. Reconcile section names and true semantic duplicates while preserving every evidence reference and source order. Do not invent fields, drop coverage, or reorder for aesthetics. Return no block classifications; chunk classifications are already authoritative.",
 };
 
-async function requestOpenRouter(input, { fetchImpl, env, signal }) {
+export async function requestOpenRouter(input, { fetchImpl = globalThis.fetch, env = process.env, signal } = {}) {
   if (!env.OPENROUTER_API_KEY) throw fail("Template analysis is not configured: the API key is missing.", 503);
-  if (!env.OPENROUTER_TEMPLATE_MODEL) throw fail("Template analysis is not configured: the model is missing.", 503);
-  const timeoutMs = clampEnv(env.OPENROUTER_TEMPLATE_TIMEOUT_MS, 55000, 10000, 120000); const maxTokens = clampEnv(env.OPENROUTER_TEMPLATE_MAX_OUTPUT_TOKENS, 6000, 1200, 12000);
+  const model = env.OPENROUTER_TEMPLATE_MODEL || "google/gemini-3.5-flash";
+  const reasoningEffort = env.OPENROUTER_TEMPLATE_REASONING_EFFORT || "medium";
+  const timeoutMs = clampEnv(env.OPENROUTER_TEMPLATE_TIMEOUT_MS, 90000, 10000, 120000); const maxTokens = clampEnv(env.OPENROUTER_TEMPLATE_MAX_OUTPUT_TOKENS, 8192, 1200, 12000);
   const schema = input.mode === "context" ? contextOutputSchema : mappingOutputSchema;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const timeout = AbortSignal.timeout(timeoutMs); const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
     let response;
     try {
-      response = await fetchImpl("https://openrouter.ai/api/v1/chat/completions", { method: "POST", headers: { Authorization: `Bearer ${env.OPENROUTER_API_KEY}`, "Content-Type": "application/json" }, signal: combined, body: JSON.stringify({ model: env.OPENROUTER_TEMPLATE_MODEL, temperature: 0, max_tokens: maxTokens, provider: { require_parameters: true, zdr: true }, response_format: { type: "json_schema", json_schema: schema }, messages: [{ role: "system", content: prompts[input.mode] }, { role: "user", content: JSON.stringify(input) }] }) });
-    } catch (error) { if (attempt === 0 && !signal?.aborted) continue; throw fail(error?.name === "TimeoutError" ? "Template analysis timed out." : "The template-analysis provider is unavailable.", 503, true); }
+      response = await fetchImpl("https://openrouter.ai/api/v1/chat/completions", { method: "POST", headers: { Authorization: `Bearer ${env.OPENROUTER_API_KEY}`, "Content-Type": "application/json" }, signal: combined, body: JSON.stringify({ model, temperature: 0, max_tokens: maxTokens, reasoning: { effort: reasoningEffort }, provider: { require_parameters: true, zdr: true }, response_format: { type: "json_schema", json_schema: schema }, messages: [{ role: "system", content: templateAiPrompts[input.mode] }, { role: "user", content: JSON.stringify(input) }] }) });
+    } catch (error) { if (attempt === 0 && !signal?.aborted) continue; throw fail(error?.name === "TimeoutError" ? "Template analysis timed out." : "The template-analysis provider is unavailable.", 503, true, error?.name === "TimeoutError" ? "timeout" : "network_error"); }
     if (!response.ok) {
-      const retryable = response.status === 429 || response.status >= 500; if (attempt === 0 && retryable) continue;
+      const retryable = response.status >= 500; if (attempt === 0 && retryable) continue;
       const messages = { 400: "The configured model rejected the template-analysis request.", 401: "Template analysis authentication failed.", 402: "Template analysis credits are insufficient.", 403: "Template analysis access was denied.", 429: "Template analysis is rate limited. Please retry later." };
-      throw fail(messages[response.status] || "The template-analysis provider is unavailable.", [400,401,402,403,429].includes(response.status) ? response.status : 503, retryable);
+      throw fail(messages[response.status] || "The template-analysis provider is unavailable.", [400,401,402,403,429].includes(response.status) ? response.status : 503, retryable, response.status === 429 ? "rate_limited" : response.status >= 500 ? "provider_unavailable" : "provider_error");
     }
     try { const content = (await response.json())?.choices?.[0]?.message?.content; return typeof content === "string" ? JSON.parse(content) : content; }
     catch { throw fail("The configured template-analysis model returned malformed JSON.", 502); }
@@ -177,6 +179,16 @@ export async function analyseTemplateSource(input, { fetchImpl = globalThis.fetc
 export async function mapFieldsWithOpenRouter(input, options = {}) {
   const evidence = normalizeMappingEvidence(input); const blocks = evidence.pagesOrSheets.flatMap((part, partIndex) => part.lines.map((line, index) => ({ id: `block-${partIndex * 10000 + index}`, globalOrder: partIndex * 10000 + index, partOrder: index, type: line.blockType || "text_line", text: line.text, metadata: line, location: { partIndex } })));
   return analyseTemplateSource({ mode: "map", sourceType: evidence.sourceType, documentTitle: evidence.documentTitle, chunk: { id: "legacy-chunk", index: 0, blocks }, globalContext: {} }, options);
+}
+
+export function normalizeProviderOutput(output, normalized) {
+  if (normalized.mode === "context") return validateContext(output, normalized.chunk.blocks);
+  if (normalized.mode === "consolidate") {
+    const mappedFields = normalized.mapped.fields || []; const allowed = new Set(mappedFields.flatMap((field) => field.evidenceRefs || []));
+    const compactBlocks = mappedFields.flatMap((field) => (field.evidenceRefs || []).map((id) => ({ id, globalOrder: field.sourceOrder, text: field.sourceText, location: field.sourceLocation || {} })));
+    return validateMapping(output, compactBlocks, allowed);
+  }
+  return validateMapping(output, normalized.chunk.blocks);
 }
 
 export { mappingOutputSchema as templateMappingOutputSchema, contextOutputSchema as templateContextOutputSchema };
