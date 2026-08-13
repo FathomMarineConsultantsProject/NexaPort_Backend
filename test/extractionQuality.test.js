@@ -4,7 +4,7 @@ import { readFile } from 'fs/promises';
 import { normalizeMappingEvidence, mapFieldsWithOpenRouter } from '../src/services/openRouterTemplateService.js';
 
 const source = async (file) => readFile(new URL(file, import.meta.url), "utf8");
-const env = { OPENROUTER_API_KEY: "test", OPENROUTER_TEMPLATE_MODEL: "test/model" };
+const env = { OPENROUTER_API_KEY: "test", OPENROUTER_TEMPLATE_MODEL: "deepseek/test" };
 
 describe('Extraction Quality Tests - Backend', () => {
     test('Structured metadata passes through normalization', () => {

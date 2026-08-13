@@ -168,8 +168,9 @@ export const templateAiPrompts = {
 
 export async function requestOpenRouter(input, { fetchImpl = globalThis.fetch, env = process.env, signal } = {}) {
   if (!env.OPENROUTER_API_KEY) throw fail("Template analysis is not configured: the API key is missing.", 503, false, "configuration_error", { provider: "openrouter" });
-  const model = env.OPENROUTER_TEMPLATE_MODEL || "deepseek/deepseek-v4-flash:free";
-  const reasoningEffort = env.OPENROUTER_TEMPLATE_REASONING_EFFORT || "high";
+  const model = env.OPENROUTER_TEMPLATE_MODEL || "deepseek/deepseek-chat:free";
+  if (!/^deepseek\//i.test(model)) throw fail("Template extraction models must be DeepSeek routes through OpenRouter.", 503, false, "configuration_error");
+  const reasoningEffort = env.OPENROUTER_TEMPLATE_REASONING_EFFORT || "low";
   const timeoutMs = clampEnv(env.OPENROUTER_TEMPLATE_TIMEOUT_MS, 90000, 10000, 120000); const maxTokens = clampEnv(env.OPENROUTER_TEMPLATE_MAX_OUTPUT_TOKENS, 8192, 1200, 12000);
   const schema = input.mode === "context" ? contextOutputSchema : mappingOutputSchema;
   for (let attempt = 0; attempt < 2; attempt += 1) {

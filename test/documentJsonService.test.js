@@ -45,7 +45,7 @@ for (const [status, code, reason] of [[402, "AI_PROVIDER_PAYMENT_REQUIRED", "pay
   test(`OpenRouter ${status} preserves its safe provider category and response reason`, async () => {
     const input = normalizeAnalysisInput({ mode: "map", sourceType: "docx", documentTitle: "Fixture", document: { fileName: "fixture.docx", content: [], blocks: [{ id: "block-0", globalOrder: 0, partOrder: 0, type: "paragraph", text: "Inspection Date", metadata: {}, location: {} }] } });
     await assert.rejects(
-      requestOpenRouter(input, { env: { OPENROUTER_API_KEY: "test", OPENROUTER_TEMPLATE_MODEL: "test/model" }, fetchImpl: async () => ({ ok: false, status, json: async () => ({ error: { message: status === 402 ? "Insufficient credits" : "Model access denied" } }) }) }),
+      requestOpenRouter(input, { env: { OPENROUTER_API_KEY: "test", OPENROUTER_TEMPLATE_MODEL: "deepseek/test" }, fetchImpl: async () => ({ ok: false, status, json: async () => ({ error: { message: status === 402 ? "Insufficient credits" : "Model access denied" } }) }) }),
       (error) => error.status === status && error.code === code && error.reason === reason && Boolean(error.safeProviderMessage),
     );
   });

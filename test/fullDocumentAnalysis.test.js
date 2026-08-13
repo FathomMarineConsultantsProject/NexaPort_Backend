@@ -7,7 +7,7 @@ const input = { mode: "map", sourceType: "docx", documentTitle: "Checklist", chu
   { id: "block-0", globalOrder: 0, partOrder: 0, type: "paragraph", text: "Part B2", metadata: {}, location: { partIndex: 0 } },
   { id: "block-1", globalOrder: 1, partOrder: 1, type: "table_row", text: "B2.1 | Are pumps operable? | Yes | No | Remarks", metadata: { cells: ["B2.1", "Are pumps operable?", "Yes", "No", "Remarks"] }, location: { tableIndex: 0, rowIndex: 1 } },
 ] }, globalContext: { responseCodes: [{ code: "Y", meaning: "Yes" }] } };
-const env = { OPENROUTER_API_KEY: "test", OPENROUTER_TEMPLATE_MODEL: "test/model" };
+const env = { OPENROUTER_API_KEY: "test", OPENROUTER_TEMPLATE_MODEL: "deepseek/test" };
 
 test("structured input rejects source bytes and accepts grounded blocks", () => {
   assert.equal(normalizeAnalysisInput(input).chunk.blocks.length, 2);

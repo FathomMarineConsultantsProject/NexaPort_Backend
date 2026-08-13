@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { requireAuth, allowRoles } from "../middlewares/authMiddleware.js";
-import { analyseTemplate, createTemplate, createTemplateVersion, duplicateTemplate, getTemplate, listTemplates, mapTemplateFields, updateTemplate } from "../controllers/templateController.js";
+import { analyseTemplate, analyseTemplateObject, createTemplate, createTemplateAnalysisUpload, createTemplateVersion, duplicateTemplate, getTemplate, listTemplates, mapTemplateFields, updateTemplate } from "../controllers/templateController.js";
 import { createReport } from "../controllers/reportController.js";
 import multer from "multer";
 
@@ -11,6 +11,9 @@ const analyseUpload = multer({
   fileFilter: (_req, file, callback) => callback(null, [
     "application/pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/xml",
+    "text/xml",
   ].includes(file.mimetype)),
 });
 export const uploadTemplateDocument = (req, res, next) => analyseUpload.single("document")(req, res, (error) => {
@@ -23,6 +26,8 @@ router.get("/", listTemplates);
 router.post("/", createTemplate);
 router.post("/map-fields", mapTemplateFields);
 router.post("/analyse", uploadTemplateDocument, analyseTemplate);
+router.post("/analysis-upload-url", createTemplateAnalysisUpload);
+router.post("/analyse-object", analyseTemplateObject);
 router.get("/:id", getTemplate);
 router.patch("/:id", updateTemplate);
 router.post("/:id/versions", createTemplateVersion);

@@ -1,7 +1,10 @@
 import { pool } from "../config/db.js";
 import { normalizeFields } from "../services/templateFieldService.js";
-import { analyseTemplate as analyseTemplateWithAi, mapFieldsWithAi } from "../services/templateAiProviderService.js";
-import { parseDocumentToJson } from "../services/documentJsonService.js";
+import { mapFieldsWithAi } from "../services/templateAiProviderService.js";
+import { runTemplateExtraction } from "../services/templateExtractionService.js";
+import { createPresignedPutUrl } from "../utils/s3Presign.js";
+import { deletePrivateObject, readPrivateObject } from "../services/privateObjectService.js";
+import crypto from "crypto";
 
 const SOURCE_TYPES = new Set(["pdf", "xml", "docx", "xlsx", "manual"]);
 const EXTRACTION_METHODS = new Set(["acroform", "text", "ocr", "nexaport_xml", "generic_xml", "manual"]);
@@ -9,6 +12,8 @@ const FORBIDDEN_SOURCE_KEYS = new Set(["source_s3_key", "sourceS3Key", "key", "f
 const clean = (value, max = 255) => String(value ?? "").replace(/[<>\u0000-\u001f]/g, "").trim().slice(0, max);
 const id = (value) => Number.isInteger(Number(value)) && Number(value) > 0 ? Number(value) : null;
 const COMMIT_HASH = "cbbbeb5efa3db24102871bd70d6ae2d8ddd0b041";
+const ANALYSIS_MIME_TYPES = { pdf: "application/pdf", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", xml: "application/xml" };
+const ANALYSIS_MAX_BYTES = { pdf: 50 * 1024 * 1024, docx: 25 * 1024 * 1024, xlsx: 25 * 1024 * 1024, xml: 5 * 1024 * 1024 };
 
 const isDbUnavailable = (error) =>
   error?.code === "ECONNREFUSED" ||
@@ -154,17 +159,14 @@ export const mapTemplateFields = async (req, res) => {
   catch (error) { return sendError(res, error, "Unable to map template fields."); }
 };
 
-export const createAnalyseTemplate = ({ parseDocument = parseDocumentToJson, analyseWithAi = analyseTemplateWithAi } = {}) => async (req, res) => {
+export const createAnalyseTemplate = ({ runExtraction = runTemplateExtraction } = {}) => async (req, res) => {
   const controller = new AbortController(); req.once("aborted", () => controller.abort());
   try {
     const sourceType = String(req.body?.sourceType || "").toLowerCase();
     console.info("Template extraction stage", { stage: "upload_received", provider: null, status: 200, sourceType, fileSize: req.file?.size || 0 });
-    const document = await parseDocument(req.file, { sourceType, signal: controller.signal });
-    console.info("Template extraction stage", { stage: "document_json_created", provider: null, status: 200, sourceType, parsedBlocks: document.blocks.length });
-    const data = await analyseWithAi({ mode: "map", sourceType, documentTitle: document.fileName, document }, { signal: controller.signal });
-    console.info("Template extraction diagnostics:", { stage: "field_validation_complete", provider: data.providerUsed, model: data.modelUsed, status: 200, parsedBlocks: document.blocks.length, providerReturnedFields: data.diagnostics?.rawMappedFields ?? data.fields?.length ?? 0, acceptedFields: data.diagnostics?.acceptedMappedFields ?? data.fields?.length ?? 0, fallbackUsed: data.fallbackUsed, fallbackReason: data.fallbackReason, finalFields: data.fields?.length ?? 0 });
-    const { providerUsed, modelUsed, fallbackUsed, fallbackReason, ...publicData } = data;
-    return res.json({ success: true, data: publicData });
+    const data = await runExtraction(req.file, { sourceType, signal: controller.signal });
+    console.info("Template extraction diagnostics:", { stage: "quality_gate_complete", provider: "openrouter", status: 200, sourceType, parsedBlocks: data.diagnostics.parsedBlocks, candidates: data.diagnostics.candidateCount, finalFields: data.fields.length, degraded: data.degraded, durationMs: data.diagnostics.durationMs });
+    return res.json({ success: true, data });
   }
   catch (error) {
     console.error("Template extraction failed", { stage: error?.stage || (error?.code === "DOCUMENT_PARSE_FAILED" ? "document_parse" : "ai_provider"), provider: error?.provider || null, status: error?.status || 500, category: error?.code || error?.reason || "FIELD_EXTRACTION_FAILED", message: String(error?.safeProviderMessage || error?.message || "Extraction failed").slice(0, 240) });
@@ -172,6 +174,31 @@ export const createAnalyseTemplate = ({ parseDocument = parseDocumentToJson, ana
   }
 };
 export const analyseTemplate = createAnalyseTemplate();
+
+export const createTemplateAnalysisUpload = async (req, res) => {
+  try {
+    const sourceType = String(req.body?.sourceType || "").toLowerCase(); const contentType = String(req.body?.contentType || "").toLowerCase(); const size = Number(req.body?.size);
+    if (!ANALYSIS_MIME_TYPES[sourceType] || !Number.isInteger(size) || size < 1 || size > ANALYSIS_MAX_BYTES[sourceType]) throw badRequest("Template analysis upload metadata is invalid.");
+    if (contentType !== ANALYSIS_MIME_TYPES[sourceType] && !(sourceType === "xml" && contentType === "text/xml")) throw badRequest("Template analysis content type does not match the selected format.");
+    const objectKey = `temporary/template-analysis/${req.user.id}/${crypto.randomUUID()}.${sourceType}`;
+    const uploadUrl = createPresignedPutUrl({ key: objectKey, contentType, expiresIn: 300 });
+    return res.json({ success: true, data: { objectKey, uploadUrl, expiresInSeconds: 300 } });
+  } catch (error) { return sendError(res, error, "Unable to prepare the temporary template upload."); }
+};
+
+export const analyseTemplateObject = async (req, res) => {
+  const controller = new AbortController(); req.once("aborted", () => controller.abort()); let objectKey = "";
+  try {
+    const sourceType = String(req.body?.sourceType || "").toLowerCase(); objectKey = String(req.body?.objectKey || ""); const size = Number(req.body?.size); const contentType = String(req.body?.contentType || "");
+    const prefix = `temporary/template-analysis/${req.user.id}/`;
+    if (!ANALYSIS_MIME_TYPES[sourceType] || !objectKey.startsWith(prefix) || !new RegExp(`^[a-z0-9/_-]+\\.${sourceType}$`, "i").test(objectKey) || !Number.isInteger(size) || size < 1 || size > ANALYSIS_MAX_BYTES[sourceType]) throw badRequest("Temporary template upload reference is invalid.");
+    const buffer = await readPrivateObject(objectKey, ANALYSIS_MAX_BYTES[sourceType]);
+    const file = { buffer, size: buffer.length, originalname: clean(req.body?.fileName, 180) || `document.${sourceType}`, mimetype: contentType || ANALYSIS_MIME_TYPES[sourceType] };
+    const data = await runTemplateExtraction(file, { sourceType, signal: controller.signal });
+    return res.json({ success: true, data });
+  } catch (error) { return sendError(res, error, "Unable to analyse the temporary template source."); }
+  finally { if (objectKey) try { await deletePrivateObject(objectKey); } catch (error) { console.warn("Temporary template source cleanup failed", { keySuffix: objectKey.slice(-48), message: error.message }); } }
+};
 
 export const createTemplate = async (req, res) => {
   const client = await pool.connect();

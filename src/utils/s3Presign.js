@@ -138,3 +138,12 @@ export function createPresignedGetUrl({
     expiresAt: new Date(now.getTime() + expiresInSeconds * 1000).toISOString(),
   };
 }
+
+export function createPresignedDeleteUrl({ key, expiresInSeconds = 120 }) {
+  const { region, bucket, accessKeyId, secretAccessKey } = getS3UploadConfig(); const now = new Date();
+  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, ""); const dateStamp = amzDate.slice(0, 8); const credentialScope = `${dateStamp}/${region}/${SERVICE}/aws4_request`; const credential = `${accessKeyId}/${credentialScope}`; const host = `${bucket}.s3.${region}.amazonaws.com`; const canonicalUri = `/${key.split("/").map(encodeRfc3986).join("/")}`; const signedHeaders = "host";
+  const queryParams = { "X-Amz-Algorithm": ALGORITHM, "X-Amz-Credential": credential, "X-Amz-Date": amzDate, "X-Amz-Expires": String(expiresInSeconds), "X-Amz-SignedHeaders": signedHeaders };
+  const canonicalQueryString = Object.keys(queryParams).sort().map((name) => `${encodeRfc3986(name)}=${encodeRfc3986(queryParams[name])}`).join("&");
+  const canonicalRequest = ["DELETE", canonicalUri, canonicalQueryString, `host:${host}\n`, signedHeaders, "UNSIGNED-PAYLOAD"].join("\n"); const stringToSign = [ALGORITHM, amzDate, credentialScope, sha256Hex(canonicalRequest)].join("\n"); const signature = hmac(getSigningKey(secretAccessKey, dateStamp, region), stringToSign, "hex");
+  return `https://${host}${canonicalUri}?${canonicalQueryString}&X-Amz-Signature=${signature}`;
+}
