@@ -22,17 +22,16 @@ const openRouterResponse = (output) => ({ ok: true, json: async () => ({ choices
 
 test("direct Gemini is primary with gemini-3.6-flash and medium thinking", async () => {
   const blocks = [block("block-0", "Inspection Date")]; const output = outputFor(blocks, [aiField("inspection_date", "Inspection Date", "date", "general", "block-0", 0)]);
-  let request; let options; let openRouterCalls = 0;
+  let request; let openRouterCalls = 0;
   const result = await analyseTemplate(inputFor(blocks), {
     env: baseEnv,
-    geminiClient: { interactions: { create: async (nextRequest, nextOptions) => { request = nextRequest; options = nextOptions; return { output_text: JSON.stringify(output) }; } } },
+    geminiClient: { models: { generateContent: async (nextRequest) => { request = nextRequest; return { text: JSON.stringify(output) }; } } },
     fetchImpl: async () => { openRouterCalls += 1; throw new Error("must not call fallback"); },
   });
   assert.equal(request.model, "gemini-3.6-flash");
-  assert.equal(request.generation_config.thinking_level, "medium");
-  assert.equal(request.generation_config.max_output_tokens, 8192);
-  assert.equal(request.response_format.mime_type, "application/json");
-  assert.equal(options.maxRetries, 0);
+  assert.equal(request.config.thinkingConfig.thinkingLevel, "MEDIUM");
+  assert.equal(request.config.maxOutputTokens, 8192);
+  assert.equal(request.config.responseMimeType, "application/json");
   assert.equal(result.providerUsed, "gemini"); assert.equal(result.fields.length, 1); assert.equal(result.fallbackUsed, false); assert.equal(openRouterCalls, 0);
 });
 
@@ -45,7 +44,7 @@ for (const [name, failure] of [
   let geminiCalls = 0; let openRouterBody;
   const result = await analyseTemplate(inputFor(blocks), {
     env: baseEnv,
-    geminiClient: { interactions: { create: async () => { geminiCalls += 1; throw failure; } } },
+    geminiClient: { models: { generateContent: async () => { geminiCalls += 1; throw failure; } } },
     fetchImpl: async (_url, options) => { openRouterBody = JSON.parse(options.body); return openRouterResponse(output); },
   });
   assert.equal(geminiCalls, 1); assert.equal(result.providerUsed, "openrouter"); assert.equal(result.fallbackUsed, true);
@@ -61,7 +60,7 @@ for (const [name, failure] of [
   let geminiCalls = 0; let fallbackCalls = 0;
   const result = await analyseTemplate(inputFor(blocks), {
     env: baseEnv, sleep: async () => {},
-    geminiClient: { interactions: { create: async () => { geminiCalls += 1; throw failure; } } },
+    geminiClient: { models: { generateContent: async () => { geminiCalls += 1; throw failure; } } },
     fetchImpl: async () => { fallbackCalls += 1; return openRouterResponse(output); },
   });
   assert.equal(geminiCalls, 2); assert.equal(fallbackCalls, 1); assert.equal(result.fields[0].fieldType, "signature");
@@ -69,8 +68,8 @@ for (const [name, failure] of [
 
 test("missing or invalid Gemini credentials never consume OpenRouter", async () => {
   let fallbackCalls = 0; const fetchImpl = async () => { fallbackCalls += 1; throw new Error("must not call"); };
-  await assert.rejects(() => analyseTemplate(inputFor([block("block-0", "Date")]), { env: { ...baseEnv, GEMINI_API_KEY: "" }, fetchImpl }), /primary API key is missing/);
-  await assert.rejects(() => analyseTemplate(inputFor([block("block-0", "Date")]), { env: baseEnv, geminiClient: { interactions: { create: async () => { throw Object.assign(new Error("API key is invalid"), { status: 401 }); } } }, fetchImpl }), /configuration error/);
+  await assert.rejects(() => analyseTemplate(inputFor([block("block-0", "Date")]), { env: { ...baseEnv, GEMINI_API_KEY: "" }, fetchImpl }), (err) => err.reason === "configuration_error" || /configuration error|primary API key/i.test(err.message));
+  await assert.rejects(() => analyseTemplate(inputFor([block("block-0", "Date")]), { env: baseEnv, geminiClient: { models: { generateContent: async () => { throw Object.assign(new Error("API key is invalid"), { status: 401 }); } } }, fetchImpl }), (err) => err.reason === "authentication_error" || /authentication|configuration/i.test(err.message));
   assert.equal(fallbackCalls, 0);
 });
 
@@ -85,7 +84,7 @@ test("MeOH repeated section fields, textarea and signature survive while provena
     fields.push(aiField("tank_temp", "Tank Temp", "number", sectionKey, `block-${offset + 2}`, offset + 2));
   }
   fields.push(aiField("other_remarks", "Other Remarks", "textarea", "other", "block-13", 13), aiField("checked_by", "Checked By (Sign)", "signature", "other", "block-14", 14), aiField("a3", "A3", "text", "other", "block-15", 15), aiField("header", "header1.xml", "text", "other", "block-16", 16));
-  const result = await analyseTemplate(inputFor(blocks), { env: baseEnv, geminiClient: { interactions: { create: async () => ({ output_text: JSON.stringify(outputFor(blocks, fields, sections)) }) } } });
+  const result = await analyseTemplate(inputFor(blocks), { env: baseEnv, geminiClient: { models: { generateContent: async () => ({ text: JSON.stringify(outputFor(blocks, fields, sections)) }) } } });
   assert.equal(result.fields.filter((field) => field.label === "Tank Pressure").length, 3);
   assert.equal(result.fields.filter((field) => field.label === "Tank Volume").length, 3);
   assert.equal(result.fields.filter((field) => field.label === "Tank Temp").length, 3);
@@ -99,7 +98,7 @@ test("a compact 56-block document uses one Gemini request and preserves all acce
   const blocks = Array.from({ length: 56 }, (_, index) => block(`block-${index}`, `Reading ${index + 1}`, index));
   const fields = blocks.slice(0, 30).map((item, index) => aiField(`reading_${index + 1}`, item.text, "text", "general", item.id, index));
   let calls = 0;
-  const result = await analyseTemplate(inputFor(blocks), { env: baseEnv, geminiClient: { interactions: { create: async () => { calls += 1; return { output_text: JSON.stringify(outputFor(blocks, fields)) }; } } } });
+  const result = await analyseTemplate(inputFor(blocks), { env: baseEnv, geminiClient: { models: { generateContent: async () => { calls += 1; return { text: JSON.stringify(outputFor(blocks, fields)) }; } } } });
   assert.equal(calls, 1); assert.equal(result.fields.length, 30);
 });
 

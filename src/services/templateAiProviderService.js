@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, ThinkingLevel } from "@google/genai";
 import {
   normalizeAnalysisInput,
   normalizeMappingEvidence,
@@ -17,6 +17,8 @@ const DEFAULTS = Object.freeze({
   geminiMaxOutputTokens: 8192,
   openRouterModel: "google/gemini-3.5-flash",
 });
+
+const THINKING_LEVELS = Object.freeze({ low: ThinkingLevel.LOW, medium: ThinkingLevel.MEDIUM });
 
 const boundedNumber = (value, fallback, min, max) => {
   const parsed = Number(value);
@@ -43,29 +45,43 @@ const parseJson = (value) => {
   catch { throw templateAiFailure("The configured template-analysis model returned malformed JSON.", 502, false, "invalid_response"); }
 };
 
-const interactionResponseSchema = (mode) => ({ type: "text", mime_type: "application/json", schema: mode === "context" ? templateContextOutputSchema.schema : templateMappingOutputSchema.schema });
+const DOCUMENT_PURPOSE_PREAMBLE = `Before extracting fields, identify the document's primary purpose from these categories: fillable form, checklist, inspection checklist, hourly measurement sheet, index/reference document, procedural instruction, Yes/No checklist, record/log, or spreadsheet form. An index or reference document listing other documents may legitimately produce zero fields. Instruction sentences (e.g. "No changes should be made to revision number") must NOT become fields. Infer fields from structural and form semantics: items with Yes/No/N/A options become select fields, items labeled "(Sign)" or "Checked By" become signature fields, items labeled "Remarks" or "Other Remarks" become textarea fields, and measurement values to be recorded become number or text fields even without explicit input prompts.
 
-export async function analyseWithGemini(normalized, { env = process.env, signal, geminiClient, sleep = delay } = {}) {
+`;
+
+const buildExtractionSystemPrompt = (mode) => mode === 'map' ? DOCUMENT_PURPOSE_PREAMBLE + templateAiPrompts[mode] : templateAiPrompts[mode];
+
+export async function analyseWithGemini(normalized, { env = process.env, signal, geminiClient, googleGenAiCtor = GoogleGenAI, sleep = delay } = {}) {
   if (!env.GEMINI_API_KEY) throw templateAiFailure("Template analysis is not configured: the primary API key is missing.", 503, false, "configuration_error");
   const model = env.GEMINI_TEMPLATE_MODEL || DEFAULTS.geminiModel;
   const thinkingLevel = env.GEMINI_TEMPLATE_THINKING_LEVEL || DEFAULTS.geminiThinking;
   const timeoutMs = boundedNumber(env.GEMINI_TEMPLATE_TIMEOUT_MS, DEFAULTS.geminiTimeoutMs, 10000, 120000);
   const maxOutputTokens = boundedNumber(env.GEMINI_TEMPLATE_MAX_OUTPUT_TOKENS, DEFAULTS.geminiMaxOutputTokens, 1200, 12000);
-  const client = geminiClient || new GoogleGenAI({ apiKey: env.GEMINI_API_KEY });
-  const request = {
+  const client = geminiClient || new googleGenAiCtor({ apiKey: env.GEMINI_API_KEY });
+  const requestParams = {
     model,
-    system_instruction: templateAiPrompts[normalized.mode],
-    input: JSON.stringify(normalized),
-    response_format: interactionResponseSchema(normalized.mode),
-    generation_config: { thinking_level: thinkingLevel, max_output_tokens: maxOutputTokens },
+    contents: JSON.stringify(normalized),
+    config: {
+      systemInstruction: buildExtractionSystemPrompt(normalized.mode),
+      temperature: 0,
+      maxOutputTokens,
+      responseMimeType: 'application/json',
+      responseJsonSchema: normalized.mode === 'context' ? templateContextOutputSchema.schema : templateMappingOutputSchema.schema,
+      thinkingConfig: {
+        thinkingLevel: THINKING_LEVELS[String(thinkingLevel).toLowerCase()] || ThinkingLevel.MEDIUM,
+      },
+      ...(signal ? { abortSignal: signal } : {}),
+      httpOptions: { timeout: timeoutMs },
+    },
   };
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const response = await client.interactions.create(request, { timeout: timeoutMs, maxRetries: 0, fetchOptions: signal ? { signal } : undefined });
-      return { output: parseJson(response?.output_text), providerUsed: "gemini", modelUsed: model };
+      const response = await client.models.generateContent(requestParams);
+      return { output: parseJson(response?.text), providerUsed: "gemini", modelUsed: model };
     } catch (error) {
       const failure = classifyGeminiFailure(error);
       if (attempt === 0 && failure.retry && !signal?.aborted) { await sleep(250); continue; }
+      if (!failure.fallbackAllowed) console.warn("Gemini template extraction execution failed:", { name: error?.name || "Error", reason: failure.reason, status: statusFrom(error) || null, message: String(error?.message || "Provider execution failed").slice(0, 240) });
       throw templateAiFailure(
         failure.fallbackAllowed ? "The primary template-analysis provider is temporarily unavailable." : "Template analysis failed because of an application or configuration error.",
         statusFrom(error) || (failure.fallbackAllowed ? 503 : 500), failure.fallbackAllowed, failure.reason,
@@ -89,15 +105,33 @@ export async function analyseTemplate(input, options = {}) {
   const normalized = normalizeAnalysisInput(input); const env = options.env || process.env;
   const primary = env.TEMPLATE_AI_PRIMARY || "gemini"; const fallback = env.TEMPLATE_AI_FALLBACK || "openrouter";
   if (primary !== "gemini") throw templateAiFailure("TEMPLATE_AI_PRIMARY must be gemini.", 503, false, "configuration_error");
+  const diagnostics = { providerAttempted: 'gemini', modelAttempted: env.GEMINI_TEMPLATE_MODEL || DEFAULTS.geminiModel, providerRequestSent: false, providerReturnedFields: 0, acceptedFields: 0, fallbackUsed: false, fallbackReason: null, fallbackProvider: null, fallbackModel: null, localFallbackUsed: false, finalFields: 0 };
   let primaryFailure;
   try {
+    diagnostics.providerRequestSent = true;
     const result = normalizeProviderResult(await analyseWithGemini(normalized, options), normalized);
+    diagnostics.providerReturnedFields = result.diagnostics?.rawMappedFields ?? result.fields?.length ?? 0;
+    diagnostics.acceptedFields = result.diagnostics?.acceptedMappedFields ?? result.fields?.length ?? 0;
+    diagnostics.finalFields = result.fields?.length ?? 0;
+    console.info('Template extraction diagnostics:', JSON.stringify(diagnostics));
     return { ...result, fallbackUsed: false, fallbackReason: null };
   } catch (error) {
-    if (!error?.retryable || fallback !== "openrouter") throw error;
+    diagnostics.providerRequestSent = !error?.reason?.includes('configuration');
+    if (!error?.retryable || fallback !== "openrouter") {
+      console.warn('Template extraction failed (no fallback):', JSON.stringify({ ...diagnostics, failureReason: error?.reason || 'unknown' }));
+      throw error;
+    }
     primaryFailure = error;
   }
+  diagnostics.fallbackUsed = true;
+  diagnostics.fallbackReason = primaryFailure.reason || 'provider_unavailable';
+  diagnostics.fallbackProvider = 'openrouter';
+  diagnostics.fallbackModel = env.OPENROUTER_TEMPLATE_MODEL || DEFAULTS.openRouterModel;
   const result = normalizeProviderResult(await analyseWithOpenRouter(normalized, options), normalized);
+  diagnostics.providerReturnedFields = result.diagnostics?.rawMappedFields ?? result.fields?.length ?? 0;
+  diagnostics.acceptedFields = result.diagnostics?.acceptedMappedFields ?? result.fields?.length ?? 0;
+  diagnostics.finalFields = result.fields?.length ?? 0;
+  console.info('Template extraction diagnostics:', JSON.stringify(diagnostics));
   return { ...result, fallbackUsed: true, fallbackReason: primaryFailure.reason || "provider_unavailable" };
 }
 
