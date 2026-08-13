@@ -1,6 +1,7 @@
 import { pool } from "../config/db.js";
 import { normalizeFields } from "../services/templateFieldService.js";
 import { analyseTemplate as analyseTemplateWithAi, mapFieldsWithAi } from "../services/templateAiProviderService.js";
+import { parseDocumentToJson } from "../services/documentJsonService.js";
 
 const SOURCE_TYPES = new Set(["pdf", "xml", "docx", "xlsx", "manual"]);
 const EXTRACTION_METHODS = new Set(["acroform", "text", "ocr", "nexaport_xml", "generic_xml", "manual"]);
@@ -69,6 +70,7 @@ export const sendTemplateError = (res, error, fallback, operation = "templates")
 
   return res.status(status || 500).json({
     success: false,
+    ...(error?.code ? { code: error.code } : {}),
     message: status ? error.message : fallback,
     ...(Array.isArray(error?.fieldErrors) ? { fieldErrors: error.fieldErrors } : {}),
   });
@@ -152,16 +154,24 @@ export const mapTemplateFields = async (req, res) => {
   catch (error) { return sendError(res, error, "Unable to map template fields."); }
 };
 
-export const analyseTemplate = async (req, res) => {
+export const createAnalyseTemplate = ({ parseDocument = parseDocumentToJson, analyseWithAi = analyseTemplateWithAi } = {}) => async (req, res) => {
   const controller = new AbortController(); req.once("aborted", () => controller.abort());
   try {
-    const data = await analyseTemplateWithAi(req.body || {}, { signal: controller.signal });
-    console.info("Template extraction diagnostics:", { primaryProvider: "gemini", primaryModel: process.env.GEMINI_TEMPLATE_MODEL || "gemini-3.6-flash", parsedBlocks: req.body?.chunk?.blocks?.length || 0, singleRequestEligible: Boolean(req.body?.singleRequestEligible), providerUsed: data.providerUsed, modelUsed: data.modelUsed, providerReturnedFields: data.diagnostics?.rawMappedFields ?? data.fields?.length ?? 0, acceptedFields: data.diagnostics?.acceptedMappedFields ?? data.fields?.length ?? 0, fallbackUsed: data.fallbackUsed, fallbackReason: data.fallbackReason, finalFields: data.fields?.length ?? 0 });
+    const sourceType = String(req.body?.sourceType || "").toLowerCase();
+    console.info("Template extraction stage", { stage: "upload_received", provider: null, status: 200, sourceType, fileSize: req.file?.size || 0 });
+    const document = await parseDocument(req.file, { sourceType, signal: controller.signal });
+    console.info("Template extraction stage", { stage: "document_json_created", provider: null, status: 200, sourceType, parsedBlocks: document.blocks.length });
+    const data = await analyseWithAi({ mode: "map", sourceType, documentTitle: document.fileName, document }, { signal: controller.signal });
+    console.info("Template extraction diagnostics:", { stage: "field_validation_complete", provider: data.providerUsed, model: data.modelUsed, status: 200, parsedBlocks: document.blocks.length, providerReturnedFields: data.diagnostics?.rawMappedFields ?? data.fields?.length ?? 0, acceptedFields: data.diagnostics?.acceptedMappedFields ?? data.fields?.length ?? 0, fallbackUsed: data.fallbackUsed, fallbackReason: data.fallbackReason, finalFields: data.fields?.length ?? 0 });
     const { providerUsed, modelUsed, fallbackUsed, fallbackReason, ...publicData } = data;
     return res.json({ success: true, data: publicData });
   }
-  catch (error) { if (["configuration_error", "authentication_error", "application_error"].includes(error?.reason)) console.error("Template extraction configuration/application error", { reason: error.reason, status: error.status }); return sendError(res, error, "Unable to analyse template source."); }
+  catch (error) {
+    console.error("Template extraction failed", { stage: error?.stage || (error?.code === "DOCUMENT_PARSE_FAILED" ? "document_parse" : "ai_provider"), provider: error?.provider || null, status: error?.status || 500, category: error?.code || error?.reason || "FIELD_EXTRACTION_FAILED", message: String(error?.safeProviderMessage || error?.message || "Extraction failed").slice(0, 240) });
+    return sendError(res, error, "Unable to analyse template source.");
+  }
 };
+export const analyseTemplate = createAnalyseTemplate();
 
 export const createTemplate = async (req, res) => {
   const client = await pool.connect();

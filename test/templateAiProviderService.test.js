@@ -35,6 +35,17 @@ test("direct Gemini is primary with gemini-3.6-flash and medium thinking", async
   assert.equal(result.providerUsed, "gemini"); assert.equal(result.fields.length, 1); assert.equal(result.fallbackUsed, false); assert.equal(openRouterCalls, 0);
 });
 
+test("OpenRouter can be the configured primary provider without invoking Gemini", async () => {
+  const blocks = [block("block-0", "Inspection Date")]; const output = outputFor(blocks, [aiField("inspection_date", "Inspection Date", "date", "general", "block-0", 0)]);
+  let geminiCalls = 0; let openRouterCalls = 0;
+  const result = await analyseTemplate(inputFor(blocks), {
+    env: { ...baseEnv, TEMPLATE_AI_PRIMARY: "openrouter", TEMPLATE_AI_FALLBACK: "gemini" },
+    geminiClient: { models: { generateContent: async () => { geminiCalls += 1; throw new Error("must not call fallback"); } } },
+    fetchImpl: async () => { openRouterCalls += 1; return openRouterResponse(output); },
+  });
+  assert.equal(result.providerUsed, "openrouter"); assert.equal(result.fields.length, 1); assert.equal(result.fallbackUsed, false); assert.equal(openRouterCalls, 1); assert.equal(geminiCalls, 0);
+});
+
 for (const [name, failure] of [
   ["HTTP 429", Object.assign(new Error("rate limit"), { status: 429 })],
   ["RESOURCE_EXHAUSTED", Object.assign(new Error("resource exhausted"), { code: "RESOURCE_EXHAUSTED" })],

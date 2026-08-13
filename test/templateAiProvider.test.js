@@ -271,9 +271,9 @@ describe('classifyGeminiFailure classifications', () => {
     assert.equal(result.fallbackAllowed, false);
   });
 
-  test('403 is authentication_error without fallback', () => {
+  test('403 is access_denied without fallback', () => {
     const result = classifyGeminiFailure({ status: 403 });
-    assert.equal(result.reason, 'authentication_error');
+    assert.equal(result.reason, 'access_denied');
     assert.equal(result.fallbackAllowed, false);
   });
 
