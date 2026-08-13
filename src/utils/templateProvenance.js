@@ -3,7 +3,9 @@ const clean = (value) => String(value ?? "").trim();
 export function isProvenanceOnlyLabel(value) {
   const label = clean(value);
   if (!label) return false;
-  return /^(?:[A-Z]{1,3}\d+)(?::[A-Z]{1,3}\d+)?$/i.test(label)
+  return /^(?:part\s*)?[A-F](?:\d+)?\s*:?$/i.test(label)
+    || /^\d+(?:\s+[A-F]\d+(?:-\d+)*)*$/i.test(label)
+    || /^(?:[A-Z]{1,3}\d+)(?::[A-Z]{1,3}\d+)?$/i.test(label)
     || /^(?:block|part|chunk|paragraph|row|column)-?\s*\d+$/i.test(label)
     || /^(?:row|column|cell)\s+\d+$/i.test(label)
     || /^(?:blank\s+)?(?:cell|input)\s+[A-Z]{1,3}\d+$/i.test(label)

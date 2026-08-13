@@ -18,7 +18,7 @@ const jsonSchema = {
   } },
 };
 
-const prompt = `Classify deterministic field candidates from a maritime form. Code has already detected structural candidates. For each candidate, decide whether it is genuinely user-entered data, clean its semantic label, confirm one supported field type, section, and order. Exclude instructions, headings, reference codes and prose with include=false. Do not invent fields. Keep candidateId unchanged. Never expose block IDs, spreadsheet coordinates, XML paths, parser tags or provenance as labels. Return only the required JSON schema.`;
+const prompt = `Classify deterministic field candidates from a maritime form. Code has already detected structure and supplies category, majorSection, subSection, tableHeaders, signals and nearby context. For each candidate, decide whether it is genuinely user-entered data, clean its semantic label, confirm one supported field type, section, and order. Checklist questions signalled as yes_no or not_applicable must remain checklist-compatible (yes_no or select), never text. Treat Part A/Part B/B1/C2 identifiers, table headings such as Time/Tank/Status/Code, instructions and ordinary prose as non-fields. Do not invent fields or expose block IDs, spreadsheet coordinates, XML paths, parser tags or provenance. Keep candidateId unchanged and return only the required JSON schema.`;
 const bounded = (value, fallback, min, max) => { const number = Number(value); return Number.isFinite(number) ? Math.min(max, Math.max(min, Math.round(number))) : fallback; };
 const deepSeekModel = (value, fallback) => {
   const model = String(value || fallback).trim();

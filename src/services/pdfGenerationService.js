@@ -6,6 +6,7 @@ const NAVY = rgb(0.03, 0.11, 0.23); const TEAL = rgb(0.06, 0.56, 0.51); const SL
 const LINE = rgb(0.84, 0.88, 0.91); const TINT = rgb(0.95, 0.98, 0.98); const WHITE = rgb(1, 1, 1);
 const text = (value) => String(value ?? "").normalize("NFKD").replace(/[–—−]/g, "-").replace(/[“”]/g, '"').replace(/[‘’]/g, "'").replace(/[^\x20-\x7E\n]/g, "").replace(/[\u0000-\u0009\u000B-\u001F]/g, " ").trim();
 const isSignature = (field) => field.type === "signature" || /signature/i.test(field.label || "");
+const isChecklist = (field) => field.type === "yes_no" || field.type === "checkbox" || field.type === "select" && (field.options || []).some((option) => /^(?:yes|no|not applicable|n\/?a)$/i.test(option));
 const isIdentity = (field) => field.type === "system_identity" || /^(inspector|surveyor|consultant)( name)?$/i.test(field.label || "");
 const humanDate = (value) => {
   if (!value) return "Not provided";
@@ -28,6 +29,12 @@ function linesFor(font, value, size, maxWidth) {
   return lines.length ? lines : ["Not provided"];
 }
 
+function fitLine(font, value, size, maxWidth) {
+  const source = text(value); if (font.widthOfTextAtSize(source, size) <= maxWidth) return source;
+  let clipped = source; while (clipped.length > 1 && font.widthOfTextAtSize(`${clipped}...`, size) > maxWidth) clipped = clipped.slice(0, -1);
+  return `${clipped.trimEnd()}...`;
+}
+
 function drawAnchor(page, x, y) {
   page.drawCircle({ x: x + 7, y: y + 13, size: 3, borderWidth: 1.3, borderColor: TEAL });
   page.drawLine({ start: { x: x + 7, y: y + 10 }, end: { x: x + 7, y }, thickness: 1.3, color: TEAL });
@@ -48,8 +55,9 @@ function makeRows(fields, values, font, bold) {
   const rows = []; let pair = [];
   const flush = () => { if (pair.length) { const cells = pair; const heights = cells.map(({ field }) => linesFor(font, fieldValue(field, values), 10.5, 224).length * 13); rows.push({ type: "pair", cells, height: Math.max(...heights) + 31 }); pair = []; } };
   fields.forEach((field) => {
-    if (field.type === "section_heading" || field.type === "photo" || isSignature(field)) return;
-    if (field.type === "yes_no") { flush(); const question = linesFor(font, field.label, 10, 348); rows.push({ type: "yesno", field, question, height: Math.max(38, question.length * 12 + 17) }); return; }
+    if (field.type === "section_heading" || field.type === "photo") return;
+    if (isChecklist(field)) { flush(); const question = linesFor(font, field.label, 9, 303); rows.push({ type: "checklist", field, question, height: Math.max(34, question.length * 11 + 14) }); return; }
+    if (isSignature(field)) { flush(); rows.push({ type: "signature", field, height: 100 }); return; }
     if (field.type === "textarea" || fieldValue(field, values).length > 90) { flush(); const valueLines = linesFor(font, fieldValue(field, values), 10.5, WIDTH - 20); rows.push({ type: "long", field, valueLines, height: 29 + valueLines.length * 14 }); return; }
     pair.push({ field, bold }); if (pair.length === 2) flush();
   }); flush(); return rows;
@@ -95,22 +103,35 @@ export async function generateReportPdf({ title, fields, values, photos = [], se
     metadata.forEach(([label, value], index) => { const col = index % columns; const row = Math.floor(index / columns); const x = LEFT + col * cellWidth + 10; const cellY = top - row * rowHeight - 13; page.drawText(text(label).toUpperCase(), { x, y: cellY, font: bold, size: 7.5, color: SLATE }); linesFor(font, value, 8.8, cellWidth - 20).slice(0, 2).forEach((line, lineIndex) => page.drawText(line, { x, y: cellY - 14 - lineIndex * 10, font, size: 8.8, color: NAVY })); });
     y = top - rows * rowHeight - 18;
   };
-  const drawRunningHeader = () => { drawAnchor(page, LEFT, 788); page.drawText("NexaPort", { x: LEFT + 23, y: 795, font: bold, size: 13, color: NAVY }); page.drawText(text(title).slice(0, 52), { x: 252, y: 795, font: bold, size: 9, color: SLATE }); page.drawLine({ start: { x: LEFT, y: 780 }, end: { x: RIGHT, y: 780 }, thickness: 1, color: TEAL }); y = 760; };
+  const drawRunningHeader = () => { drawAnchor(page, LEFT, 788); page.drawText("NexaPort", { x: LEFT + 23, y: 795, font: bold, size: 13, color: NAVY }); page.drawText(fitLine(bold, title, 9, 292), { x: 257, y: 795, font: bold, size: 9, color: SLATE }); page.drawLine({ start: { x: LEFT, y: 780 }, end: { x: RIGHT, y: 780 }, thickness: 1, color: TEAL }); y = 760; };
   const newPage = (first = false) => { page = pdf.addPage(PAGE); if (first) drawFullHeader(); else drawRunningHeader(); };
   const drawSection = (name, continued = false) => { currentSection = name; checklistNumber = continued ? checklistNumber : 0; page.drawRectangle({ x: LEFT, y: y - 27, width: WIDTH, height: 27, color: TINT }); page.drawRectangle({ x: LEFT, y: y - 27, width: 3, height: 27, color: TEAL }); page.drawText(`${text(name)}${continued ? " (continued)" : ""}`, { x: LEFT + 12, y: y - 18, font: bold, size: 12, color: NAVY }); y -= 37; };
-  const ensure = (height, repeatSection = true) => { if (y - height >= BOTTOM) return; newPage(false); if (repeatSection && currentSection) drawSection(currentSection, true); };
+  const ensure = (height, repeatSection = true) => { if (y - height >= BOTTOM) return false; newPage(false); if (repeatSection && currentSection) drawSection(currentSection, true); return true; };
   const drawPair = (row) => { const cellWidth = (WIDTH - 18) / 2; row.cells.forEach(({ field }, index) => { const x = LEFT + index * (cellWidth + 18); page.drawText(text(isIdentity(field) ? "Inspector" : field.label).toUpperCase(), { x, y: y - 10, font: bold, size: 7.7, color: SLATE }); linesFor(font, fieldValue(field, values), 10.5, cellWidth).forEach((line, lineIndex) => page.drawText(line, { x, y: y - 27 - lineIndex * 13, font, size: 10.5, color: NAVY })); }); page.drawLine({ start: { x: LEFT, y: y - row.height + 5 }, end: { x: RIGHT, y: y - row.height + 5 }, thickness: .5, color: LINE }); y -= row.height; };
-  const drawYesNo = (row) => { checklistNumber += 1; const answer = fieldValue(row.field, values).toLowerCase(); page.drawText(`${checklistNumber}.`, { x: LEFT, y: y - 14, font: bold, size: 9, color: SLATE }); row.question.forEach((line, index) => page.drawText(line, { x: LEFT + 23, y: y - 14 - index * 12, font, size: 10, color: NAVY })); const box = (x, label, selected) => { page.drawRectangle({ x, y: y - 23, width: 10, height: 10, borderColor: NAVY, borderWidth: .8, color: WHITE }); if (selected) { page.drawLine({ start: { x: x + 2, y: y - 18 }, end: { x: x + 5, y: y - 21 }, thickness: 1.2, color: NAVY }); page.drawLine({ start: { x: x + 5, y: y - 21 }, end: { x: x + 9, y: y - 14 }, thickness: 1.2, color: NAVY }); } page.drawText(label, { x: x + 15, y: y - 22, font: selected ? bold : font, size: 8.5, color: NAVY }); }; box(443, "Yes", answer === "yes"); box(497, "No", answer === "no"); page.drawLine({ start: { x: LEFT, y: y - row.height + 4 }, end: { x: RIGHT, y: y - row.height + 4 }, thickness: .5, color: LINE }); y -= row.height; };
+  const checklistColumns = [28, 315, 28, 28, 28, 76];
+  const drawChecklistGrid = (top, height, fill = null) => { let x = LEFT; if (fill) page.drawRectangle({ x: LEFT, y: top - height, width: WIDTH, height, color: fill }); page.drawRectangle({ x: LEFT, y: top - height, width: WIDTH, height, borderColor: LINE, borderWidth: .7 }); for (const width of checklistColumns.slice(0, -1)) { x += width; page.drawLine({ start: { x, y: top }, end: { x, y: top - height }, thickness: .55, color: LINE }); } };
+  const drawChecklistHeader = () => { const height = 24; const labels = ["No.", "Item", "Yes", "No", "N/A", "Remarks"]; drawChecklistGrid(y, height, TINT); let x = LEFT; labels.forEach((label, index) => { const width = checklistColumns[index]; const labelWidth = bold.widthOfTextAtSize(label, 7.4); page.drawText(label.toUpperCase(), { x: index === 1 || index === 5 ? x + 7 : x + (width - labelWidth) / 2, y: y - 16, font: bold, size: 7.4, color: SLATE }); x += width; }); y -= height; };
+  const drawChecklist = (row) => { checklistNumber += 1; const raw = values[row.field.fieldKey] ?? row.field.defaultValue; const answerValue = typeof raw === "object" && raw ? raw.answer ?? raw.value : raw; const remarks = typeof raw === "object" && raw ? raw.remarks : ""; const answer = text(answerValue).toLowerCase(); drawChecklistGrid(y, row.height); let x = LEFT; const centered = (value, column, size = 8.3) => { const width = checklistColumns[column]; if (value) page.drawText(value, { x: x + (width - font.widthOfTextAtSize(value, size)) / 2, y: y - 20, font: value === "X" ? bold : font, size, color: NAVY }); x += width; }; centered(String(checklistNumber), 0); row.question.forEach((line, index) => page.drawText(line, { x: x + 7, y: y - 16 - index * 11, font, size: 9, color: NAVY })); x += checklistColumns[1]; centered(answer === "yes" || answer === "true" || answer === "agreed" ? "X" : "", 2); centered(answer === "no" || answer === "false" ? "X" : "", 3); centered(/not applicable|n\/?a/.test(answer) ? "X" : "", 4); if (remarks) linesFor(font, remarks, 7.8, checklistColumns[5] - 12).slice(0, 3).forEach((line, index) => page.drawText(line, { x: x + 6, y: y - 14 - index * 9, font, size: 7.8, color: NAVY })); y -= row.height; };
+  const drawSignatureField = (row) => { page.drawRectangle({ x: LEFT, y: y - row.height + 7, width: WIDTH, height: row.height - 7, borderColor: LINE, borderWidth: .7 }); page.drawText(text(row.field.label).toUpperCase(), { x: LEFT + 10, y: y - 17, font: bold, size: 7.7, color: SLATE }); const value = fieldValue(row.field, values); if (value !== "Not provided") page.drawText(value, { x: LEFT + 10, y: y - 39, font, size: 10, color: NAVY }); page.drawLine({ start: { x: LEFT + 10, y: y - 78 }, end: { x: RIGHT - 10, y: y - 78 }, thickness: .6, color: SLATE }); page.drawText("Signature", { x: LEFT + 10, y: y - 90, font, size: 7.5, color: SLATE }); y -= row.height; };
   const drawLong = (row) => { page.drawText(text(row.field.label).toUpperCase(), { x: LEFT, y: y - 10, font: bold, size: 7.7, color: SLATE }); row.valueLines.forEach((line, index) => page.drawText(line, { x: LEFT, y: y - 28 - index * 14, font, size: 10.5, color: NAVY })); page.drawLine({ start: { x: LEFT, y: y - row.height + 4 }, end: { x: RIGHT, y: y - row.height + 4 }, thickness: .5, color: LINE }); y -= row.height; };
 
   newPage(true);
   const groups = fields.reduce((all, field) => { const name = field.section || "General"; (all[name] ||= []).push(field); return all; }, {});
   for (const [section, sectionFields] of Object.entries(groups)) {
     const rows = makeRows(sectionFields, values, font, bold); if (!rows.length) continue;
-    const total = 37 + rows.reduce((sum, row) => sum + row.height, 0); const freshCapacity = 760 - BOTTOM;
-    if ((total <= freshCapacity && y - total < BOTTOM) || y - (37 + rows.slice(0, 2).reduce((sum, row) => sum + row.height, 0)) < BOTTOM) newPage(false);
+    const firstRows = rows.slice(0, Math.min(2, rows.length)); const firstBlock = 37 + firstRows.reduce((sum, row) => sum + row.height, 0) + (firstRows[0]?.type === "checklist" ? 24 : 0);
+    if (y - firstBlock < BOTTOM) newPage(false);
     drawSection(section);
-    for (const row of rows) { ensure(row.height); if (row.type === "pair") drawPair(row); else if (row.type === "yesno") drawYesNo(row); else drawLong(row); }
+    let inChecklist = false;
+    for (const row of rows) {
+      if (row.type === "checklist") {
+        if (!inChecklist) { ensure(24 + row.height); drawChecklistHeader(); inChecklist = true; }
+        else if (ensure(row.height)) drawChecklistHeader();
+        drawChecklist(row); continue;
+      }
+      inChecklist = false; ensure(row.height);
+      if (row.type === "pair") drawPair(row); else if (row.type === "signature") drawSignatureField(row); else drawLong(row);
+    }
   }
 
   const photoMedia = photos.filter((item) => item.type !== "signature");

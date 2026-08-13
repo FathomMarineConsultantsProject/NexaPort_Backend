@@ -40,17 +40,18 @@ export function sanitizeAndValidateFields(rawFields, candidates = []) {
     if (!parsed.success || !parsed.data.include) { rejected.push({ reason: parsed.success ? "excluded" : "schema", raw }); continue; }
     const field = parsed.data; const candidate = field.candidateId ? byId.get(field.candidateId) : null;
     const label = sanitizeTemplateLabel(field.label);
-    const section = sanitizeTemplateLabel(field.section) || sanitizeTemplateLabel(candidate?.section) || "General";
+    const section = sanitizeTemplateLabel(candidate?.section) || sanitizeTemplateLabel(field.section) || "General";
     if (!label || isProvenanceOnlyLabel(label) || isProvenanceOnlyLabel(section)) { rejected.push({ reason: "provenance", raw }); continue; }
     if (field.candidateId && !candidate) { rejected.push({ reason: "unknown_candidate", raw }); continue; }
-    const signature = `${section.toLowerCase()}|${label.toLowerCase()}|${field.fieldType}`;
+    const fieldType = candidate?.forcedType || field.fieldType;
+    const signature = `${section.toLowerCase()}|${label.toLowerCase()}|${fieldType}`;
     if (seenSemantic.has(signature)) { rejected.push({ reason: "duplicate", raw }); continue; }
     seenSemantic.add(signature);
     let fieldKey = `${slug(section)}_${slug(label)}`.slice(0, 76); let suffix = 2;
     while (seenKeys.has(fieldKey)) fieldKey = `${slug(section)}_${slug(label)}_${suffix++}`.slice(0, 80);
     seenKeys.add(fieldKey);
     const evidenceRefs = candidate ? [candidate.blockId] : (field.evidenceRefs || []).filter((ref) => /^block-\d+$/.test(ref));
-    accepted.push({ fieldKey, label, fieldType: field.fieldType, type: field.fieldType, required: field.required, sectionKey: slug(section), section, sourceOrder: candidate?.order ?? field.order, sortOrder: 0, options: field.fieldType === "yes_no" ? ["Yes", "No"] : [...new Set(field.options.map((item) => sanitizeTemplateLabel(item)).filter(Boolean))].slice(0, 50), evidenceRefs, sourceText: candidate?.sourceText || label, confidence: candidate ? 0.75 : 0.5, sourceLocation: candidate ? { blockId: candidate.blockId, globalOrder: candidate.order, ...candidate.metadata?.location } : null } );
+    accepted.push({ fieldKey, label, fieldType, type: fieldType, required: field.required, sectionKey: slug(section), section, sourceOrder: candidate?.order ?? field.order, sortOrder: 0, options: fieldType === "yes_no" ? ["Yes", "No"] : fieldType === "select" && candidate?.signals?.includes("not_applicable") ? ["Yes", "No", "Not Applicable"] : [...new Set(field.options.map((item) => sanitizeTemplateLabel(item)).filter(Boolean))].slice(0, 50), evidenceRefs, sourceText: candidate?.sourceText || label, confidence: candidate ? 0.75 : 0.5, sourceLocation: candidate ? { blockId: candidate.blockId, globalOrder: candidate.order, ...candidate.metadata?.location } : null } );
   }
   accepted.sort((a, b) => a.sourceOrder - b.sourceOrder).forEach((field, index) => { field.sortOrder = index; });
   return { fields: accepted, rejected };
@@ -66,5 +67,15 @@ export function runTemplateQualityGate({ fields, candidates, sections }) {
   if (new Set(fields.map((field) => `${field.section}|${field.label}|${field.fieldType}`.toLowerCase())).size !== fields.length) issues.push("Duplicate fields remain.");
   if (fields.some((field, index) => field.sortOrder !== index)) issues.push("Field ordering is invalid.");
   if ((sections || []).some((section) => !sanitizeTemplateLabel(section.title))) issues.push("A section title is invalid.");
-  return { passed: issues.length === 0, issues };
+  const general = fields.filter((field) => /general information|preparation/i.test(field.section));
+  if (fields.length >= 10 && general.length / fields.length > 0.7) issues.push("An implausible proportion of fields were assigned to General or Preparation.");
+  if (fields.some((field) => /^(?:part\s*)?[A-F](?:\d+)?\s*:?$/i.test(field.label))) issues.push("Part identifiers survived as user fields.");
+  if (fields.some((field) => /^(?:time|tank|status|check|code|remarks?)$/i.test(field.label) && candidates.some((candidate) => candidate.tableHeaders?.some((header) => header.toLowerCase() === field.label.toLowerCase())))) issues.push("Repeated table headers survived as user fields.");
+  const obviousChecklist = candidates.filter((candidate) => candidate.category === "checklist_item");
+  const checklistFields = fields.filter((field) => ["yes_no", "checkbox", "select"].includes(field.fieldType));
+  if (obviousChecklist.length >= 5 && checklistFields.length < Math.ceil(obviousChecklist.length * 0.7)) issues.push("Too many structurally obvious checklist items disappeared or became text fields.");
+  const declarationCandidates = candidates.filter((candidate) => candidate.category === "declaration_field");
+  if (declarationCandidates.length && !fields.some((field) => field.fieldType === "signature") && declarationCandidates.some((candidate) => /signature/i.test(candidate.sourceText))) issues.push("Obvious declaration signature fields disappeared.");
+  const fatalIssues = issues.filter((issue) => /No fields|unsupported types|parser provenance|Duplicate fields|ordering is invalid|Part identifiers/.test(issue));
+  return { passed: issues.length === 0, usable: fields.length > 0 && fatalIssues.length === 0, issues, fatalIssues };
 }

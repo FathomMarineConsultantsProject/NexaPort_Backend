@@ -14,15 +14,32 @@ function normalizedDocument({ file, type, blocks, parts = [], metadata = {}, par
 }
 
 function flattenOffice(content = []) {
-  const blocks = [];
-  const visit = (nodes, parents = [], inherited = {}) => {
+  const blocks = []; let tableIndex = 0;
+  const visit = (nodes, parents = []) => {
     for (const node of nodes || []) {
       if (!node || typeof node !== "object") continue;
       const metadata = node.metadata && typeof node.metadata === "object" ? node.metadata : {};
-      const location = { ...inherited, ...(Number.isInteger(metadata.pageNumber ?? metadata.page) ? { pageNumber: metadata.pageNumber ?? metadata.page } : {}), ...(Number.isInteger(metadata.row ?? metadata.rowIndex) ? { rowIndex: metadata.row ?? metadata.rowIndex } : {}), ...(Number.isInteger(metadata.col ?? metadata.columnIndex) ? { columnIndex: metadata.col ?? metadata.columnIndex } : {}) };
-      const value = text(node.text); const type = String(node.type || "unknown");
-      if (value && type !== "text") blocks.push({ type, text: value, metadata: { ...metadata, formatting: node.formatting || undefined, parentTypes: parents }, location });
-      visit(node.children, [...parents, type], location); visit(node.notes, [...parents, type, "notes"], location); visit(node.comments, [...parents, type, "comments"], location);
+      const type = String(node.type || "unknown");
+      if (type === "table") {
+        const currentTable = tableIndex++;
+        for (const [rowIndex, row] of (node.children || []).entries()) {
+          const cells = (row.children || []).map((cell, columnIndex) => {
+            const displayedValue = text(cell.text);
+            return { rowIndex, columnIndex, displayedValue, empty: !displayedValue, ...(cell.metadata || {}) };
+          });
+          const values = cells.map((cell) => cell.displayedValue).filter(Boolean);
+          if (values.length) blocks.push({ type: "table_row", text: values.join(" | "), metadata: { tableIndex: currentTable, rowIndex, cells, emptyResponseCells: cells.filter((cell) => cell.empty).length }, location: { tableIndex: currentTable, rowIndex } });
+        }
+        continue;
+      }
+      const value = text(node.text);
+      if (value && type !== "text" && !parents.includes("cell")) {
+        const normalizedType = type === "list" ? "list_item" : type;
+        const sectionPattern = /^(?:part\s+[A-F](?:\d+)?\b|[B-F]\d\s*[-–—]|declaration\b)/i;
+        const headingStyle = ["1", "2"].includes(String(metadata.style || "")) || /^heading\s*\d*$/i.test(String(metadata.style || ""));
+        blocks.push({ type: headingStyle || sectionPattern.test(value) && !/[.!?]\s+\S/.test(value) ? "heading" : normalizedType, text: value, metadata: { ...metadata, parentTypes: parents }, location: {} });
+      }
+      visit(node.children, [...parents, type]); visit(node.notes, [...parents, type, "notes"]); visit(node.comments, [...parents, type, "comments"]);
     }
   };
   visit(content); return blocks;
