@@ -15,7 +15,7 @@ const DEFAULTS = Object.freeze({
   geminiThinking: "medium",
   geminiTimeoutMs: 90000,
   geminiMaxOutputTokens: 8192,
-  openRouterModel: "google/gemini-3.5-flash",
+  openRouterModel: "deepseek/deepseek-v4-flash:free",
 });
 
 const THINKING_LEVELS = Object.freeze({ low: ThinkingLevel.LOW, medium: ThinkingLevel.MEDIUM });

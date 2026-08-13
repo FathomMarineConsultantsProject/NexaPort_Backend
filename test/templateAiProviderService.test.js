@@ -59,7 +59,7 @@ for (const [name, failure] of [
     fetchImpl: async (_url, options) => { openRouterBody = JSON.parse(options.body); return openRouterResponse(output); },
   });
   assert.equal(geminiCalls, 1); assert.equal(result.providerUsed, "openrouter"); assert.equal(result.fallbackUsed, true);
-  assert.equal(openRouterBody.model, "google/gemini-3.5-flash"); assert.deepEqual(openRouterBody.reasoning, { effort: "medium" }); assert.equal(openRouterBody.max_tokens, 8192);
+  assert.equal(openRouterBody.model, "deepseek/deepseek-v4-flash:free"); assert.deepEqual(openRouterBody.reasoning, { effort: "high" }); assert.equal(openRouterBody.max_tokens, 8192);
 });
 
 for (const [name, failure] of [
