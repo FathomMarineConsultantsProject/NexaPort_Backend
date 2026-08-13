@@ -42,7 +42,7 @@ export function classifyGeminiFailure(error) {
   if (["ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "EAI_AGAIN", "ENETUNREACH"].includes(code) || error?.name === "TimeoutError" || error?.name === "AbortError" && error?.templateTimeout || /network error|fetch failed|timed out|timeout/.test(message)) return { reason: error?.name === "TimeoutError" || /timed out|timeout/.test(message) ? "timeout" : "network_error", fallbackAllowed: true, retry: true };
   if (status === 402 || /payment required|insufficient (?:credit|fund)/.test(message)) return { reason: "payment_required", fallbackAllowed: false, retry: false };
   if (status === 401 || ["UNAUTHENTICATED", "API_KEY_INVALID"].includes(code) || /api key.*(?:invalid|not valid)|authentication|unauthenticated/.test(message)) return { reason: "authentication_error", fallbackAllowed: false, retry: false };
-  if (status === 403 || /permission denied|access denied|model.*not.*available/.test(message)) return { reason: "access_denied", fallbackAllowed: false, retry: false };
+  if (status === 403 || /permission denied|access denied|model.*not.*available/.test(message)) return { reason: "access_denied", fallbackAllowed: true, retry: false };
   return { reason: "application_error", fallbackAllowed: false, retry: false };
 }
 
