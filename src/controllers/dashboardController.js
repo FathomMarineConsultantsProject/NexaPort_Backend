@@ -1,5 +1,406 @@
 import { pool } from "../config/db.js";
 
+const sendDashboardError = (res, label, error) => {
+  console.error(`${label} dashboard error:`, error);
+  return res.status(500).json({
+    success: false,
+    message: `Failed to fetch ${label.toLowerCase()} dashboard`,
+  });
+};
+
+const requestListSelect = `
+  sr.id,
+  sr.title,
+  sr.service_type,
+  sr.service_category,
+  sr.service_type_other,
+  sr.vessel_name,
+  sr.vessel_type,
+  sr.port_name,
+  sr.required_by,
+  sr.eta,
+  sr.status,
+  sr.moderation_status,
+  sr.created_at,
+  sr.updated_at
+`;
+
+export const getClientDashboard = async (req, res) => {
+  try {
+    const userId = Number(req.user.id);
+    const [summary, attention, activeJobs, upcoming, recent] = await Promise.all([
+      pool.query(
+        `
+        SELECT
+          COUNT(*)::int AS total_requests,
+          COUNT(*) FILTER (WHERE LOWER(sr.status) = 'open')::int AS open_requests,
+          COUNT(*) FILTER (
+            WHERE sr.moderation_status = 'approved'
+              AND LOWER(sr.status) = 'open'
+              AND NOT EXISTS (
+                SELECT 1 FROM quotations q
+                WHERE q.service_request_id = sr.id AND q.status = 'accepted'
+              )
+          )::int AS requests_awaiting_quotes,
+          COUNT(*) FILTER (
+            WHERE EXISTS (
+              SELECT 1 FROM quotations q
+              WHERE q.service_request_id = sr.id AND q.status = 'accepted'
+            )
+          )::int AS quotes_received,
+          COUNT(*) FILTER (
+            WHERE sr.accepted_quotation_id IS NOT NULL
+              AND LOWER(sr.status) IN ('open', 'pending')
+          )::int AS awaiting_decision,
+          COUNT(*) FILTER (WHERE LOWER(sr.status) IN ('assigned', 'active'))::int AS active_jobs,
+          COUNT(*) FILTER (WHERE LOWER(sr.status) = 'completed')::int AS completed_jobs
+        FROM service_requests sr
+        WHERE sr.requester_user_id = $1
+        `,
+        [userId]
+      ),
+      pool.query(
+        `
+        SELECT ${requestListSelect},
+          CASE WHEN sr.accepted_quotation_id IS NOT NULL THEN 1 ELSE 0 END::int AS quotation_count
+        FROM service_requests sr
+        WHERE sr.requester_user_id = $1
+          AND (
+            (sr.accepted_quotation_id IS NOT NULL AND LOWER(sr.status) IN ('open', 'pending'))
+            OR (
+              sr.moderation_status = 'approved'
+              AND LOWER(sr.status) = 'open'
+              AND sr.required_by IS NOT NULL
+              AND sr.required_by <= CURRENT_DATE + INTERVAL '30 days'
+            )
+          )
+        ORDER BY
+          (sr.accepted_quotation_id IS NOT NULL) DESC,
+          sr.required_by ASC NULLS LAST,
+          sr.updated_at DESC
+        LIMIT 8
+        `,
+        [userId]
+      ),
+      pool.query(
+        `
+        SELECT ${requestListSelect}, e.full_name AS consultant_name
+        FROM service_requests sr
+        LEFT JOIN experts e ON e.id = sr.accepted_expert_id
+        WHERE sr.requester_user_id = $1
+          AND LOWER(sr.status) IN ('assigned', 'active')
+        ORDER BY sr.required_by ASC NULLS LAST, sr.updated_at DESC
+        LIMIT 8
+        `,
+        [userId]
+      ),
+      pool.query(
+        `
+        SELECT ${requestListSelect}, e.full_name AS consultant_name
+        FROM service_requests sr
+        LEFT JOIN experts e ON e.id = sr.accepted_expert_id
+        WHERE sr.requester_user_id = $1
+          AND LOWER(sr.status) IN ('assigned', 'active')
+          AND COALESCE(sr.required_by, sr.eta) >= CURRENT_DATE
+        ORDER BY COALESCE(sr.required_by, sr.eta) ASC, sr.id DESC
+        LIMIT 6
+        `,
+        [userId]
+      ),
+      pool.query(
+        `
+        SELECT ${requestListSelect}
+        FROM service_requests sr
+        WHERE sr.requester_user_id = $1
+        ORDER BY GREATEST(sr.created_at, sr.updated_at) DESC, sr.id DESC
+        LIMIT 6
+        `,
+        [userId]
+      ),
+    ]);
+
+    return res.json({
+      success: true,
+      data: {
+        kpis: summary.rows[0],
+        attention_requests: attention.rows,
+        active_jobs: activeJobs.rows,
+        upcoming_inspections: upcoming.rows,
+        recent_requests: recent.rows,
+      },
+    });
+  } catch (error) {
+    return sendDashboardError(res, "Client", error);
+  }
+};
+
+const expertProfileCte = `
+  WITH expert_profile AS (
+    SELECT e.id, e.user_id, erd.discipline, erd.discipline_other
+    FROM experts e
+    LEFT JOIN expert_registration_details erd ON erd.expert_id = e.id
+    WHERE e.user_id = $1
+    LIMIT 1
+  )
+`;
+
+const expertMatchSql = `
+  EXISTS (
+    SELECT 1 FROM expert_ports ep
+    WHERE ep.expert_id = expert_profile.id
+      AND LOWER(TRIM(ep.port_name)) = LOWER(TRIM(sr.port_name))
+  )
+  OR EXISTS (
+    SELECT 1
+    FROM expert_vessel_types evt
+    JOIN master_vessel_types mvt ON mvt.id = evt.vessel_type_id
+    WHERE evt.expert_id = expert_profile.id
+      AND LOWER(TRIM(mvt.name)) = LOWER(TRIM(sr.vessel_type))
+  )
+  OR (
+    COALESCE(expert_profile.discipline_other, expert_profile.discipline) IS NOT NULL
+    AND (
+      LOWER(COALESCE(sr.service_category, '')) LIKE '%' || LOWER(COALESCE(expert_profile.discipline_other, expert_profile.discipline)) || '%'
+      OR LOWER(COALESCE(sr.service_type, '')) LIKE '%' || LOWER(COALESCE(expert_profile.discipline_other, expert_profile.discipline)) || '%'
+    )
+  )
+  OR EXISTS (
+    SELECT 1
+    FROM expert_specialties es
+    JOIN master_specialties ms ON ms.id = es.specialty_id
+    WHERE es.expert_id = expert_profile.id
+      AND (
+        LOWER(COALESCE(sr.service_category, '')) LIKE '%' || LOWER(ms.name) || '%'
+        OR LOWER(COALESCE(sr.service_type, '')) LIKE '%' || LOWER(ms.name) || '%'
+      )
+  )
+`;
+
+export const getExpertDashboard = async (req, res) => {
+  try {
+    const userId = Number(req.user.id);
+    const [summary, matching, assignments, quotations, upcoming] = await Promise.all([
+      pool.query(
+        `${expertProfileCte}
+        SELECT
+          (SELECT COUNT(*) FROM service_requests sr
+            WHERE sr.moderation_status = 'approved'
+              AND LOWER(sr.status) IN ('open', 'pending', 'active'))::int AS available_requests,
+          (SELECT COUNT(*) FROM service_requests sr, expert_profile
+            WHERE sr.moderation_status = 'approved'
+              AND LOWER(sr.status) IN ('open', 'pending', 'active')
+              AND (${expertMatchSql}))::int AS matching_requests,
+          (SELECT COUNT(*) FROM quotations q
+            WHERE q.expert_user_id = $1)::int AS quotes_submitted,
+          (SELECT COUNT(*) FROM quotations q
+            WHERE q.expert_user_id = $1 AND LOWER(q.status) IN ('submitted', 'pending'))::int AS quotes_pending,
+          (SELECT COUNT(*) FROM quotations q
+            WHERE q.expert_user_id = $1 AND LOWER(q.status) = 'accepted')::int AS quotes_accepted,
+          (SELECT COUNT(*) FROM quotations q
+            WHERE q.expert_user_id = $1 AND LOWER(q.status) = 'rejected')::int AS quotes_rejected,
+          (SELECT COUNT(DISTINCT sr.id)
+            FROM service_requests sr, expert_profile
+            WHERE LOWER(sr.status) IN ('assigned', 'active')
+              AND (sr.accepted_expert_id = expert_profile.id OR EXISTS (
+                SELECT 1 FROM request_expert_assignments rea
+                WHERE rea.service_request_id = sr.id AND rea.expert_id = expert_profile.id
+              )))::int AS active_assignments,
+          (SELECT COUNT(DISTINCT sr.id)
+            FROM service_requests sr, expert_profile
+            WHERE LOWER(sr.status) = 'completed'
+              AND (sr.accepted_expert_id = expert_profile.id OR EXISTS (
+                SELECT 1 FROM request_expert_assignments rea
+                WHERE rea.service_request_id = sr.id AND rea.expert_id = expert_profile.id
+              )))::int AS completed_jobs,
+          COALESCE((SELECT SUM(
+            COALESCE(q.total_quote_usd, 0) + COALESCE(q.travel_cost, 0)
+            + COALESCE(q.accommodation_cost, 0) + COALESCE(q.report_fee, 0)
+            + COALESCE(q.urgency_surcharge, 0)
+          ) FROM quotations q
+            WHERE q.expert_user_id = $1 AND LOWER(q.status) = 'accepted'), 0)::float
+            AS accepted_quotation_value_usd
+        `,
+        [userId]
+      ),
+      pool.query(
+        `${expertProfileCte}
+        SELECT ${requestListSelect},
+          CONCAT_WS(' + ',
+            CASE WHEN EXISTS (SELECT 1 FROM expert_ports ep WHERE ep.expert_id = expert_profile.id AND LOWER(TRIM(ep.port_name)) = LOWER(TRIM(sr.port_name))) THEN 'Port' END,
+            CASE WHEN EXISTS (SELECT 1 FROM expert_vessel_types evt JOIN master_vessel_types mvt ON mvt.id = evt.vessel_type_id WHERE evt.expert_id = expert_profile.id AND LOWER(TRIM(mvt.name)) = LOWER(TRIM(sr.vessel_type))) THEN 'Vessel type' END,
+            CASE WHEN (
+              (COALESCE(expert_profile.discipline_other, expert_profile.discipline) IS NOT NULL AND (
+                LOWER(COALESCE(sr.service_category, '')) LIKE '%' || LOWER(COALESCE(expert_profile.discipline_other, expert_profile.discipline)) || '%'
+                OR LOWER(COALESCE(sr.service_type, '')) LIKE '%' || LOWER(COALESCE(expert_profile.discipline_other, expert_profile.discipline)) || '%'
+              )) OR EXISTS (SELECT 1 FROM expert_specialties es JOIN master_specialties ms ON ms.id = es.specialty_id WHERE es.expert_id = expert_profile.id AND (LOWER(COALESCE(sr.service_category, '')) LIKE '%' || LOWER(ms.name) || '%' OR LOWER(COALESCE(sr.service_type, '')) LIKE '%' || LOWER(ms.name) || '%'))
+            ) THEN 'Discipline' END
+          ) AS match_reason,
+          CASE WHEN EXISTS (SELECT 1 FROM quotations q WHERE q.service_request_id = sr.id AND q.expert_user_id = $1) THEN 'submitted' ELSE 'not_submitted' END AS quotation_state
+        FROM service_requests sr, expert_profile
+        WHERE sr.moderation_status = 'approved'
+          AND LOWER(sr.status) IN ('open', 'pending', 'active')
+          AND (${expertMatchSql})
+        ORDER BY sr.required_by ASC NULLS LAST, sr.created_at DESC
+        LIMIT 8
+        `,
+        [userId]
+      ),
+      pool.query(
+        `${expertProfileCte}
+        SELECT ${requestListSelect}
+        FROM service_requests sr, expert_profile
+        WHERE LOWER(sr.status) IN ('assigned', 'active')
+          AND (sr.accepted_expert_id = expert_profile.id OR EXISTS (
+            SELECT 1 FROM request_expert_assignments rea
+            WHERE rea.service_request_id = sr.id AND rea.expert_id = expert_profile.id
+          ))
+        ORDER BY sr.required_by ASC NULLS LAST, sr.updated_at DESC
+        LIMIT 8
+        `,
+        [userId]
+      ),
+      pool.query(
+        `
+        SELECT q.id, q.service_request_id, sr.title AS request_title,
+          q.total_quote_usd, q.travel_cost, q.accommodation_cost, q.report_fee,
+          q.urgency_surcharge, q.status, q.created_at, q.updated_at
+        FROM quotations q
+        JOIN service_requests sr ON sr.id = q.service_request_id
+        WHERE q.expert_user_id = $1
+        ORDER BY q.created_at DESC, q.id DESC
+        LIMIT 8
+        `,
+        [userId]
+      ),
+      pool.query(
+        `${expertProfileCte}
+        SELECT ${requestListSelect}
+        FROM service_requests sr, expert_profile
+        WHERE LOWER(sr.status) IN ('assigned', 'active')
+          AND COALESCE(sr.required_by, sr.eta) >= CURRENT_DATE
+          AND (sr.accepted_expert_id = expert_profile.id OR EXISTS (
+            SELECT 1 FROM request_expert_assignments rea
+            WHERE rea.service_request_id = sr.id AND rea.expert_id = expert_profile.id
+          ))
+        ORDER BY COALESCE(sr.required_by, sr.eta) ASC, sr.id DESC
+        LIMIT 6
+        `,
+        [userId]
+      ),
+    ]);
+
+    return res.json({
+      success: true,
+      data: {
+        kpis: summary.rows[0],
+        matching_requests: matching.rows,
+        active_assignments: assignments.rows,
+        recent_quotations: quotations.rows,
+        upcoming_work: upcoming.rows,
+      },
+    });
+  } catch (error) {
+    return sendDashboardError(res, "Expert", error);
+  }
+};
+
+export const getAdminDashboard = async (_req, res) => {
+  try {
+    const [summary, moderations, quoteReview, activeJobs, registrations, recentQuotes, audit] = await Promise.all([
+      pool.query(`
+        SELECT
+          (SELECT COUNT(*) FROM users WHERE role_id = 3)::int AS total_clients,
+          (SELECT COUNT(*) FROM experts)::int AS total_consultants,
+          (SELECT COUNT(*) FROM experts WHERE availability = 'available')::int AS active_consultants,
+          (SELECT COUNT(*) FROM service_requests)::int AS total_requests,
+          (SELECT COUNT(*) FROM service_requests WHERE moderation_status = 'pending')::int AS pending_moderation_requests,
+          (SELECT COUNT(*) FROM service_requests sr
+            WHERE sr.moderation_status = 'approved' AND LOWER(sr.status) = 'open'
+              AND NOT EXISTS (SELECT 1 FROM quotations q WHERE q.service_request_id = sr.id))::int AS requests_awaiting_quotes,
+          (SELECT COUNT(*) FROM quotations q
+            WHERE LOWER(q.status) IN ('submitted', 'pending'))::int AS quotes_awaiting_review,
+          (SELECT COUNT(*) FROM service_requests WHERE LOWER(status) IN ('assigned', 'active'))::int AS active_jobs,
+          (SELECT COUNT(*) FROM service_requests WHERE LOWER(status) = 'completed')::int AS completed_jobs,
+          COALESCE((SELECT SUM(q.admin_markup_usd) FROM quotations q WHERE LOWER(q.status) = 'accepted'), 0)::float AS commission_value_usd
+      `),
+      pool.query(`
+        SELECT ${requestListSelect}, u.full_name AS client_name
+        FROM service_requests sr
+        LEFT JOIN users u ON u.id = sr.requester_user_id
+        WHERE sr.moderation_status = 'pending'
+        ORDER BY sr.created_at ASC, sr.id ASC
+        LIMIT 8
+      `),
+      pool.query(`
+        SELECT q.id, q.service_request_id, sr.title AS request_title,
+          e.full_name AS consultant_name, q.total_quote_usd, q.travel_cost,
+          q.accommodation_cost, q.report_fee, q.urgency_surcharge,
+          q.status, q.created_at
+        FROM quotations q
+        JOIN service_requests sr ON sr.id = q.service_request_id
+        LEFT JOIN experts e ON e.id = q.expert_id
+        WHERE LOWER(q.status) IN ('submitted', 'pending')
+        ORDER BY q.created_at ASC, q.id ASC
+        LIMIT 8
+      `),
+      pool.query(`
+        SELECT ${requestListSelect}, u.full_name AS client_name,
+          e.full_name AS consultant_name
+        FROM service_requests sr
+        LEFT JOIN users u ON u.id = sr.requester_user_id
+        LEFT JOIN experts e ON e.id = sr.accepted_expert_id
+        WHERE LOWER(sr.status) IN ('assigned', 'active')
+        ORDER BY sr.required_by ASC NULLS LAST, sr.updated_at DESC
+        LIMIT 8
+      `),
+      pool.query(`
+        SELECT cp.id AS client_profile_id, u.id AS user_id, u.full_name,
+          u.email, cp.verification_status, cp.verification_submitted_at,
+          u.created_at
+        FROM users u
+        LEFT JOIN client_profiles cp ON cp.user_id = u.id
+        WHERE u.role_id = 3
+        ORDER BY COALESCE(cp.verification_submitted_at, u.created_at) DESC, u.id DESC
+        LIMIT 6
+      `),
+      pool.query(`
+        SELECT q.id, q.service_request_id, sr.title AS request_title,
+          e.full_name AS consultant_name, q.total_quote_usd,
+          q.admin_markup_usd, q.client_total_usd, q.status,
+          q.created_at, q.updated_at
+        FROM quotations q
+        JOIN service_requests sr ON sr.id = q.service_request_id
+        LEFT JOIN experts e ON e.id = q.expert_id
+        ORDER BY q.created_at DESC, q.id DESC
+        LIMIT 6
+      `),
+      pool.query(`
+        SELECT aal.id, aal.action, aal.target_type, aal.target_id,
+          aal.summary, aal.reason, aal.created_at, u.full_name AS actor_name
+        FROM public.admin_audit_logs aal
+        LEFT JOIN users u ON u.id = aal.actor_user_id
+        ORDER BY aal.created_at DESC, aal.id DESC
+        LIMIT 8
+      `),
+    ]);
+
+    return res.json({
+      success: true,
+      data: {
+        kpis: summary.rows[0],
+        pending_moderations: moderations.rows,
+        quotes_for_review: quoteReview.rows,
+        active_jobs: activeJobs.rows,
+        recent_registrations: registrations.rows,
+        recent_quotations: recentQuotes.rows,
+        recent_audit_activity: audit.rows,
+      },
+    });
+  } catch (error) {
+    return sendDashboardError(res, "Admin", error);
+  }
+};
+
 export const getDashboardStats = async (req, res) => {
   try {
     const roleId = Number(req.user.role_id);
@@ -17,92 +418,24 @@ export const getDashboardStats = async (req, res) => {
     if (roleId === 3) {
       requestValues.push(userId);
       requestWhere = `WHERE requester_user_id = $1`;
-
       vesselValues.push(userId);
       vesselWhere = `WHERE created_by_user_id = $1 AND is_active = true`;
     } else {
       vesselWhere = `WHERE is_active = true`;
     }
 
-    const [
-      totalRequests,
-      openRequests,
-      verifiedExperts,
-      vesselsRegistered,
-      requestsByServiceType,
-      urgencyDistribution,
-      financialOverview,
-      topRatedExperts,
-    ] = await Promise.all([
-      pool.query(
-        `SELECT COUNT(*)::int AS total FROM service_requests ${requestWhere}`,
-        requestValues
-      ),
-
-      pool.query(
-        `
-        SELECT COUNT(*)::int AS total
-        FROM service_requests
-        ${requestWhere ? `${requestWhere} AND` : "WHERE"}
-        LOWER(status) IN ('open', 'pending', 'active')
-        `,
-        requestValues
-      ),
-
-      pool.query(`
-        SELECT COUNT(*)::int AS total
-        FROM experts
-        WHERE availability = 'available'
-      `),
-
-      pool.query(
-        `SELECT COUNT(*)::int AS total FROM vessels ${vesselWhere}`,
-        vesselValues
-      ),
-
-      pool.query(
-        `
-        SELECT service_type, COUNT(*)::int AS count
-        FROM service_requests
-        ${requestWhere}
-        GROUP BY service_type
-        ORDER BY count DESC
-        `,
-        requestValues
-      ),
-
-      roleId === 2
-        ? Promise.resolve({ rows: [] })
-        : pool.query(
-          `SELECT urgency, COUNT(*)::int AS count FROM service_requests ${requestWhere} GROUP BY urgency ORDER BY count DESC`,
-          requestValues
-        ),
-
-      roleId === 2
-        ? Promise.resolve({ rows: [{ avg_budget_per_request: 0, completed_requests: 0 }] })
-        : pool.query(
-          `SELECT COALESCE(ROUND(AVG(budget_usd), 2), 0)::float AS avg_budget_per_request,
-                  COUNT(*) FILTER (WHERE status = 'completed')::int AS completed_requests
-           FROM service_requests ${requestWhere}`,
-          requestValues
-        ),
-
-      pool.query(`
-        SELECT 
-          id,
-          full_name,
-          base_location,
-          country,
-          is_premium,
-          rating,
-          review_count
-        FROM experts
-        ORDER BY rating DESC, review_count DESC
-        LIMIT 5
-      `),
+    const [totalRequests, openRequests, verifiedExperts, vesselsRegistered, requestsByServiceType, urgencyDistribution, financialOverview, topRatedExperts] = await Promise.all([
+      pool.query(`SELECT COUNT(*)::int AS total FROM service_requests ${requestWhere}`, requestValues),
+      pool.query(`SELECT COUNT(*)::int AS total FROM service_requests ${requestWhere ? `${requestWhere} AND` : "WHERE"} LOWER(status) IN ('open', 'pending', 'active')`, requestValues),
+      pool.query(`SELECT COUNT(*)::int AS total FROM experts WHERE availability = 'available'`),
+      pool.query(`SELECT COUNT(*)::int AS total FROM vessels ${vesselWhere}`, vesselValues),
+      pool.query(`SELECT service_type, COUNT(*)::int AS count FROM service_requests ${requestWhere} GROUP BY service_type ORDER BY count DESC`, requestValues),
+      roleId === 2 ? Promise.resolve({ rows: [] }) : pool.query(`SELECT urgency, COUNT(*)::int AS count FROM service_requests ${requestWhere} GROUP BY urgency ORDER BY count DESC`, requestValues),
+      roleId === 2 ? Promise.resolve({ rows: [{ avg_budget_per_request: 0, completed_requests: 0 }] }) : pool.query(`SELECT COALESCE(ROUND(AVG(budget_usd), 2), 0)::float AS avg_budget_per_request, COUNT(*) FILTER (WHERE status = 'completed')::int AS completed_requests FROM service_requests ${requestWhere}`, requestValues),
+      pool.query(`SELECT id, full_name, base_location, country, is_premium, rating, review_count FROM experts ORDER BY rating DESC, review_count DESC LIMIT 5`),
     ]);
 
-    res.json({
+    return res.json({
       success: true,
       data: {
         role_id: roleId,
@@ -119,7 +452,7 @@ export const getDashboardStats = async (req, res) => {
       },
     });
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: "Failed to fetch dashboard stats",
       error: error.message,
