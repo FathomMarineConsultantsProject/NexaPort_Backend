@@ -401,6 +401,200 @@ export const getAdminDashboard = async (_req, res) => {
   }
 };
 
+export const getProviderDashboard = async (req, res) => {
+  try {
+    const userId = Number(req.user.id);
+
+    /* Resolve the company account and entity owned by this user */
+    const accountResult = await pool.query(
+      `SELECT mca.entity_id, mca.primary_type
+       FROM public.maritime_company_accounts mca
+       WHERE mca.user_id = $1`,
+      [userId]
+    );
+    const account = accountResult.rows[0];
+    if (!account) {
+      return res.status(404).json({
+        success: false,
+        message: "No company profile is linked to this account.",
+      });
+    }
+    const entityId = account.entity_id;
+
+    const [
+      entityResult,
+      typesResult,
+      summaryResult,
+      servicesResult,
+      portsResult,
+      branchesResult,
+      productsResult,
+      certificationsResult,
+      classApprovalsResult,
+      membershipsResult,
+      faqCountResult,
+    ] = await Promise.all([
+      pool.query(
+        `SELECT id, company_name, slug, description, country, city,
+           public_address, public_email, public_phone, website,
+           logo_url, logo_s3_key, review_status, is_active,
+           years_experience, vessels_handled, created_at
+         FROM public.maritime_directory_entities
+         WHERE id = $1`,
+        [entityId]
+      ),
+      pool.query(
+        `SELECT directory_type
+         FROM public.maritime_directory_entity_types
+         WHERE entity_id = $1
+         ORDER BY directory_type`,
+        [entityId]
+      ),
+      pool.query(
+        `SELECT
+           (SELECT COUNT(*)::int FROM public.maritime_directory_services WHERE entity_id = $1) AS services,
+           (SELECT COUNT(*)::int FROM public.maritime_directory_ports WHERE entity_id = $1) AS ports,
+           (SELECT COUNT(*)::int FROM public.maritime_directory_branches WHERE entity_id = $1) AS branches,
+           (SELECT COUNT(*)::int FROM public.maritime_directory_products WHERE entity_id = $1) AS products,
+           (SELECT COUNT(*)::int FROM public.maritime_directory_certifications WHERE entity_id = $1) AS certifications,
+           (SELECT COUNT(*)::int FROM public.maritime_directory_class_approvals WHERE entity_id = $1) AS class_approvals,
+           (SELECT COUNT(*)::int FROM public.maritime_directory_memberships WHERE entity_id = $1) AS memberships,
+           (SELECT COUNT(*)::int FROM public.maritime_directory_faqs WHERE entity_id = $1) AS faqs`,
+        [entityId]
+      ),
+      pool.query(
+        `SELECT id, service_name, category, service_type
+         FROM public.maritime_directory_services
+         WHERE entity_id = $1
+         ORDER BY created_at, id
+         LIMIT 10`,
+        [entityId]
+      ),
+      pool.query(
+        `SELECT id, port_name, country
+         FROM public.maritime_directory_ports
+         WHERE entity_id = $1
+         ORDER BY created_at, id
+         LIMIT 10`,
+        [entityId]
+      ),
+      pool.query(
+        `SELECT id, branch_name, branch_type, city, country, public_telephone, public_email
+         FROM public.maritime_directory_branches
+         WHERE entity_id = $1
+         ORDER BY created_at, id
+         LIMIT 8`,
+        [entityId]
+      ),
+      pool.query(
+        `SELECT id, product_name, category, manufacturer
+         FROM public.maritime_directory_products
+         WHERE entity_id = $1
+         ORDER BY created_at, id
+         LIMIT 8`,
+        [entityId]
+      ),
+      pool.query(
+        `SELECT id, certification_name, standard_code, issuer, expiry_date
+         FROM public.maritime_directory_certifications
+         WHERE entity_id = $1
+         ORDER BY created_at, id
+         LIMIT 8`,
+        [entityId]
+      ),
+      pool.query(
+        `SELECT id, society_name, approval_details
+         FROM public.maritime_directory_class_approvals
+         WHERE entity_id = $1
+         ORDER BY created_at, id
+         LIMIT 8`,
+        [entityId]
+      ),
+      pool.query(
+        `SELECT id, organization_name, membership_details
+         FROM public.maritime_directory_memberships
+         WHERE entity_id = $1
+         ORDER BY created_at, id
+         LIMIT 8`,
+        [entityId]
+      ),
+      pool.query(
+        `SELECT COUNT(*)::int AS total
+         FROM public.maritime_directory_faqs
+         WHERE entity_id = $1`,
+        [entityId]
+      ),
+    ]);
+
+    const entity = entityResult.rows[0];
+    if (!entity) {
+      return res.status(404).json({
+        success: false,
+        message: "Company directory entry not found.",
+      });
+    }
+
+    const types = typesResult.rows.map((r) => r.directory_type);
+    const counts = summaryResult.rows[0];
+    const isSupplier = types.includes("supplier");
+
+    /* ---- Profile completeness ---- */
+    const sections = [];
+    const completed = [];
+
+    const check = (label, condition) => {
+      sections.push(label);
+      if (condition) completed.push(label);
+    };
+
+    check("Company name", !!entity.company_name);
+    check("Contact information", !!(entity.public_email || entity.public_phone));
+    check("Company description", !!entity.description);
+    check("Company type", types.length > 0);
+    check("Services", counts.services > 0);
+    check("Ports covered", counts.ports > 0);
+    check("Branches", counts.branches > 0);
+    check("Company logo", !!(entity.logo_url || entity.logo_s3_key));
+    if (isSupplier) check("Products", counts.products > 0);
+
+    const missing = sections.filter((s) => !completed.includes(s));
+    const totalSections = sections.length;
+    const completedCount = completed.length;
+
+    /* Strip the S3 key from the response */
+    const { logo_s3_key, ...safeEntity } = entity;
+
+    return res.json({
+      success: true,
+      data: {
+        company: {
+          ...safeEntity,
+          types,
+        },
+        summary: counts,
+        profile_setup: {
+          completed_sections: completedCount,
+          total_sections: totalSections,
+          percentage: totalSections ? Math.round((completedCount / totalSections) * 100) : 0,
+          missing,
+        },
+        services: servicesResult.rows,
+        ports: portsResult.rows,
+        branches: branchesResult.rows,
+        products: isSupplier ? productsResult.rows : [],
+        credentials: {
+          certifications: certificationsResult.rows,
+          class_approvals: classApprovalsResult.rows,
+          memberships: membershipsResult.rows,
+        },
+        faqs_count: faqCountResult.rows[0].total,
+      },
+    });
+  } catch (error) {
+    return sendDashboardError(res, "Provider", error);
+  }
+};
+
 export const getDashboardStats = async (req, res) => {
   try {
     const roleId = Number(req.user.role_id);
