@@ -51,6 +51,25 @@ const serviceSummary = (request) => {
   return details ? `Other: ${details.slice(0, 120)}` : "Other";
 };
 
+const calculateApprovedBudget = (clientBudget, adjustmentType, adjustmentMode, adjustmentValue) => {
+  if (clientBudget == null || adjustmentType === 'none' || adjustmentMode === 'none') {
+    return clientBudget;
+  }
+  const base = Number(clientBudget);
+  const value = Number(adjustmentValue || 0);
+  if (!Number.isFinite(base) || !Number.isFinite(value)) return clientBudget;
+  
+  let delta = 0;
+  if (adjustmentType === 'percentage') {
+    delta = base * (value / 100);
+  } else if (adjustmentType === 'fixed') {
+    delta = value;
+  }
+  
+  const approved = adjustmentMode === 'markup' ? base + delta : base - delta;
+  return Math.max(0, Math.round(approved * 100) / 100);
+};
+
 const mapRequestRow = (row) => ({
   id: row.id,
   serviceType: row.service_type,
@@ -60,11 +79,17 @@ const mapRequestRow = (row) => ({
   scopeOfWork: row.scope_of_work,
   urgency: row.urgency,
   budgetUsd: Number(row.budget_usd || 0),
+  clientBudgetUsd: row.client_budget_usd != null ? Number(row.client_budget_usd) : null,
+  approvedBudgetUsd: row.approved_budget_usd != null ? Number(row.approved_budget_usd) : null,
+  adminBudgetAdjustmentType: row.admin_budget_adjustment_type || 'none',
+  adminBudgetAdjustmentMode: row.admin_budget_adjustment_mode || 'none',
+  adminBudgetAdjustmentValue: Number(row.admin_budget_adjustment_value || 0),
   requiredBy: row.required_by,
   requesterName: row.requester_name,
   requesterUserId: row.requester_user_id,
   status: row.status,
   moderationStatus: row.moderation_status,
+  rejectionReason: row.rejection_reason || null,
   approvedAt: row.approved_at,
   approvedByUserId: row.approved_by_user_id,
   quotationCount: Number(row.quotation_count || 0),
@@ -102,7 +127,14 @@ const serializeApprovedServiceRequestForConsultant = (row) => ({
 });
 
 const serializeServiceRequestForAdmin = mapRequestRow;
-const serializeServiceRequestForClient = mapRequestRow;
+const serializeServiceRequestForClient = (row) => {
+  const mapped = mapRequestRow(row);
+  // Client should not see internal admin adjustment details
+  delete mapped.adminBudgetAdjustmentType;
+  delete mapped.adminBudgetAdjustmentMode;
+  delete mapped.adminBudgetAdjustmentValue;
+  return mapped;
+};
 
 const canAccessRequest = async (user, request) => {
   const roleId = Number(user.role_id);
@@ -193,11 +225,13 @@ export const createServiceRequest = async (req, res) => {
         required_certification,
         requester_user_id,
         moderation_status,
-        status
+        status,
+        client_budget_usd,
+        approved_budget_usd
       )
       VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,
-        $9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+        $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24
       )
       RETURNING *
       `,
@@ -224,6 +258,8 @@ export const createServiceRequest = async (req, res) => {
         req.user.id,
         "pending",
         "open",
+        budgetUsd || null,
+        budgetUsd || null,
       ]
     );
 
@@ -566,6 +602,10 @@ export const updateServiceRequest = async (req, res) => {
       await client.query("ROLLBACK");
       return res.status(403).json({ success: false, message: "Only the request owner or admin can update this request" });
     }
+    if (roleId === 3 && request.moderation_status === "pending") {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ success: false, code: "REQUEST_UNDER_REVIEW", message: "This request is currently under review and cannot be edited" });
+    }
     if (roleId === 1 && request.moderation_status !== "pending") {
       await client.query("ROLLBACK");
       return res.status(409).json({ success: false, code: "REQUEST_ALREADY_MODERATED", message: "Only pending requests may be edited" });
@@ -622,6 +662,86 @@ export const updateServiceRequest = async (req, res) => {
       values.push(req.body[bodyField] === "" ? null : req.body[bodyField]);
       updates.push(`${column} = $${values.length}`);
     }
+
+    // Admin-only budget adjustment fields
+    if (roleId === 1) {
+      const adjType = req.body.adminBudgetAdjustmentType;
+      const adjMode = req.body.adminBudgetAdjustmentMode;
+      const adjValue = req.body.adminBudgetAdjustmentValue;
+      const explicitApprovedBudget = req.body.approvedBudgetUsd;
+
+      if (adjType !== undefined) {
+        if (!['none', 'percentage', 'fixed'].includes(adjType)) {
+          await client.query("ROLLBACK");
+          return res.status(400).json({ success: false, message: "Invalid budget adjustment type" });
+        }
+        values.push(adjType);
+        updates.push(`admin_budget_adjustment_type = $${values.length}`);
+      }
+      if (adjMode !== undefined) {
+        if (!['none', 'markup', 'markdown'].includes(adjMode)) {
+          await client.query("ROLLBACK");
+          return res.status(400).json({ success: false, message: "Invalid budget adjustment mode" });
+        }
+        values.push(adjMode);
+        updates.push(`admin_budget_adjustment_mode = $${values.length}`);
+      }
+      if (adjValue !== undefined) {
+        const numVal = Number(adjValue);
+        if (!Number.isFinite(numVal) || numVal < 0) {
+          await client.query("ROLLBACK");
+          return res.status(400).json({ success: false, message: "Budget adjustment value must be a non-negative number" });
+        }
+        values.push(numVal);
+        updates.push(`admin_budget_adjustment_value = $${values.length}`);
+      }
+
+      // Calculate approved budget if adjustment params provided
+      const finalAdjType = adjType || request.admin_budget_adjustment_type || 'none';
+      const finalAdjMode = adjMode || request.admin_budget_adjustment_mode || 'none';
+      const finalAdjValue = adjValue !== undefined ? Number(adjValue) : Number(request.admin_budget_adjustment_value || 0);
+      // Use updated client budget if provided in this request, otherwise existing
+      const clientBudget = req.body.budgetUsd !== undefined
+        ? (req.body.budgetUsd === '' ? null : Number(req.body.budgetUsd))
+        : (request.client_budget_usd != null ? Number(request.client_budget_usd) : null);
+
+      if (explicitApprovedBudget !== undefined) {
+        // Admin explicitly sets approved budget (e.g. when no client budget exists)
+        const numApproved = Number(explicitApprovedBudget);
+        if (explicitApprovedBudget !== null && explicitApprovedBudget !== '' && (!Number.isFinite(numApproved) || numApproved < 0)) {
+          await client.query("ROLLBACK");
+          return res.status(400).json({ success: false, message: "Approved budget must be a non-negative number" });
+        }
+        values.push(explicitApprovedBudget === '' || explicitApprovedBudget === null ? null : numApproved);
+        updates.push(`approved_budget_usd = $${values.length}`);
+      } else if (adjType !== undefined || adjMode !== undefined || adjValue !== undefined) {
+        const approvedBudget = calculateApprovedBudget(clientBudget, finalAdjType, finalAdjMode, finalAdjValue);
+        values.push(approvedBudget);
+        updates.push(`approved_budget_usd = $${values.length}`);
+      }
+    }
+    // Client resubmission of rejected request
+    if (roleId === 3 && request.moderation_status === "rejected") {
+      values.push("pending");
+      updates.push(`moderation_status = $${values.length}`);
+      updates.push(`rejection_reason = NULL`);
+
+      values.push("none");
+      updates.push(`admin_budget_adjustment_type = $${values.length}`);
+      values.push("none");
+      updates.push(`admin_budget_adjustment_mode = $${values.length}`);
+      values.push(0);
+      updates.push(`admin_budget_adjustment_value = $${values.length}`);
+
+      if ("budgetUsd" in req.body) {
+        const newBudget = req.body.budgetUsd === "" || req.body.budgetUsd === null ? null : Number(req.body.budgetUsd);
+        values.push(newBudget);
+        updates.push(`client_budget_usd = $${values.length}`);
+        values.push(newBudget);
+        updates.push(`approved_budget_usd = $${values.length}`);
+      }
+    }
+
     if (!updates.length) {
       await client.query("ROLLBACK");
       return res.status(400).json({ success: false, message: "No editable request fields supplied" });
@@ -639,9 +759,17 @@ export const updateServiceRequest = async (req, res) => {
         targetId: id,
         summary: `Updated fields: ${updates.map((item) => item.split(" = ")[0]).join(", ")}`,
       });
+    } else if (roleId === 3 && request.moderation_status === "rejected") {
+      await writeAdminAudit(client, {
+        actorUserId: req.user.id,
+        action: "service_request.resubmitted",
+        targetType: "service_request",
+        targetId: id,
+        summary: "Client corrected and resubmitted rejected request",
+      });
     }
     await client.query("COMMIT");
-    return res.json({ success: true, message: "Service request updated successfully", data: mapRequestRow(result.rows[0]) });
+    return res.json({ success: true, message: roleId === 3 && request.moderation_status === "rejected" ? "Request resubmitted for review" : "Service request updated successfully", data: mapRequestRow(result.rows[0]) });
   } catch (error) {
     await client.query("ROLLBACK");
 
@@ -678,19 +806,37 @@ export const approveServiceRequest = async (req, res) => {
     const inspectionType = serviceSummary(request);
     const vesselType = String(request.vessel_type || "").trim();
     const port = String(request.port_name || "").trim();
-    if (!inspectionType || !vesselType || !request.required_by || !port) {
+    const title = String(request.title || "").trim();
+    const scopeOfWork = String(request.scope_of_work || "").trim();
+    const missingFields = [];
+    if (!title) missingFields.push("Title");
+    if (!scopeOfWork) missingFields.push("Scope of Work");
+    if (!inspectionType) missingFields.push("Service Type");
+    if (!vesselType) missingFields.push("Vessel Type");
+    if (!request.required_by) missingFields.push("Required Inspection Date");
+    if (!port) missingFields.push("Port of Inspection");
+    if (missingFields.length) {
       await client.query("ROLLBACK");
       return res.status(409).json({
         success: false,
         code: "REQUEST_APPROVAL_FIELDS_REQUIRED",
-        message: "Inspection type, ship type, inspection date and port are required before approval",
+        message: "Required request details are missing.",
+        missingFields,
       });
     }
+
+    // Finalize approved budget
+    const finalApprovedBudget = request.approved_budget_usd != null
+      ? request.approved_budget_usd
+      : request.client_budget_usd;
+
     const approved = await client.query(
       `
       UPDATE service_requests
       SET moderation_status = 'approved', approved_at = CURRENT_TIMESTAMP,
-          approved_by_user_id = $1, updated_at = CURRENT_TIMESTAMP
+          approved_by_user_id = $1, approved_budget_usd = COALESCE(approved_budget_usd, client_budget_usd, budget_usd),
+          budget_usd = COALESCE(approved_budget_usd, client_budget_usd, budget_usd),
+          updated_at = CURRENT_TIMESTAMP
       WHERE id = $2
       RETURNING *
       `,
@@ -715,6 +861,67 @@ export const approveServiceRequest = async (req, res) => {
   } catch (error) {
     await client.query("ROLLBACK");
     return res.status(500).json({ success: false, message: "Failed to approve service request", error: error.message });
+  } finally {
+    client.release();
+  }
+};
+
+export const rejectServiceRequest = async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    return res.status(400).json({ success: false, message: "Invalid service request ID" });
+  }
+  const { rejectionReason } = req.body;
+  const reason = String(rejectionReason || "").trim();
+  if (!reason || reason.length < 1) {
+    return res.status(400).json({ success: false, message: "A rejection reason is required." });
+  }
+  if (reason.length > 1000) {
+    return res.status(400).json({ success: false, message: "Rejection reason must be 1000 characters or fewer." });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const locked = await client.query(
+      `SELECT * FROM service_requests WHERE id = $1 FOR UPDATE`,
+      [id]
+    );
+    if (!locked.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ success: false, message: "Service request not found" });
+    }
+    const request = locked.rows[0];
+    if (request.moderation_status === 'approved') {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ success: false, code: "REQUEST_ALREADY_APPROVED", message: "Cannot reject an already approved request" });
+    }
+    if (request.moderation_status === 'rejected') {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ success: false, code: "REQUEST_ALREADY_REJECTED", message: "Service request is already rejected" });
+    }
+    const rejected = await client.query(
+      `
+      UPDATE service_requests
+      SET moderation_status = 'rejected', rejection_reason = $1, updated_at = CURRENT_TIMESTAMP
+      WHERE id = $2
+      RETURNING *
+      `,
+      [reason, id]
+    );
+    await writeAdminAudit(client, {
+      actorUserId: req.user.id,
+      action: "service_request.rejected",
+      targetType: "service_request",
+      targetId: id,
+      summary: `Rejected service request: ${reason.slice(0, 200)}`,
+      reason,
+    });
+    await client.query("COMMIT");
+    return res.json({ success: true, message: "Service request rejected", data: mapRequestRow(rejected.rows[0]) });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    return res.status(500).json({ success: false, message: "Failed to reject service request", error: error.message });
   } finally {
     client.release();
   }

@@ -7,6 +7,7 @@ import {
   deleteServiceRequest,
   assignExpertsToRequest,
   approveServiceRequest,
+  rejectServiceRequest,
 } from "../controllers/serviceRequestController.js";
 import { requireAuth, allowRoles } from "../middlewares/authMiddleware.js";
 import { requireApprovedClient } from "../middlewares/clientApprovalMiddleware.js";
@@ -19,6 +20,7 @@ router.get("/:id", requireAuth, requireApprovedClient, getServiceRequestById);
 router.post("/", requireAuth, requireApprovedClient, allowRoles(1, 3), createServiceRequest);
 router.post("/:id/assign-experts", requireAuth, allowRoles(1), assignExpertsToRequest);
 router.post("/:id/approve", requireAuth, allowRoles(1), approveServiceRequest);
+router.post("/:id/reject", requireAuth, allowRoles(1), rejectServiceRequest);
 
 router.put("/:id", requireAuth, requireApprovedClient, allowRoles(1, 3), updateServiceRequest);
 router.delete("/:id", requireAuth, requireApprovedClient, allowRoles(1, 3), deleteServiceRequest);
