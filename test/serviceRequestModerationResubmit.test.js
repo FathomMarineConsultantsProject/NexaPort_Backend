@@ -14,12 +14,15 @@ const response = () => ({
   json(body) { this.body = body; return this; },
 });
 
-test("Client cannot edit pending request (returns 409 REQUEST_UNDER_REVIEW)", async () => {
+test("Client can edit own pending request and it remains pending", async () => {
   const originalConnect = pool.connect;
   pool.connect = async () => ({
     async query(sql) {
       if (/FOR UPDATE/.test(sql)) {
-        return { rows: [{ id: 10, requester_user_id: 3, moderation_status: "pending" }] };
+        return { rows: [{ id: 10, requester_user_id: 3, moderation_status: "pending", quotation_count: 0 }] };
+      }
+      if (/UPDATE service_requests SET/.test(sql)) {
+        return { rows: [{ id: 10, title: "Updated Title", requester_user_id: 3, moderation_status: "pending" }] };
       }
       return { rows: [] };
     },
@@ -33,8 +36,8 @@ test("Client cannot edit pending request (returns 409 REQUEST_UNDER_REVIEW)", as
       user: { id: 3, role_id: 3 },
     }, res);
 
-    assert.equal(res.statusCode, 409);
-    assert.equal(res.body.code, "REQUEST_UNDER_REVIEW");
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.data.moderationStatus, "pending");
   } finally {
     pool.connect = originalConnect;
   }

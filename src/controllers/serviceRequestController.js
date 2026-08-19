@@ -3,6 +3,7 @@ import { findOrCreatePort } from "../utils/findOrCreatePort.js";
 import { deleteServiceRequestById } from "../services/serviceRequestService.js";
 import { createServiceRequestApprovedNotifications } from "../services/adminNotificationService.js";
 import { writeAdminAudit } from "../services/adminAuditService.js";
+import { getServiceRequestEditPermission } from "../services/serviceRequestEditPermission.js";
 
 const SERVICE_TYPES = new Set(["Audit", "Inspection", "Survey", "Other"]);
 
@@ -78,7 +79,7 @@ const mapRequestRow = (row) => ({
   title: row.title,
   scopeOfWork: row.scope_of_work,
   urgency: row.urgency,
-  budgetUsd: Number(row.budget_usd || 0),
+  budgetUsd: row.budget_usd != null ? Number(row.budget_usd) : null,
   clientBudgetUsd: row.client_budget_usd != null ? Number(row.client_budget_usd) : null,
   approvedBudgetUsd: row.approved_budget_usd != null ? Number(row.approved_budget_usd) : null,
   adminBudgetAdjustmentType: row.admin_budget_adjustment_type || 'none',
@@ -95,6 +96,8 @@ const mapRequestRow = (row) => ({
   quotationCount: Number(row.quotation_count || 0),
   acceptedQuotationId: row.accepted_quotation_id,
   acceptedExpertId: row.accepted_expert_id,
+  workflowStage: row.workflow_stage || null,
+  hasAssignment: Boolean(row.has_assignment),
 
   vessel: {
     name: row.vessel_name,
@@ -382,11 +385,13 @@ export const getServiceRequests = async (req, res) => {
       `
       SELECT 
         sr.*,
-        COUNT(q.id) AS quotation_count
+        COUNT(q.id) AS quotation_count,
+        EXISTS(SELECT 1 FROM request_expert_assignments rea WHERE rea.service_request_id=sr.id) AS has_assignment,
+        (SELECT iw.current_stage FROM inspection_workflows iw WHERE iw.service_request_id=sr.id LIMIT 1) AS workflow_stage
       FROM service_requests sr
       LEFT JOIN quotations q ON q.service_request_id = sr.id
       ${whereSql}
-      GROUP BY sr.id
+        GROUP BY sr.id
       ORDER BY sr.created_at DESC
       `,
       values
@@ -451,7 +456,9 @@ export const getServiceRequestById = async (req, res) => {
       `
       SELECT 
         sr.*,
-        COUNT(q.id) AS quotation_count
+        COUNT(q.id) AS quotation_count,
+        EXISTS(SELECT 1 FROM request_expert_assignments rea WHERE rea.service_request_id=sr.id) AS has_assignment,
+        (SELECT iw.current_stage FROM inspection_workflows iw WHERE iw.service_request_id=sr.id LIMIT 1) AS workflow_stage
       FROM service_requests sr
       LEFT JOIN quotations q ON q.service_request_id = sr.id
       WHERE sr.id = $1
@@ -590,7 +597,12 @@ export const updateServiceRequest = async (req, res) => {
     const roleId = Number(req.user.role_id);
     await client.query("BEGIN");
     const existing = await client.query(
-      `SELECT * FROM service_requests WHERE id = $1 FOR UPDATE`,
+      `SELECT sr.*,
+              (SELECT COUNT(*)::int FROM quotations q WHERE q.service_request_id=sr.id) AS quotation_count,
+              EXISTS(SELECT 1 FROM quotations q WHERE q.service_request_id=sr.id AND LOWER(q.status)='accepted') AS has_accepted_quotation,
+              EXISTS(SELECT 1 FROM request_expert_assignments rea WHERE rea.service_request_id=sr.id) AS has_assignment,
+              (SELECT iw.current_stage FROM inspection_workflows iw WHERE iw.service_request_id=sr.id LIMIT 1) AS workflow_stage
+         FROM service_requests sr WHERE sr.id = $1 FOR UPDATE OF sr`,
       [id]
     );
     if (!existing.rows.length) {
@@ -598,24 +610,16 @@ export const updateServiceRequest = async (req, res) => {
       return res.status(404).json({ success: false, message: "Service request not found" });
     }
     const request = existing.rows[0];
-    if (roleId !== 1 && Number(request.requester_user_id) !== Number(req.user.id)) {
+    const permission = getServiceRequestEditPermission({ request, roleId, userId: req.user.id });
+    if (!permission.allowed) {
       await client.query("ROLLBACK");
-      return res.status(403).json({ success: false, message: "Only the request owner or admin can update this request" });
-    }
-    if (roleId === 3 && request.moderation_status === "pending") {
-      await client.query("ROLLBACK");
-      return res.status(409).json({ success: false, code: "REQUEST_UNDER_REVIEW", message: "This request is currently under review and cannot be edited" });
-    }
-    if (roleId === 1 && request.moderation_status !== "pending") {
-      await client.query("ROLLBACK");
-      return res.status(409).json({ success: false, code: "REQUEST_ALREADY_MODERATED", message: "Only pending requests may be edited" });
+      return res.status(permission.status).json({ success: false, code: permission.code, message: permission.message });
     }
 
     const fieldMap = {
       title: "title",
       scopeOfWork: "scope_of_work",
       urgency: "urgency",
-      budgetUsd: "budget_usd",
       requiredBy: "required_by",
       vesselName: "vessel_name",
       imoNumber: "imo_number",
@@ -663,6 +667,21 @@ export const updateServiceRequest = async (req, res) => {
       updates.push(`${column} = $${values.length}`);
     }
 
+    let editedClientBudget;
+    if ("budgetUsd" in req.body) {
+      editedClientBudget = req.body.budgetUsd === "" || req.body.budgetUsd === null
+        ? null
+        : Number(req.body.budgetUsd);
+      if (editedClientBudget !== null && (!Number.isFinite(editedClientBudget) || editedClientBudget < 0)) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ success: false, message: "Budget must be a non-negative number" });
+      }
+      values.push(editedClientBudget);
+      updates.push(`budget_usd = $${values.length}`);
+      values.push(editedClientBudget);
+      updates.push(`client_budget_usd = $${values.length}`);
+    }
+
     // Admin-only budget adjustment fields
     if (roleId === 1) {
       const adjType = req.body.adminBudgetAdjustmentType;
@@ -702,7 +721,7 @@ export const updateServiceRequest = async (req, res) => {
       const finalAdjValue = adjValue !== undefined ? Number(adjValue) : Number(request.admin_budget_adjustment_value || 0);
       // Use updated client budget if provided in this request, otherwise existing
       const clientBudget = req.body.budgetUsd !== undefined
-        ? (req.body.budgetUsd === '' ? null : Number(req.body.budgetUsd))
+        ? editedClientBudget
         : (request.client_budget_usd != null ? Number(request.client_budget_usd) : null);
 
       if (explicitApprovedBudget !== undefined) {
@@ -714,17 +733,24 @@ export const updateServiceRequest = async (req, res) => {
         }
         values.push(explicitApprovedBudget === '' || explicitApprovedBudget === null ? null : numApproved);
         updates.push(`approved_budget_usd = $${values.length}`);
-      } else if (adjType !== undefined || adjMode !== undefined || adjValue !== undefined) {
+      } else if (req.body.budgetUsd !== undefined || adjType !== undefined || adjMode !== undefined || adjValue !== undefined) {
         const approvedBudget = calculateApprovedBudget(clientBudget, finalAdjType, finalAdjMode, finalAdjValue);
         values.push(approvedBudget);
         updates.push(`approved_budget_usd = $${values.length}`);
       }
     }
-    // Client resubmission of rejected request
-    if (roleId === 3 && request.moderation_status === "rejected") {
+
+    const suppliedEditableFields = updates.length > 0;
+    if (!suppliedEditableFields) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ success: false, message: "No editable request fields supplied" });
+    }
+
+    // Every Client edit remains behind moderation and invalidates any prior Admin budget decision.
+    if (roleId === 3) {
       values.push("pending");
       updates.push(`moderation_status = $${values.length}`);
-      updates.push(`rejection_reason = NULL`);
+      if (request.moderation_status === "rejected") updates.push(`rejection_reason = NULL`);
 
       values.push("none");
       updates.push(`admin_budget_adjustment_type = $${values.length}`);
@@ -733,18 +759,11 @@ export const updateServiceRequest = async (req, res) => {
       values.push(0);
       updates.push(`admin_budget_adjustment_value = $${values.length}`);
 
-      if ("budgetUsd" in req.body) {
-        const newBudget = req.body.budgetUsd === "" || req.body.budgetUsd === null ? null : Number(req.body.budgetUsd);
-        values.push(newBudget);
-        updates.push(`client_budget_usd = $${values.length}`);
-        values.push(newBudget);
-        updates.push(`approved_budget_usd = $${values.length}`);
-      }
-    }
-
-    if (!updates.length) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({ success: false, message: "No editable request fields supplied" });
+      const revisedClientBudget = req.body.budgetUsd !== undefined
+        ? editedClientBudget
+        : (request.client_budget_usd == null ? null : Number(request.client_budget_usd));
+      values.push(revisedClientBudget);
+      updates.push(`approved_budget_usd = $${values.length}`);
     }
     values.push(id);
     const result = await client.query(
@@ -759,20 +778,23 @@ export const updateServiceRequest = async (req, res) => {
         targetId: id,
         summary: `Updated fields: ${updates.map((item) => item.split(" = ")[0]).join(", ")}`,
       });
-    } else if (roleId === 3 && request.moderation_status === "rejected") {
+    } else if (roleId === 3) {
       await writeAdminAudit(client, {
         actorUserId: req.user.id,
-        action: "service_request.resubmitted",
+        action: request.moderation_status === "rejected" ? "service_request.resubmitted" : "service_request.client_edited",
         targetType: "service_request",
         targetId: id,
-        summary: "Client corrected and resubmitted rejected request",
+        summary: request.moderation_status === "rejected" ? "Client corrected and resubmitted rejected request" : "Client edited request; Admin review remains required",
       });
     }
     await client.query("COMMIT");
-    return res.json({ success: true, message: roleId === 3 && request.moderation_status === "rejected" ? "Request resubmitted for review" : "Service request updated successfully", data: mapRequestRow(result.rows[0]) });
+    const message = roleId === 3
+      ? (request.moderation_status === "rejected" ? "Request resubmitted for review" : "Request updated and submitted for review")
+      : "Service request updated successfully";
+    return res.json({ success: true, message, data: mapRequestRow(result.rows[0]) });
   } catch (error) {
     await client.query("ROLLBACK");
-
+    console.error("Update service request error:", error);
     res.status(500).json({
       success: false,
       message: "Failed to update service request",

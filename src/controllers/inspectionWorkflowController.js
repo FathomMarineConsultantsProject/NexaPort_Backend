@@ -2,7 +2,10 @@ import { advanceOverviewToQuote, confirmWorkflowQuotation, getInspectionWorkflow
 import { advanceSurveyorToPreparation, attachWorkflowEvidence, completeWorkflowChecklist, confirmWorkflowReport, createEvidenceUpload, generateWorkflowDraft, listWorkflowTemplates, removeWorkflowEvidence, reviewWorkflowReport, saveWorkflowChecklist, saveWorkflowPreparation, selectWorkflowTemplate } from "../services/inspectionWorkflowPhase2Service.js";
 import { approveInvoice, completeInspection, createInvoiceUpload, payInvoice, submitInvoice } from "../services/inspectionInvoiceService.js";
 
-const sendError=(res,error)=>res.status(error.status||500).json({success:false,code:error.code||"INSPECTION_WORKFLOW_ERROR",message:error.status?error.message:"Unable to process the inspection workflow",...(error.fieldErrors?{fieldErrors:error.fieldErrors}:{})});
+const sendError=(res,error)=>{
+  console.error("Inspection workflow error:",error);
+  return res.status(error.status||500).json({success:false,code:error.code||"INSPECTION_WORKFLOW_ERROR",message:error.status?error.message:"Unable to process the inspection workflow",...(error.fieldErrors?{fieldErrors:error.fieldErrors}:{})});
+};
 export const listWorkflows=async(req,res)=>{try{res.json({success:true,data:await listInspectionWorkflows(req.query)});}catch(error){sendError(res,error);}};
 export const getWorkflow=async(req,res)=>{try{res.json({success:true,data:await getInspectionWorkflow(req.params.requestId)});}catch(error){sendError(res,error);}};
 export const initializeWorkflow=async(req,res)=>{try{res.status(200).json({success:true,data:await initializeInspectionWorkflow({requestId:req.params.requestId,actorUserId:req.user.id})});}catch(error){sendError(res,error);}};

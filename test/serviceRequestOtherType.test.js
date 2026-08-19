@@ -123,7 +123,7 @@ const runAdminUpdate = async (existing, body) => {
   const originalConnect = pool.connect;
   pool.connect = async () => ({
     async query(sql, values = []) {
-      if (/SELECT \* FROM service_requests/.test(sql)) return { rows: [existing] };
+      if (/FOR UPDATE OF sr/.test(sql)) return { rows: [{ quotation_count: 0, ...existing }] };
       if (/UPDATE service_requests SET/.test(sql)) {
         capture.sql = sql;
         capture.values = values;

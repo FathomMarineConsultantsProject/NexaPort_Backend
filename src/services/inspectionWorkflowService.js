@@ -68,18 +68,23 @@ export const listInspectionWorkflows = async ({ search, stage, status } = {}) =>
     `SELECT sr.id AS request_id,sr.title,sr.requester_name AS client_name,sr.vessel_name,
        ${serviceLabelSql} AS service,sr.port_name,sr.required_by,sr.status AS request_status,
        sr.moderation_status,sr.approved_budget_usd,sr.accepted_quotation_id,sr.accepted_expert_id,
-       COALESCE(sr.accepted_expert_id,(SELECT rea.expert_id FROM request_expert_assignments rea WHERE rea.service_request_id=sr.id ORDER BY rea.updated_at DESC,rea.id DESC LIMIT 1)) AS operational_expert_id,
-       aq.expert_name AS accepted_expert_name,
-       COUNT(q.id) FILTER(WHERE q.status IN ('pending','submitted'))::int AS quotations_awaiting_review,
+       COALESCE(sr.accepted_expert_id,accepted_q.expert_id,assignment.expert_id) AS operational_expert_id,
+       operational_expert.full_name AS accepted_expert_name,
+       (SELECT COUNT(*)::int FROM quotations q
+          WHERE q.service_request_id=sr.id AND q.status IN ('pending','submitted')) AS quotations_awaiting_review,
        iw.id AS workflow_id,COALESCE(iw.current_stage,CASE WHEN sr.accepted_quotation_id IS NOT NULL AND sr.accepted_expert_id IS NOT NULL THEN 'surveyor' WHEN sr.accepted_quotation_id IS NOT NULL THEN 'confirm' ELSE 'overview' END) AS current_stage,
        COALESCE(iw.updated_at,sr.updated_at) AS updated_at
      FROM service_requests sr
      LEFT JOIN inspection_workflows iw ON iw.service_request_id=sr.id
-     LEFT JOIN quotations q ON q.service_request_id=sr.id
      LEFT JOIN quotations accepted_q ON accepted_q.id=sr.accepted_quotation_id
-     LEFT JOIN experts aq ON aq.id=COALESCE(sr.accepted_expert_id,accepted_q.expert_id,(SELECT rea.expert_id FROM request_expert_assignments rea WHERE rea.service_request_id=sr.id ORDER BY rea.updated_at DESC,rea.id DESC LIMIT 1))
+     LEFT JOIN LATERAL (
+       SELECT rea.expert_id FROM request_expert_assignments rea
+       WHERE rea.service_request_id=sr.id
+       ORDER BY rea.updated_at DESC NULLS LAST,rea.id DESC LIMIT 1
+     ) assignment ON TRUE
+     LEFT JOIN experts operational_expert
+       ON operational_expert.id=COALESCE(sr.accepted_expert_id,accepted_q.expert_id,assignment.expert_id)
      WHERE ${conditions.join(" AND ")}
-     GROUP BY sr.id,iw.id,aq.expert_name
      ORDER BY COALESCE(iw.updated_at,sr.updated_at) DESC,sr.id DESC`, values);
   return result.rows.map((row) => ({
     requestId: row.request_id, reference: row.title || `Request #${row.request_id}`, clientName: row.client_name,
