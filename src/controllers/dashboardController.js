@@ -306,7 +306,7 @@ export const getExpertDashboard = async (req, res) => {
 
 export const getAdminDashboard = async (_req, res) => {
   try {
-    const [summary, moderations, quoteReview, activeJobs, registrations, recentQuotes, audit] = await Promise.all([
+    const [summary, moderations, quoteReview, activeJobs, registrations, recentQuotes, audit, workflowSummary, workflowRecent] = await Promise.all([
       pool.query(`
         SELECT
           (SELECT COUNT(*) FROM users WHERE role_id = 3)::int AS total_clients,
@@ -382,6 +382,36 @@ export const getAdminDashboard = async (_req, res) => {
         ORDER BY aal.created_at DESC, aal.id DESC
         LIMIT 8
       `),
+      pool.query(`
+        SELECT
+          COUNT(*) FILTER (WHERE iw.current_stage IN ('overview','quote','confirm'))::int AS awaiting_quotation_review,
+          COUNT(*) FILTER (WHERE iw.current_stage IN ('preparation','checklist','report'))::int AS inspection_in_progress,
+          COUNT(*) FILTER (WHERE iw.current_stage = 'review')::int AS report_awaiting_review,
+          COUNT(*) FILTER (WHERE iw.current_stage = 'report_confirmation' AND ir.confirmed_at IS NULL)::int AS report_awaiting_confirmation,
+          COUNT(*) FILTER (WHERE iw.current_stage = 'report_confirmation' AND ir.confirmed_at IS NOT NULL)::int AS inspection_awaiting_completion,
+          COUNT(*) FILTER (WHERE iw.current_stage = 'invoice_submitted')::int AS invoice_approval_required,
+          COUNT(*) FILTER (WHERE iw.current_stage = 'invoice_approved')::int AS payment_pending,
+          COUNT(*) FILTER (WHERE iw.current_stage = 'invoice_paid')::int AS completed_workflows
+        FROM inspection_workflows iw
+        LEFT JOIN inspection_reports ir ON ir.id=iw.report_id
+      `),
+      pool.query(`
+        SELECT iw.id, iw.id AS workflow_id, iw.service_request_id, iw.current_stage,
+          sr.title AS request_title, sr.vessel_name, sr.required_by
+        FROM inspection_workflows iw
+        JOIN service_requests sr ON sr.id=iw.service_request_id
+        LEFT JOIN inspection_reports ir ON ir.id=iw.report_id
+        WHERE iw.current_stage NOT IN ('invoice_paid')
+        ORDER BY
+          CASE
+            WHEN iw.current_stage IN ('invoice_submitted','invoice_approved') THEN 1
+            WHEN iw.current_stage IN ('review','report_confirmation') THEN 2
+            WHEN iw.current_stage IN ('preparation','checklist','report') THEN 3
+            ELSE 4
+          END,
+          sr.required_by ASC NULLS LAST, iw.updated_at ASC
+        LIMIT 8
+      `),
     ]);
 
     return res.json({
@@ -394,6 +424,10 @@ export const getAdminDashboard = async (_req, res) => {
         recent_registrations: registrations.rows,
         recent_quotations: recentQuotes.rows,
         recent_audit_activity: audit.rows,
+        inspection_workflow: {
+          ...workflowSummary.rows[0],
+          recent: workflowRecent.rows,
+        },
       },
     });
   } catch (error) {

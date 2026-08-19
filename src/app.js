@@ -27,6 +27,7 @@ import maritimeDirectoryRoutes from "./routes/maritimeDirectoryRoutes.js";
 import maritimeCompanyRoutes from "./routes/maritimeCompanyRoutes.js";
 import templateRoutes from "./routes/templateRoutes.js";
 import reportRoutes from "./routes/reportRoutes.js";
+import inspectionWorkflowRoutes from "./routes/inspectionWorkflowRoutes.js";
 import {
   accreditationSchemeRouter,
   accreditedInspectorRouter,
@@ -91,6 +92,7 @@ app.use("/api/accredited-inspectors", accreditedInspectorRouter);
 app.use("/api/appointed-surveyors", appointedSurveyorRoutes);
 app.use("/api/service-requests", serviceRequestRoutes);
 app.use("/api/quotations", quotationRoutes);
+app.use("/api/inspection-workflows", inspectionWorkflowRoutes);
 app.use("/api/experts", expertReviewRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/templates", templateRoutes);

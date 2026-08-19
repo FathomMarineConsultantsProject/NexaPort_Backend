@@ -1,26 +1,6 @@
 import { pool } from "../config/db.js";
-
-const finiteNumber = (value) => {
-  const number = Number(value ?? 0);
-  return Number.isFinite(number) ? number : 0;
-};
-
-export const calculateQuotationTotals = (quote, adminMarkupUsd = 0) => {
-  const consultantTotalUsd = [
-    quote.total_quote_usd,
-    quote.travel_cost,
-    quote.accommodation_cost,
-    quote.report_fee,
-    quote.urgency_surcharge,
-  ].reduce((total, value) => total + finiteNumber(value), 0);
-  const markupUsd = finiteNumber(adminMarkupUsd);
-
-  return {
-    consultantTotalUsd,
-    markupUsd,
-    clientTotalUsd: consultantTotalUsd + markupUsd,
-  };
-};
+import { acceptQuotationOperation, calculateQuotationTotals } from "../services/quotationAcceptanceService.js";
+export { calculateQuotationTotals } from "../services/quotationAcceptanceService.js";
 
 const mapQuotationRow = (row, user) => {
   const roleId = Number(user.role_id);
@@ -490,89 +470,23 @@ export const acceptQuotation = async (req, res) => {
   const client = await pool.connect();
 
   try {
-    const { id } = req.params;
-    const { adminMarkupUsd = 0 } = req.body;
-
     await client.query("BEGIN");
-
-    const quoteResult = await client.query(
-      `
-      SELECT id, service_request_id, expert_id, total_quote_usd,
-             travel_cost, accommodation_cost, report_fee, urgency_surcharge
-      FROM quotations
-      WHERE id = $1
-      `,
-      [id]
-    );
-
-    if (!quoteResult.rows.length) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({
-        success: false,
-        message: "Quotation not found",
-      });
-    }
-
-    const quote = quoteResult.rows[0];
-
-    const { markupUsd, clientTotalUsd } = calculateQuotationTotals(
-      quote,
-      adminMarkupUsd
-    );
-
-    await client.query(
-      `
-      UPDATE quotations
-      SET status = 'rejected', updated_at = CURRENT_TIMESTAMP
-      WHERE service_request_id = $1
-      `,
-      [quote.service_request_id]
-    );
-
-    const acceptedQuote = await client.query(
-      `
-      UPDATE quotations
-      SET
-        status = 'accepted',
-        admin_markup_usd = $1,
-        client_total_usd = $2,
-        accepted_by_user_id = $3,
-        accepted_at = CURRENT_TIMESTAMP,
-        updated_at = CURRENT_TIMESTAMP
-      WHERE id = $4
-      RETURNING *
-      `,
-      [markupUsd, clientTotalUsd, req.user.id, id]
-    );
-
-    await client.query(
-      `
-      UPDATE service_requests
-      SET
-        accepted_quotation_id = $1,
-        accepted_expert_id = $2,
-        budget_usd = $3,
-        status = 'assigned',
-        updated_at = CURRENT_TIMESTAMP
-      WHERE id = $4
-      `,
-      [quote.id, quote.expert_id, clientTotalUsd, quote.service_request_id]
-    );
+    const result = await acceptQuotationOperation({queryable:client,quotationId:req.params.id,adminMarkupUsd:req.body?.adminMarkupUsd,actorUserId:req.user.id});
 
     await client.query("COMMIT");
 
     res.json({
       success: true,
       message: "Quotation accepted successfully",
-      data: acceptedQuote.rows[0],
+      data: result.quotation,
     });
   } catch (error) {
     await client.query("ROLLBACK");
 
-    res.status(500).json({
+    res.status(error.status || 500).json({
       success: false,
-      message: "Failed to accept quotation",
-      error: error.message,
+      message: error.status ? error.message : "Failed to accept quotation",
+      error: error.status ? error.message : undefined,
     });
   } finally {
     client.release();

@@ -93,7 +93,15 @@ export function validateReportValues(fields, values = {}) {
     const field = allowed.get(key);
     if (["photo", "section_heading"].includes(field.type) || isSignature(field) || isIdentity(field)) continue;
     if (field.type === "checkbox") normalized[key] = Boolean(value);
-    else normalized[key] = clean(value, 5000);
+    else if (field.type === "yes_no") {
+      const answer=clean(value,20);
+      if (answer && !["Yes","No"].includes(answer)) throw Object.assign(new Error(`${field.label} must be answered Yes or No.`), { status:400 });
+      normalized[key]=answer;
+    } else if (field.type === "select") {
+      const answer=clean(value,5000);
+      if (answer && !field.options.includes(answer)) throw Object.assign(new Error(`${field.label} has an invalid selection.`), { status:400 });
+      normalized[key]=answer;
+    } else normalized[key] = clean(value, 5000);
   }
   return normalized;
 }

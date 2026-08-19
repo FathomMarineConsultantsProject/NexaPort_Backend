@@ -16,15 +16,15 @@ async function reportForAccess(queryable, reportId, user, { ownerOnly = false } 
   if (!validId(reportId)) throw Object.assign(new Error("Report not found."), { status: 404 });
   const roleId = Number(user.role_id);
   const expertId = roleId === 2 ? await expertIdForUser(queryable, user.id) : null;
-  const result = await queryable.query(`SELECT r.*,t.title AS template_title,t.source_type,t.template_scope,u.full_name AS consultant_name,u.email AS consultant_email,v.fields_jsonb,v.layout_jsonb,v.version_number FROM inspection_reports r JOIN inspection_templates t ON t.id=r.template_id JOIN inspection_template_versions v ON v.id=r.template_version_id LEFT JOIN experts e ON e.id=r.expert_id LEFT JOIN users u ON u.id=e.user_id WHERE r.id=$1`, [reportId]);
+  const result = await queryable.query(`SELECT r.*,iw.id AS workflow_id,t.title AS template_title,t.source_type,t.template_scope,u.full_name AS consultant_name,u.email AS consultant_email,v.fields_jsonb,v.layout_jsonb,v.version_number FROM inspection_reports r JOIN inspection_templates t ON t.id=r.template_id JOIN inspection_template_versions v ON v.id=r.template_version_id LEFT JOIN inspection_workflows iw ON iw.report_id=r.id LEFT JOIN experts e ON e.id=r.expert_id LEFT JOIN users u ON u.id=e.user_id WHERE r.id=$1`, [reportId]);
   const report = result.rows[0];
-  const ownConsultantReport = report && roleId === 2 && Number(report.expert_id) === Number(expertId);
+  const ownConsultantReport = report && !report.workflow_id && roleId === 2 && Number(report.expert_id) === Number(expertId);
   const ownPlatformTest = report && roleId === 1 && report.expert_id === null && Number(report.created_by_user_id) === Number(user.id);
   if (!report || (ownerOnly ? !(ownConsultantReport || ownPlatformTest) : !(roleId === 1 || ownConsultantReport))) throw Object.assign(new Error("Report not found or access denied."), { status: 404 });
   return { ...report, permissions: { canEdit: ownConsultantReport || ownPlatformTest, canGenerate: ownConsultantReport || ownPlatformTest } };
 }
 
-const publicReport = ({ generated_pdf_s3_key, ...row }) => ({ ...row, generated: Boolean(generated_pdf_s3_key) });
+const publicReport = ({ generated_pdf_s3_key, final_pdf_s3_key, ...row }) => ({ ...row, generated: Boolean(generated_pdf_s3_key), finalized: Boolean(final_pdf_s3_key) });
 
 export const createReport = async (req, res) => {
   try {
@@ -51,7 +51,7 @@ export const createReport = async (req, res) => {
 export const listReports = async (req, res) => {
   try {
     const expertId = Number(req.user.role_id) === 2 ? await expertIdForUser(pool, req.user.id) : null;
-    const result = await pool.query(`SELECT r.*,t.title AS template_title,t.template_scope,u.full_name AS consultant_name,u.email AS consultant_email,v.version_number FROM inspection_reports r JOIN inspection_templates t ON t.id=r.template_id JOIN inspection_template_versions v ON v.id=r.template_version_id LEFT JOIN experts e ON e.id=r.expert_id LEFT JOIN users u ON u.id=e.user_id${expertId ? " WHERE r.expert_id=$1" : ""} ORDER BY r.updated_at DESC`, expertId ? [expertId] : []);
+    const result = await pool.query(`SELECT r.*,t.title AS template_title,t.template_scope,u.full_name AS consultant_name,u.email AS consultant_email,v.version_number FROM inspection_reports r JOIN inspection_templates t ON t.id=r.template_id JOIN inspection_template_versions v ON v.id=r.template_version_id LEFT JOIN inspection_workflows iw ON iw.report_id=r.id LEFT JOIN experts e ON e.id=r.expert_id LEFT JOIN users u ON u.id=e.user_id${expertId ? " WHERE r.expert_id=$1 AND iw.id IS NULL" : ""} ORDER BY r.updated_at DESC`, expertId ? [expertId] : []);
     return res.json({ success: true, data: result.rows.map(publicReport) });
   } catch (error) { return sendError(res, error, "Unable to load reports."); }
 };
