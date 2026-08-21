@@ -1,6 +1,7 @@
 import express from "express";
 import { requireAuth, allowRoles } from "../middlewares/authMiddleware.js";
 import { approveWorkflowInvoice, attachEvidence, completeChecklist, completePreparation, confirmQuotation, confirmReport, createInvoice, evidenceUpload, generateDraft, getTemplates, getWorkflow, initializeWorkflow, invoiceUpload, listWorkflows, markInspectionComplete, payWorkflowInvoice, removeEvidence, reviewReport, saveChecklist, savePreparation, selectQuotation, selectTemplate, updateWorkflowStage } from "../controllers/inspectionWorkflowController.js";
+import { attachPhoto as attachDailyReportPhoto, create as createDailyReport, finalize as finalizeDailyReport, generate as generateDailyReport, get as getDailyReport, list as listDailyReports, photoUpload as dailyReportPhotoUpload, removePhoto as removeDailyReportPhoto, update as updateDailyReport } from "../controllers/dailyReportController.js";
 
 const router=express.Router();
 router.use(requireAuth,allowRoles(1));
@@ -16,6 +17,15 @@ router.get("/:requestId/templates",getTemplates);
 router.post("/:requestId/checklist/template",selectTemplate);
 router.put("/:requestId/checklist",saveChecklist);
 router.post("/:requestId/checklist/complete",completeChecklist);
+router.get("/:requestId/daily-reports",listDailyReports);
+router.post("/:requestId/daily-reports",createDailyReport);
+router.get("/:requestId/daily-reports/:dailyReportId",getDailyReport);
+router.put("/:requestId/daily-reports/:dailyReportId",updateDailyReport);
+router.post("/:requestId/daily-reports/:dailyReportId/generate",generateDailyReport);
+router.post("/:requestId/daily-reports/:dailyReportId/finalize",finalizeDailyReport);
+router.post("/:requestId/daily-reports/:dailyReportId/photos/upload-url",dailyReportPhotoUpload);
+router.post("/:requestId/daily-reports/:dailyReportId/photos",attachDailyReportPhoto);
+router.delete("/:requestId/daily-reports/:dailyReportId/photos/:photoId",removeDailyReportPhoto);
 router.post("/:requestId/evidence/upload-url",evidenceUpload);
 router.post("/:requestId/evidence",attachEvidence);
 router.delete("/:requestId/evidence/:evidenceId",removeEvidence);
