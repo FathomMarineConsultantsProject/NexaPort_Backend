@@ -1,6 +1,6 @@
 import { advanceOverviewToQuote, confirmWorkflowQuotation, getInspectionWorkflow, initializeInspectionWorkflow, listInspectionWorkflows, selectWorkflowQuotation } from "../services/inspectionWorkflowService.js";
 import { advanceSurveyorToPreparation, attachWorkflowEvidence, completeWorkflowChecklist, confirmWorkflowReport, createEvidenceUpload, generateWorkflowDraft, listWorkflowTemplates, removeWorkflowEvidence, reviewWorkflowReport, saveWorkflowChecklist, saveWorkflowPreparation, selectWorkflowTemplate } from "../services/inspectionWorkflowPhase2Service.js";
-import { approveInvoice, completeInspection, createInvoiceUpload, payInvoice, submitInvoice } from "../services/inspectionInvoiceService.js";
+import { approveInvoice, completeInspection, createInvoiceUpload, payInvoice, rejectInvoice, submitInvoice } from "../services/inspectionInvoiceService.js";
 
 const sendError=(res,error)=>{
   console.error("Inspection workflow error:",error);
@@ -28,4 +28,5 @@ export const markInspectionComplete=async(req,res)=>{try{await completeInspectio
 export const invoiceUpload=async(req,res)=>{try{res.json({success:true,data:await createInvoiceUpload({requestId:req.params.requestId,...req.body})});}catch(error){sendError(res,error);}};
 export const createInvoice=async(req,res)=>{try{await submitInvoice({requestId:req.params.requestId,actorUserId:req.user.id,data:req.body});res.json({success:true,message:"Invoice submitted",data:await getInspectionWorkflow(req.params.requestId)});}catch(error){sendError(res,error);}};
 export const approveWorkflowInvoice=async(req,res)=>{try{await approveInvoice({requestId:req.params.requestId,actorUserId:req.user.id});res.json({success:true,message:"Invoice approved",data:await getInspectionWorkflow(req.params.requestId)});}catch(error){sendError(res,error);}};
+export const rejectWorkflowInvoice=async(req,res)=>{try{await rejectInvoice({requestId:req.params.requestId,actorUserId:req.user.id,data:req.body});res.json({success:true,message:"Invoice rejected for correction",data:await getInspectionWorkflow(req.params.requestId)});}catch(error){sendError(res,error);}};
 export const payWorkflowInvoice=async(req,res)=>{try{await payInvoice({requestId:req.params.requestId,actorUserId:req.user.id,data:req.body});res.json({success:true,message:"Payment recorded",data:await getInspectionWorkflow(req.params.requestId)});}catch(error){sendError(res,error);}};

@@ -27,6 +27,7 @@ test("workflow queue returns approved requests with optional relationships absen
     assert.match(capturedSql, /LEFT JOIN quotations accepted_q/);
     assert.match(capturedSql, /LEFT JOIN LATERAL/);
     assert.match(capturedSql, /operational_expert\.full_name AS accepted_expert_name/);
+    assert.match(capturedSql, /SELECT ii\.status FROM inspection_invoices/);
     assert.doesNotMatch(capturedSql, /aq\.expert_name/);
     assert.doesNotMatch(capturedSql, /JOIN inspection_invoices/);
   } finally {

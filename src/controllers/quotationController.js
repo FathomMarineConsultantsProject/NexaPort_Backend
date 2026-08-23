@@ -467,28 +467,9 @@ export const deleteQuotation = async (req, res) => {
 };
 
 export const acceptQuotation = async (req, res) => {
-  const client = await pool.connect();
-
-  try {
-    await client.query("BEGIN");
-    const result = await acceptQuotationOperation({queryable:client,quotationId:req.params.id,adminMarkupUsd:req.body?.adminMarkupUsd,actorUserId:req.user.id});
-
-    await client.query("COMMIT");
-
-    res.json({
-      success: true,
-      message: "Quotation accepted successfully",
-      data: result.quotation,
-    });
-  } catch (error) {
-    await client.query("ROLLBACK");
-
-    res.status(error.status || 500).json({
-      success: false,
-      message: error.status ? error.message : "Failed to accept quotation",
-      error: error.status ? error.message : undefined,
-    });
-  } finally {
-    client.release();
-  }
+  return res.status(409).json({
+    success: false,
+    code: "CLIENT_APPROVAL_REQUIRED",
+    message: "Direct quotation acceptance is deprecated. Prepare and send a commercial proposal to the Client in the Inspection Workflow for commercial authorization.",
+  });
 };

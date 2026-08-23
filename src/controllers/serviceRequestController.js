@@ -4,6 +4,7 @@ import { deleteServiceRequestById } from "../services/serviceRequestService.js";
 import { createServiceRequestApprovedNotifications } from "../services/adminNotificationService.js";
 import { writeAdminAudit } from "../services/adminAuditService.js";
 import { getServiceRequestEditPermission } from "../services/serviceRequestEditPermission.js";
+import { getActiveProposalForRequest, mapProposalRow } from "../services/commercialProposalService.js";
 
 const SERVICE_TYPES = new Set(["Audit", "Inspection", "Survey", "Other"]);
 
@@ -96,6 +97,7 @@ const mapRequestRow = (row) => ({
   quotationCount: Number(row.quotation_count || 0),
   acceptedQuotationId: row.accepted_quotation_id,
   acceptedExpertId: row.accepted_expert_id,
+  activeProposalId: row.active_proposal_id != null ? Number(row.active_proposal_id) : null,
   workflowStage: row.workflow_stage || null,
   hasAssignment: Boolean(row.has_assignment),
 
@@ -573,6 +575,9 @@ export const getServiceRequestById = async (req, res) => {
         createdAt: row.created_at,
       };
     });
+
+    const activeProposalRow = await getActiveProposalForRequest(id);
+    requestData.proposal = activeProposalRow ? mapProposalRow(activeProposalRow, req.user) : null;
 
     res.json({
       success: true,

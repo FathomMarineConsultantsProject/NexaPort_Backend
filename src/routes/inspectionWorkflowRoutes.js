@@ -1,6 +1,7 @@
 import express from "express";
 import { requireAuth, allowRoles } from "../middlewares/authMiddleware.js";
-import { approveWorkflowInvoice, attachEvidence, completeChecklist, completePreparation, confirmQuotation, confirmReport, createInvoice, evidenceUpload, generateDraft, getTemplates, getWorkflow, initializeWorkflow, invoiceUpload, listWorkflows, markInspectionComplete, payWorkflowInvoice, removeEvidence, reviewReport, saveChecklist, savePreparation, selectQuotation, selectTemplate, updateWorkflowStage } from "../controllers/inspectionWorkflowController.js";
+import { approveWorkflowInvoice, attachEvidence, completeChecklist, completePreparation, confirmQuotation, confirmReport, createInvoice, evidenceUpload, generateDraft, getTemplates, getWorkflow, initializeWorkflow, invoiceUpload, listWorkflows, markInspectionComplete, payWorkflowInvoice, rejectWorkflowInvoice, removeEvidence, reviewReport, saveChecklist, savePreparation, selectQuotation, selectTemplate, updateWorkflowStage } from "../controllers/inspectionWorkflowController.js";
+import { saveDraft, sendProposal, recallProposal } from "../controllers/commercialProposalController.js";
 import { attachPhoto as attachDailyReportPhoto, create as createDailyReport, finalize as finalizeDailyReport, generate as generateDailyReport, get as getDailyReport, list as listDailyReports, photoUpload as dailyReportPhotoUpload, removePhoto as removeDailyReportPhoto, update as updateDailyReport } from "../controllers/dailyReportController.js";
 
 const router=express.Router();
@@ -11,6 +12,9 @@ router.post("/:requestId/initialize",initializeWorkflow);
 router.patch("/:requestId/stage",updateWorkflowStage);
 router.patch("/:requestId/quotation",selectQuotation);
 router.post("/:requestId/confirm",confirmQuotation);
+router.post("/:requestId/proposal/draft",saveDraft);
+router.post("/:requestId/proposal/send",sendProposal);
+router.post("/:requestId/proposal/supersede",recallProposal);
 router.put("/:requestId/preparation",savePreparation);
 router.post("/:requestId/preparation/complete",completePreparation);
 router.get("/:requestId/templates",getTemplates);
@@ -36,5 +40,6 @@ router.post("/:requestId/complete",markInspectionComplete);
 router.post("/:requestId/invoice/upload-url",invoiceUpload);
 router.post("/:requestId/invoice",createInvoice);
 router.post("/:requestId/invoice/approve",approveWorkflowInvoice);
+router.post("/:requestId/invoice/reject",rejectWorkflowInvoice);
 router.post("/:requestId/invoice/pay",payWorkflowInvoice);
 export default router;

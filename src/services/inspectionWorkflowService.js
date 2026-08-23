@@ -1,6 +1,7 @@
 import { pool } from "../config/db.js";
 import { writeAdminAudit } from "./adminAuditService.js";
 import { acceptQuotationOperation, calculateQuotationTotals } from "./quotationAcceptanceService.js";
+import { getProposalsForRequest, getActiveProposalForRequest, mapProposalRow } from "./commercialProposalService.js";
 import { createPresignedGetUrl } from "../utils/s3Presign.js";
 import { getPhaseTwoWorkflowState } from "./inspectionWorkflowPhase2Service.js";
 import { getInvoiceWorkflowState } from "./inspectionInvoiceService.js";
@@ -73,6 +74,7 @@ export const listInspectionWorkflows = async ({ search, stage, status } = {}) =>
        (SELECT COUNT(*)::int FROM quotations q
           WHERE q.service_request_id=sr.id AND q.status IN ('pending','submitted')) AS quotations_awaiting_review,
        iw.id AS workflow_id,COALESCE(iw.current_stage,CASE WHEN sr.accepted_quotation_id IS NOT NULL AND sr.accepted_expert_id IS NOT NULL THEN 'surveyor' WHEN sr.accepted_quotation_id IS NOT NULL THEN 'confirm' ELSE 'overview' END) AS current_stage,
+       (SELECT ii.status FROM inspection_invoices ii WHERE ii.workflow_id=iw.id) AS invoice_status,
        COALESCE(iw.updated_at,sr.updated_at) AS updated_at
      FROM service_requests sr
      LEFT JOIN inspection_workflows iw ON iw.service_request_id=sr.id
@@ -93,7 +95,7 @@ export const listInspectionWorkflows = async ({ search, stage, status } = {}) =>
     approvedBudgetUsd: row.approved_budget_usd == null ? null : Number(row.approved_budget_usd),
     quotationsAwaitingReview: Number(row.quotations_awaiting_review || 0), acceptedQuotationId: row.accepted_quotation_id,
     acceptedExpert: row.operational_expert_id ? { id: row.operational_expert_id, name: row.accepted_expert_name } : null,
-    workflowId: row.workflow_id, currentStage: row.current_stage, updatedAt: row.updated_at,
+    workflowId: row.workflow_id, currentStage: row.current_stage, invoiceStatus: row.invoice_status || null, updatedAt: row.updated_at,
   }));
 };
 
@@ -125,13 +127,17 @@ export const getInspectionWorkflow = async (requestIdValue, queryable = pool) =>
       [requestId, operationalExpertId]);
     if (expertResult.rows[0]) { const e=expertResult.rows[0]; surveyor={ id:e.id,name:e.full_name,biography:e.biography,discipline:e.discipline,rank:e.rank,yearsExperience:e.years_experience,location:[e.base_location,e.country].filter(Boolean).join(", "),ports:e.ports||[],qualifications:e.qualifications||[],qualificationsOther:e.qualifications_other,rating:e.rating==null?null:Number(e.rating),photoUrl:safePhotoUrl(e.photo_s3_key),hasAssignment:e.has_assignment }; }
   }
+  const activeProposalRow = await getActiveProposalForRequest(requestId, queryable);
+  const allProposalsRows = await getProposalsForRequest(requestId, queryable);
+  const proposal = activeProposalRow ? mapProposalRow(activeProposalRow, { role_id: 1 }) : null;
+  const proposals = allProposalsRows.map((r) => mapProposalRow(r, { role_id: 1 }));
   const phaseTwo=workflow?await getPhaseTwoWorkflowState(requestId,queryable):{preparation:{data:{},completed:false,locked:false},templates:[],checklist:null,report:null};
   const closeout=workflow?await getInvoiceWorkflowState(requestId,queryable):{inspectionCompletion:{completed:false,completedAt:null},invoice:null};
   return {
     workflow: workflow ? { id:workflow.id,currentStage:workflow.current_stage,selectedQuotationId:workflow.selected_quotation_id,startedAt:workflow.started_at,completedAt:workflow.completed_at,createdAt:workflow.created_at,updatedAt:workflow.updated_at } : null,
     request: { id:request.id,reference:request.title||`Request #${request.id}`,title:request.title,serviceType:request.service_type,serviceCategory:request.service_category,serviceTypeOther:request.service_type_other,service:request.service_label,scope:request.scope_of_work,urgency:request.urgency,requiredBy:request.required_by,status:request.status,moderationStatus:request.moderation_status,approvedBudgetUsd:request.approved_budget_usd==null?null:Number(request.approved_budget_usd),vessel:{name:request.vessel_name,imoNumber:request.imo_number,type:request.vessel_type,flag:request.flag_state},port:{name:request.port_name,country:request.country,eta:request.eta,locationSummary:request.location_summary} },
     client: { id:request.requester_user_id,name:request.requester_name||request.client_user_name,email:request.client_email,phone:request.client_phone },
-    quotations,selectedQuotation,acceptedQuotation,surveyor,
+    quotations,selectedQuotation,acceptedQuotation,surveyor,proposal,proposals,
     counts:{ quotationsAwaitingReview:quotations.filter((q)=>AWAITING_QUOTATION_STATUSES.includes(String(q.status).toLowerCase())).length },
     operationalError: operationalExpertId && !surveyor ? "The accepted or assigned Consultant profile could not be loaded." : null,
     ...phaseTwo,
@@ -164,5 +170,22 @@ export const selectWorkflowQuotation = async ({requestId:value,quotationId:quote
 
 export const confirmWorkflowQuotation = async ({requestId:value,adminMarkupUsd,actorUserId}) => {
   const requestId=positiveId(value,"requestId"); const client=await pool.connect();
-  try{await client.query("BEGIN"); const wfResult=await client.query("SELECT * FROM inspection_workflows WHERE service_request_id=$1 FOR UPDATE",[requestId]); if(!wfResult.rows.length)throw workflowError(404,"WORKFLOW_NOT_FOUND","Initialize the workflow first"); const wf=wfResult.rows[0]; if(wf.current_stage==="surveyor"){await client.query("COMMIT");return getInspectionWorkflow(requestId);} if(wf.current_stage!=="confirm"||!wf.selected_quotation_id)throw workflowError(409,"QUOTATION_SELECTION_REQUIRED","Select a quotation before confirmation"); const accepted=await acceptQuotationOperation({queryable:client,quotationId:wf.selected_quotation_id,adminMarkupUsd,actorUserId}); if(Number(accepted.serviceRequestId)!==requestId)throw workflowError(409,"QUOTATION_REQUEST_MISMATCH","Selected quotation does not belong to this request"); await client.query("UPDATE inspection_workflows SET current_stage='surveyor',updated_at=CURRENT_TIMESTAMP WHERE id=$1",[wf.id]); await writeAdminAudit(client,{actorUserId,action:"inspection_workflow.quotation_confirmed",targetType:"inspection_workflow",targetId:wf.id,summary:`Confirmed quotation ${wf.selected_quotation_id} for request ${requestId}`}); await writeAdminAudit(client,{actorUserId,action:"inspection_workflow.surveyor_confirmed",targetType:"inspection_workflow",targetId:wf.id,summary:`Assigned Consultant ${accepted.expertId} to request ${requestId}`}); await client.query("COMMIT"); return getInspectionWorkflow(requestId);}catch(error){try{await client.query("ROLLBACK");}catch{}throw error;}finally{client.release();}
+  try{
+    await client.query("BEGIN");
+    const wfResult=await client.query("SELECT * FROM inspection_workflows WHERE service_request_id=$1 FOR UPDATE",[requestId]);
+    if(!wfResult.rows.length)throw workflowError(404,"WORKFLOW_NOT_FOUND","Initialize the workflow first");
+    const wf=wfResult.rows[0];
+    if(wf.current_stage==="surveyor"){await client.query("COMMIT");return getInspectionWorkflow(requestId, client);}
+    if(wf.current_stage!=="confirm"||!wf.selected_quotation_id)throw workflowError(409,"QUOTATION_SELECTION_REQUIRED","Select a quotation before confirmation");
+    const propCheck = await client.query("SELECT * FROM commercial_proposals WHERE service_request_id = $1 AND status = 'approved'", [requestId]);
+    const reqCheck = await client.query("SELECT accepted_quotation_id, accepted_expert_id FROM service_requests WHERE id = $1", [requestId]);
+    const isApproved = propCheck.rows.length > 0 || (reqCheck.rows[0]?.accepted_quotation_id && reqCheck.rows[0]?.accepted_expert_id);
+    if (!isApproved) {
+      throw workflowError(409, "CLIENT_APPROVAL_REQUIRED", "Client commercial approval is required before assigning the Surveyor.");
+    }
+    await client.query("UPDATE inspection_workflows SET current_stage='surveyor',updated_at=CURRENT_TIMESTAMP WHERE id=$1",[wf.id]);
+    await writeAdminAudit(client,{actorUserId,action:"inspection_workflow.surveyor_confirmed",targetType:"inspection_workflow",targetId:wf.id,summary:`Confirmed Surveyor stage for request ${requestId}`});
+    await client.query("COMMIT");
+    return getInspectionWorkflow(requestId);
+  }catch(error){try{await client.query("ROLLBACK");}catch{}throw error;}finally{client.release();}
 };

@@ -49,8 +49,10 @@ export const getClientDashboard = async (req, res) => {
             )
           )::int AS quotes_received,
           COUNT(*) FILTER (
-            WHERE sr.accepted_quotation_id IS NOT NULL
-              AND LOWER(sr.status) IN ('open', 'pending')
+            WHERE EXISTS (
+              SELECT 1 FROM commercial_proposals cp
+              WHERE cp.service_request_id = sr.id AND cp.status = 'sent'
+            )
           )::int AS awaiting_decision,
           COUNT(*) FILTER (WHERE LOWER(sr.status) IN ('assigned', 'active'))::int AS active_jobs,
           COUNT(*) FILTER (WHERE LOWER(sr.status) = 'completed')::int AS completed_jobs
@@ -62,11 +64,11 @@ export const getClientDashboard = async (req, res) => {
       pool.query(
         `
         SELECT ${requestListSelect},
-          CASE WHEN sr.accepted_quotation_id IS NOT NULL THEN 1 ELSE 0 END::int AS quotation_count
+          CASE WHEN EXISTS (SELECT 1 FROM commercial_proposals cp WHERE cp.service_request_id = sr.id AND cp.status = 'sent') THEN 1 ELSE 0 END::int AS quotation_count
         FROM service_requests sr
         WHERE sr.requester_user_id = $1
           AND (
-            (sr.accepted_quotation_id IS NOT NULL AND LOWER(sr.status) IN ('open', 'pending'))
+            EXISTS (SELECT 1 FROM commercial_proposals cp WHERE cp.service_request_id = sr.id AND cp.status = 'sent')
             OR (
               sr.moderation_status = 'approved'
               AND LOWER(sr.status) = 'open'
@@ -75,7 +77,7 @@ export const getClientDashboard = async (req, res) => {
             )
           )
         ORDER BY
-          (sr.accepted_quotation_id IS NOT NULL) DESC,
+          (EXISTS (SELECT 1 FROM commercial_proposals cp WHERE cp.service_request_id = sr.id AND cp.status = 'sent')) DESC,
           sr.required_by ASC NULLS LAST,
           sr.updated_at DESC
         LIMIT 8
@@ -319,6 +321,8 @@ export const getAdminDashboard = async (_req, res) => {
               AND NOT EXISTS (SELECT 1 FROM quotations q WHERE q.service_request_id = sr.id))::int AS requests_awaiting_quotes,
           (SELECT COUNT(*) FROM quotations q
             WHERE LOWER(q.status) IN ('submitted', 'pending'))::int AS quotes_awaiting_review,
+          (SELECT COUNT(*) FROM commercial_proposals cp WHERE cp.status = 'sent')::int AS proposals_awaiting_client,
+          (SELECT COUNT(*) FROM commercial_proposals cp JOIN service_requests sr ON sr.id = cp.service_request_id WHERE cp.status = 'rejected' AND sr.status = 'open' AND NOT EXISTS (SELECT 1 FROM commercial_proposals cp2 WHERE cp2.service_request_id = sr.id AND cp2.status IN ('sent', 'approved')))::int AS proposals_client_rejected,
           (SELECT COUNT(*) FROM service_requests WHERE LOWER(status) IN ('assigned', 'active'))::int AS active_jobs,
           (SELECT COUNT(*) FROM service_requests WHERE LOWER(status) = 'completed')::int AS completed_jobs,
           COALESCE((SELECT SUM(q.admin_markup_usd) FROM quotations q WHERE LOWER(q.status) = 'accepted'), 0)::float AS commission_value_usd
@@ -389,22 +393,26 @@ export const getAdminDashboard = async (_req, res) => {
           COUNT(*) FILTER (WHERE iw.current_stage = 'review')::int AS report_awaiting_review,
           COUNT(*) FILTER (WHERE iw.current_stage = 'report_confirmation' AND ir.confirmed_at IS NULL)::int AS report_awaiting_confirmation,
           COUNT(*) FILTER (WHERE iw.current_stage = 'report_confirmation' AND ir.confirmed_at IS NOT NULL)::int AS inspection_awaiting_completion,
-          COUNT(*) FILTER (WHERE iw.current_stage = 'invoice_submitted')::int AS invoice_approval_required,
+          COUNT(*) FILTER (WHERE iw.current_stage = 'invoice_submitted' AND ii.status = 'submitted')::int AS invoice_approval_required,
+          COUNT(*) FILTER (WHERE iw.current_stage = 'invoice_submitted' AND ii.status = 'rejected')::int AS invoice_correction_required,
           COUNT(*) FILTER (WHERE iw.current_stage = 'invoice_approved')::int AS payment_pending,
           COUNT(*) FILTER (WHERE iw.current_stage = 'invoice_paid')::int AS completed_workflows
         FROM inspection_workflows iw
         LEFT JOIN inspection_reports ir ON ir.id=iw.report_id
+        LEFT JOIN inspection_invoices ii ON ii.workflow_id=iw.id
       `),
       pool.query(`
         SELECT iw.id, iw.id AS workflow_id, iw.service_request_id, iw.current_stage,
-          sr.title AS request_title, sr.vessel_name, sr.required_by
+          sr.title AS request_title, sr.vessel_name, sr.required_by, ii.status AS invoice_status
         FROM inspection_workflows iw
         JOIN service_requests sr ON sr.id=iw.service_request_id
         LEFT JOIN inspection_reports ir ON ir.id=iw.report_id
+        LEFT JOIN inspection_invoices ii ON ii.workflow_id=iw.id
         WHERE iw.current_stage NOT IN ('invoice_paid')
         ORDER BY
           CASE
-            WHEN iw.current_stage IN ('invoice_submitted','invoice_approved') THEN 1
+            WHEN iw.current_stage='invoice_submitted' AND ii.status='rejected' THEN 1
+            WHEN iw.current_stage IN ('invoice_submitted','invoice_approved') THEN 2
             WHEN iw.current_stage IN ('review','report_confirmation') THEN 2
             WHEN iw.current_stage IN ('preparation','checklist','report') THEN 3
             ELSE 4
