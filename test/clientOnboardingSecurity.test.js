@@ -10,6 +10,7 @@ import {
   confirmClientRegistrationDocument,
   createClientRegistrationDraft,
   presignClientRegistrationDocument,
+  registerClient,
 } from "../src/controllers/clientRegistrationController.js";
 import { allowRoles, requireAuth } from "../src/middlewares/authMiddleware.js";
 import {
@@ -20,11 +21,18 @@ import {
 } from "../src/services/clientRegistrationSecurity.js";
 import {
   MAX_DOCUMENT_SIZE,
+  createDocumentConfirmationToken,
   keyBelongsToOwner,
   validateDocumentInput,
 } from "../src/services/clientDocumentService.js";
+import { setPrivateObjectClientForTests } from "../src/services/privateObjectService.js";
 
 process.env.CLIENT_REGISTRATION_TOKEN_SECRET = "test-only-registration-secret";
+process.env.JWT_SECRET = "test-only-jwt-secret";
+process.env.AWS_REGION = "ap-south-1";
+process.env.AWS_S3_BUCKET = "nexaport-client-test";
+process.env.AWS_ACCESS_KEY_ID = "test-access-key";
+process.env.AWS_SECRET_ACCESS_KEY = "test-secret-key";
 
 const mockResponse = () => ({
   statusCode: 200,
@@ -223,6 +231,101 @@ test("verification documents enforce category, MIME, size, and owner prefix", ()
   assert.equal(keyBelongsToOwner({ key: "client-verifications/drafts/draft-id/authorisation_letter/id.pdf", ownerType: "drafts", ownerId: "draft-id", category: "authorisation_letter", contentType: "application/pdf" }), true);
   assert.equal(keyBelongsToOwner({ key: "client-verifications/drafts/other/authorisation_letter/id.pdf", ownerType: "drafts", ownerId: "draft-id", category: "authorisation_letter", contentType: "application/pdf" }), false);
   assert.equal(keyBelongsToOwner({ key: "client-verifications/drafts/draft-id/authorisation_letter/../id.pdf", ownerType: "drafts", ownerId: "draft-id", category: "authorisation_letter", contentType: "application/pdf" }), false);
+});
+
+test("valid files receive a correctly scoped presigned URL and confirmed document token", async () => {
+  const draftId = "upload-draft";
+  const token = createRegistrationDraftToken({ email: "upload@example.com", draftId });
+  const metadata = { category: "authorisation_letter", contentType: "application/pdf", size: 321, originalFilename: "letter.pdf" };
+  const presignResponse = mockResponse();
+  await presignClientRegistrationDocument({ headers: { authorization: `Bearer ${token}` }, body: metadata, ip: "valid-upload-test" }, presignResponse);
+  assert.equal(presignResponse.statusCode, 200);
+  const url = new URL(presignResponse.body.uploadUrl);
+  assert.equal(url.hostname, "nexaport-client-test.s3.ap-south-1.amazonaws.com");
+  assert.match(decodeURIComponent(url.pathname), new RegExp(`client-verifications/drafts/${draftId}/authorisation_letter/.+\\.pdf$`));
+
+  setPrivateObjectClientForTests({ send: async () => ({ ContentLength: 321, ContentType: "application/pdf" }) });
+  const confirmResponse = mockResponse();
+  await confirmClientRegistrationDocument({ headers: { authorization: `Bearer ${token}` }, body: { ...metadata, key: presignResponse.body.key }, ip: "valid-confirm-test" }, confirmResponse);
+  assert.equal(confirmResponse.statusCode, 200);
+  assert.equal(typeof confirmResponse.body.documentToken, "string");
+});
+
+const registrationPayload = (email, documentTokens = []) => ({
+  full_name: "Test Client", designation: "Manager", email, mobile_number: "+65 1234 5678", password: "Password1",
+  company: { legal_name: `Company ${email}`, company_type: "Ship Owner", registered_address: "1 Harbour Road", country: "Singapore", registration_number: `REG-${email}`, authorized_representative_name: "Test Client", authorized_representative_email: email, authorized_representative_phone: "+65 1234 5678" },
+  declared_vessel_count: 0, vessels: [], services: [{ name: "Condition Inspection" }], documentTokens,
+});
+
+const runRegistration = async ({ documentCount = 0, failAt = "", duplicate = false, notificationFailure = false } = {}) => {
+  const draftId = `registration-draft-${documentCount}-${failAt || "ok"}`;
+  const email = `${draftId}@example.com`;
+  const categories = ["company_registration_certificate", "authorisation_letter", "company_identification_or_tax_certificate"];
+  const documentTokens = categories.slice(0, documentCount).map((category, index) => createDocumentConfirmationToken({
+    draftId, key: `client-verifications/drafts/${draftId}/${category}/file-${index}.pdf`, category,
+    contentType: "application/pdf", size: 100 + index, originalFilename: `${category}.pdf`,
+  }));
+  const calls = [];
+  const client = {
+    async query(sql) {
+      calls.push(sql);
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+      if (sql.includes("SELECT id FROM users WHERE LOWER(email)")) return { rows: duplicate ? [{ id: 99 }] : [] };
+      if (sql.includes("SELECT id FROM users WHERE username")) return { rows: [] };
+      if (sql.startsWith("INSERT INTO users")) return { rows: [{ id: 7, full_name: "Test Client", email, username: "test_1234", role_id: 3, phone: "+65", is_active: true }] };
+      if (sql.startsWith("INSERT INTO client_profiles")) return { rows: [{ id: 42, user_id: 7, verification_submitted_at: new Date(0) }] };
+      if (sql.startsWith("INSERT INTO client_companies")) { if (failAt === "company") throw Object.assign(new Error("database detail"), { code: "XX001" }); return { rows: [] }; }
+      if (sql.includes("FROM master_service_types")) return { rows: [{ service_type_id: 1, service_category_id: null }] };
+      if (sql.startsWith("INSERT INTO client_required_services") || sql.startsWith("INSERT INTO client_verification_documents") || sql.startsWith("INSERT INTO client_verification_events")) return { rows: [] };
+      throw new Error(`Unexpected registration query: ${sql}`);
+    }, release() {},
+  };
+  const originalConnect = pool.connect;
+  const originalQuery = pool.query;
+  pool.connect = async () => client;
+  pool.query = async () => { if (notificationFailure) throw Object.assign(new Error("notification unavailable"), { code: "42P01" }); return { rows: [], rowCount: 0 }; };
+  const res = mockResponse();
+  const originalWarn = console.warn; const originalError = console.error; console.warn = () => {}; console.error = () => {};
+  try {
+    await registerClient({ headers: { authorization: `Bearer ${createRegistrationDraftToken({ email, draftId })}` }, body: registrationPayload(email, documentTokens), ip: draftId }, res);
+  } finally {
+    pool.connect = originalConnect; pool.query = originalQuery; console.warn = originalWarn; console.error = originalError;
+  }
+  return { res, calls };
+};
+
+test("registration succeeds atomically with zero, one, two, or three optional documents", async (t) => {
+  for (const documentCount of [0, 1, 2, 3]) await t.test(`${documentCount} documents`, async () => {
+    const { res, calls } = await runRegistration({ documentCount });
+    assert.equal(res.statusCode, 201);
+    assert.equal(calls.filter((sql) => sql.startsWith("INSERT INTO client_verification_documents")).length, documentCount);
+    assert.ok(calls.includes("COMMIT"));
+  });
+});
+
+test("invalid document tokens are rejected before a registration transaction starts", async () => {
+  const draftId = "invalid-document-draft"; const email = "invalid-document@example.com";
+  const res = mockResponse();
+  await registerClient({ headers: { authorization: `Bearer ${createRegistrationDraftToken({ email, draftId })}` }, body: registrationPayload(email, ["fake-token"]), ip: draftId }, res);
+  assert.equal(res.statusCode, 400);
+  assert.match(res.body.message, /document confirmations/i);
+});
+
+test("core database failure rolls back, duplicate email remains a conflict, and notification failure does not falsify success", async () => {
+  const failed = await runRegistration({ failAt: "company" });
+  assert.equal(failed.res.statusCode, 500);
+  assert.ok(failed.calls.includes("ROLLBACK"));
+  assert.ok(!failed.calls.includes("COMMIT"));
+  assert.equal(failed.res.body.code, "CLIENT_REGISTRATION_FAILED");
+
+  const duplicate = await runRegistration({ duplicate: true });
+  assert.equal(duplicate.res.statusCode, 409);
+  assert.match(duplicate.res.body.message, /already exists/i);
+
+  const notified = await runRegistration({ notificationFailure: true });
+  assert.equal(notified.res.statusCode, 201);
+  assert.ok(notified.calls.includes("COMMIT"));
+  assert.ok(!notified.calls.includes("ROLLBACK"));
 });
 
 test("public registration routes expose drafts but not legacy email verification", async () => {

@@ -18,6 +18,7 @@ import {
   validateDocumentInput,
   verifyDocumentConfirmationToken,
 } from "../services/clientDocumentService.js";
+import { inspectPrivateObject } from "../services/privateObjectService.js";
 
 const COMPANY_TYPES = ["Ship Owner", "Ship Manager", "Charterer", "Broker", "Bank", "Insurer", "Other"];
 const SERVICE_NAMES = [
@@ -124,8 +125,22 @@ export const confirmClientRegistrationDocument = async (req, res) => {
   if (validationError || !keyBelongsToOwner({ key, ownerType: "drafts", ownerId: identity.draftId, category, contentType })) {
     return res.status(400).json({ success: false, message: validationError || "Document key does not belong to this registration." });
   }
-  const documentToken = createDocumentConfirmationToken({ draftId: identity.draftId, key, category, contentType, size: Number(size), originalFilename: clean(originalFilename) });
-  return res.json({ success: true, documentToken, document: { category, originalFilename: clean(originalFilename), contentType, size: Number(size) } });
+  try {
+    const stored = await inspectPrivateObject(key);
+    if (stored.contentLength !== Number(size) || (stored.contentType && stored.contentType !== contentType)) {
+      return res.status(409).json({ success: false, code: "DOCUMENT_UPLOAD_MISMATCH", message: "Uploaded document metadata does not match the selected file. Please retry the upload." });
+    }
+    const documentToken = createDocumentConfirmationToken({ draftId: identity.draftId, key, category, contentType, size: Number(size), originalFilename: clean(originalFilename) });
+    return res.json({ success: true, documentToken, document: { category, originalFilename: clean(originalFilename), contentType, size: Number(size) } });
+  } catch (error) {
+    console.warn("Client registration document confirmation failed", { name: error?.name, code: error?.code });
+    const configurationError = /not configured/i.test(String(error?.message || ""));
+    return res.status(configurationError ? 503 : 409).json({
+      success: false,
+      code: configurationError ? "PRIVATE_UPLOAD_NOT_CONFIGURED" : "DOCUMENT_UPLOAD_NOT_FOUND",
+      message: configurationError ? "Private document upload is not configured." : "The uploaded document could not be confirmed in private storage. Please retry the upload.",
+    });
+  }
 };
 
 const validatePassword = (password) => typeof password === "string" && password.length >= 8 && /[A-Za-z]/.test(password) && /\d/.test(password);
@@ -157,6 +172,10 @@ export const registerClient = async (req, res) => {
   const documentTokens = Array.isArray(body.documentTokens) ? body.documentTokens : [];
   const email = normalizeEmail(body.email);
 
+  if (!process.env.JWT_SECRET) {
+    return res.status(503).json({ success: false, code: "REGISTRATION_SERVICE_NOT_CONFIGURED", message: "Client registration is not configured." });
+  }
+
   const requiredUser = clean(body.full_name) && clean(body.mobile_number) && clean(body.designation);
   const requiredCompany = clean(company.legal_name) && COMPANY_TYPES.includes(company.company_type) && clean(company.registered_address) && clean(company.country) && clean(company.registration_number) && clean(company.authorized_representative_name) && emailValid(normalizeEmail(company.authorized_representative_email)) && clean(company.authorized_representative_phone);
   if (!requiredUser || !requiredCompany || !registrationDraftMatchesEmail(identity, email) || !validatePassword(body.password)) {
@@ -176,8 +195,10 @@ export const registerClient = async (req, res) => {
   if (documents.some((document) => document.draftId !== identity.draftId || !DOCUMENT_CATEGORIES.includes(document.category)) || categories.size !== documents.length) return res.status(400).json({ success: false, message: "Upload at most one file for each verification document category." });
 
   const client = await pool.connect();
+  let transactionOpen = false;
   try {
     await client.query("BEGIN");
+    transactionOpen = true;
     const duplicate = await client.query(`SELECT id FROM users WHERE LOWER(email) = $1 LIMIT 1`, [email]);
     if (duplicate.rows.length) {
       await client.query("ROLLBACK");
@@ -233,7 +254,7 @@ export const registerClient = async (req, res) => {
       );
     }
     await client.query(`INSERT INTO client_verification_events (client_profile_id, previous_status, new_status) VALUES ($1,NULL,'pending')`, [profile.id]);
-    await createRegistrationNotifications(client, {
+    const notification = {
       type: "client_registration",
       entityType: "client",
       entityId: profile.id,
@@ -246,15 +267,25 @@ export const registerClient = async (req, res) => {
         registration_timestamp: profile.verification_submitted_at,
         registration_id: profile.id,
       },
-    });
-    await client.query("COMMIT");
-
+    };
     const responseUser = { ...user, verification_status: "pending" };
-    return res.status(201).json({ success: true, message: "Client registration submitted for verification.", token: createToken(responseUser), user: responseUser });
+    const token = createToken(responseUser);
+    await client.query("COMMIT");
+    transactionOpen = false;
+
+    try {
+      await createRegistrationNotifications(pool, notification);
+    } catch (notificationError) {
+      console.warn("Client registration notification could not be created", { name: notificationError?.name, code: notificationError?.code, clientProfileId: profile.id });
+    }
+    return res.status(201).json({ success: true, message: "Client registration submitted for verification.", token, user: responseUser });
   } catch (error) {
-    await client.query("ROLLBACK");
+    if (transactionOpen) {
+      try { await client.query("ROLLBACK"); } catch {}
+    }
     if (error.code === "23505") return res.status(409).json({ success: false, message: "Email, company registration number, IMO company number, or another unique value already exists." });
-    return res.status(500).json({ success: false, message: "Client registration failed." });
+    console.error("Client registration transaction failed", { name: error?.name, code: error?.code });
+    return res.status(500).json({ success: false, code: "CLIENT_REGISTRATION_FAILED", message: "Unable to create Client registration." });
   } finally {
     client.release();
   }

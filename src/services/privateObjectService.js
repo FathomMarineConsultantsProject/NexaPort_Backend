@@ -1,4 +1,4 @@
-import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getS3UploadConfig } from "../utils/s3Presign.js";
 
 let client;
@@ -24,6 +24,11 @@ export async function readPrivateObject(key, maxBytes = 12 * 1024 * 1024) {
   const bytes = Buffer.from(await response.Body.transformToByteArray());
   if (bytes.length > maxBytes) throw new Error("Private source file exceeds the supported size.");
   return bytes;
+}
+
+export async function inspectPrivateObject(key) {
+  const response = await getClient().send(new HeadObjectCommand({ ...objectConfig(), Key: key }));
+  return { contentLength: Number(response.ContentLength), contentType: response.ContentType || "" };
 }
 
 export async function deletePrivateObject(key) {
