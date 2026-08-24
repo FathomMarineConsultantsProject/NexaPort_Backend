@@ -54,7 +54,22 @@ const drawTextLines = (page, font, lines, { x, y, size = 9, color = INK, lineHei
   return y - lines.length * lineHeight;
 };
 
-const imageBytes = async (bytes) => sharp(bytes, { failOn: "error" }).rotate().png().toBuffer();
+const MAX_REPORT_IMAGE_WIDTH = 1600;
+const MAX_REPORT_IMAGE_HEIGHT = 1200;
+const MAX_INPUT_PIXELS = 40_000_000;
+
+export const prepareDailyReportImage = async (bytes) => {
+  const source = sharp(bytes, { failOn: "error", limitInputPixels: MAX_INPUT_PIXELS, sequentialRead: true }).rotate();
+  const metadata = await source.metadata();
+  const resized = source.resize({
+    width: MAX_REPORT_IMAGE_WIDTH,
+    height: MAX_REPORT_IMAGE_HEIGHT,
+    fit: "inside",
+    withoutEnlargement: true,
+  });
+  if (metadata.hasAlpha) return { bytes: await resized.png({ compressionLevel: 9 }).toBuffer(), format: "png" };
+  return { bytes: await resized.jpeg({ quality: 84, mozjpeg: true }).toBuffer(), format: "jpeg" };
+};
 
 export async function generateDailyReportPdf({ report, context, photos = [], generatedAt = new Date() }) {
   const pdf = await PDFDocument.create();
@@ -68,7 +83,11 @@ export async function generateDailyReportPdf({ report, context, photos = [], gen
   const masthead = await pdf.embedPng(await readFile(new URL("../assets/nexport-masthead.png", import.meta.url)));
   const embeddedPhotos = [];
   for (const photo of photos) {
-    try { embeddedPhotos.push({ ...photo, image: await pdf.embedPng(await imageBytes(photo.bytes)) }); }
+    try {
+      const prepared = photo.preparedImage || await prepareDailyReportImage(photo.bytes);
+      const image = prepared.format === "png" ? await pdf.embedPng(prepared.bytes) : await pdf.embedJpg(prepared.bytes);
+      embeddedPhotos.push({ ...photo, image });
+    }
     catch { embeddedPhotos.push({ ...photo, image: null }); }
   }
 

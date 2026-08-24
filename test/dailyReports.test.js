@@ -2,10 +2,13 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { PDFDocument, PDFName } from "pdf-lib";
+import sharp from "sharp";
 import {
   dailyReportFinalizationErrors, nextDailyReportNumber, normalizeDailyReportData, stageAllowsDailyReports, toIsoDate,
 } from "../src/services/dailyReportService.js";
-import { generateDailyReportPdf } from "../src/services/dailyReportPdfService.js";
+import { generateDailyReportPdf, prepareDailyReportImage } from "../src/services/dailyReportPdfService.js";
+import { allowedCorsOrigins, corsOptions } from "../src/app.js";
+import { sendDailyReportError } from "../src/controllers/dailyReportController.js";
 import { WORKFLOW_STAGES } from "../src/services/inspectionWorkflowService.js";
 
 const source = (path) => readFile(new URL(path, import.meta.url), "utf8");
@@ -95,6 +98,55 @@ test("professional Daily Report PDF is A4, multi-page, branded, and embeds evide
   assert.ok(output.length > 100000);
 });
 
+test("Daily Report PDF generates without photographs", async () => {
+  const output = await generateDailyReportPdf({ report: { id: 1, dayNumber: 1, reportDate: "2026-05-19", status: "draft", data: completeData, preparedBy: { name: "NexaPort Administrator" } }, context });
+  const pdf = await PDFDocument.load(output);
+  assert.ok(pdf.getPageCount() >= 1);
+});
+
+test("invalid or missing photograph data renders an unavailable placeholder instead of failing generation", async () => {
+  const output = await generateDailyReportPdf({ report: { id: 1, dayNumber: 1, reportDate: "2026-05-19", status: "draft", data: completeData, preparedBy: { name: "NexaPort Administrator" } }, context, photos: [{ caption: "Missing S3 object" }, { bytes: Buffer.from("not-an-image") }] });
+  assert.ok((await PDFDocument.load(output)).getPageCount() >= 1);
+});
+
+test("large camera images are constrained before PDF embedding", async () => {
+  const sourceImage = await sharp({ create: { width: 5000, height: 3500, channels: 3, background: "#67747d" } }).jpeg({ quality: 95 }).toBuffer();
+  const prepared = await prepareDailyReportImage(sourceImage);
+  const metadata = await sharp(prepared.bytes).metadata();
+  assert.equal(prepared.format, "jpeg");
+  assert.ok(metadata.width <= 1600);
+  assert.ok(metadata.height <= 1200);
+  assert.ok(prepared.bytes.length < sourceImage.length);
+});
+
+test("private S3 photo retrieval is sequential, bounded, and tolerates an unavailable object", async () => {
+  const service = await source("../src/services/dailyReportService.js");
+  assert.match(service, /for \(const photo of photoRows\)/);
+  assert.match(service, /readPrivateObject\(photo\.photo_s3_key, 8 \* 1024 \* 1024\)/);
+  assert.match(service, /photograph unavailable during PDF generation/);
+  assert.doesNotMatch(service, /Promise\.all\(photoRows/);
+});
+
+test("generation failures return a structured non-sensitive API error", () => {
+  let status;
+  let body;
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    sendDailyReportError({ status(value) { status = value; return this; }, json(value) { body = value; return this; } }, new Error("S3 secret path detail"), "DAILY_REPORT_GENERATION_FAILED");
+  } finally { console.error = originalError; }
+  assert.equal(status, 500);
+  assert.deepEqual(body, { success: false, code: "DAILY_REPORT_GENERATION_FAILED", message: "Unable to process the Daily Report" });
+});
+
+test("localhost CORS permits both development hostnames and applies to normal errors", () => {
+  assert.ok(allowedCorsOrigins.has("http://localhost:5173"));
+  assert.ok(allowedCorsOrigins.has("http://127.0.0.1:5173"));
+  for (const origin of ["http://localhost:5173", "http://127.0.0.1:5173"]) {
+    corsOptions.origin(origin, (error, allowed) => { assert.equal(error, null); assert.equal(allowed, true); });
+  }
+});
+
 test("toIsoDate safely normalizes PostgreSQL Date instances, ISO strings, and raw dates without timezone shifts", () => {
   assert.equal(toIsoDate("2026-07-31"), "2026-07-31");
   assert.equal(toIsoDate("2026-07-31T00:00:00.000Z"), "2026-07-31");
@@ -104,4 +156,3 @@ test("toIsoDate safely normalizes PostgreSQL Date instances, ISO strings, and ra
   assert.equal(toIsoDate(""), null);
   assert.equal(toIsoDate("invalid-date-string"), null);
 });
-

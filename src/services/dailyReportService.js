@@ -3,7 +3,7 @@ import { pool } from "../config/db.js";
 import { createPresignedGetUrl, createPresignedPutUrl } from "../utils/s3Presign.js";
 import { writeAdminAudit } from "./adminAuditService.js";
 import { deletePrivateObject, readPrivateObject, writePrivateObject } from "./privateObjectService.js";
-import { generateDailyReportPdf } from "./dailyReportPdfService.js";
+import { generateDailyReportPdf, prepareDailyReportImage } from "./dailyReportPdfService.js";
 
 const EXECUTION_STAGES = Object.freeze([
   "preparation", "checklist", "report", "review", "report_confirmation",
@@ -243,10 +243,17 @@ export const updateDailyReport = async ({ requestId: requestIdValue, dailyReport
 
 const materializePdf = async (report, context, photoRows, status) => {
   const effectiveContext = status === "final" ? snapshot(context) : context;
-  const photos = await Promise.all(photoRows.map(async (photo) => ({
-    caption: photo.caption, inspectionArea: photo.inspection_area, relatedActivityId: photo.related_activity_id,
-    bytes: await readPrivateObject(photo.photo_s3_key, 8 * 1024 * 1024),
-  })));
+  const photos = [];
+  for (const photo of photoRows) {
+    const item = { caption: photo.caption, inspectionArea: photo.inspection_area, relatedActivityId: photo.related_activity_id };
+    try {
+      const sourceBytes = await readPrivateObject(photo.photo_s3_key, 8 * 1024 * 1024);
+      photos.push({ ...item, preparedImage: await prepareDailyReportImage(sourceBytes) });
+    } catch (error) {
+      console.warn("Daily Report photograph unavailable during PDF generation", { photoId: photo.id, message: error.message });
+      photos.push(item);
+    }
+  }
   return generateDailyReportPdf({
     report: { ...report, dayNumber: report.day_number, reportDate: toIsoDate(report.report_date || report.reportDate), data: report.data_jsonb, status, preparedBy: preparedBy(report) },
     context: effectiveContext, photos,
