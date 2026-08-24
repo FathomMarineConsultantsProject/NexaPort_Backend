@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { PDFDocument, PDFName } from "pdf-lib";
 import {
-  dailyReportFinalizationErrors, nextDailyReportNumber, normalizeDailyReportData, stageAllowsDailyReports,
+  dailyReportFinalizationErrors, nextDailyReportNumber, normalizeDailyReportData, stageAllowsDailyReports, toIsoDate,
 } from "../src/services/dailyReportService.js";
 import { generateDailyReportPdf } from "../src/services/dailyReportPdfService.js";
 import { WORKFLOW_STAGES } from "../src/services/inspectionWorkflowService.js";
@@ -94,3 +94,14 @@ test("professional Daily Report PDF is A4, multi-page, branded, and embeds evide
   assert.match(pdf.getTitle(), /Daily Inspection Report - Day 2 - IMPERIAL VARALAXMI/);
   assert.ok(output.length > 100000);
 });
+
+test("toIsoDate safely normalizes PostgreSQL Date instances, ISO strings, and raw dates without timezone shifts", () => {
+  assert.equal(toIsoDate("2026-07-31"), "2026-07-31");
+  assert.equal(toIsoDate("2026-07-31T00:00:00.000Z"), "2026-07-31");
+  assert.equal(toIsoDate(new Date(2026, 6, 31)), "2026-07-31");
+  assert.equal(toIsoDate(null), null);
+  assert.equal(toIsoDate(undefined), null);
+  assert.equal(toIsoDate(""), null);
+  assert.equal(toIsoDate("invalid-date-string"), null);
+});
+

@@ -19,14 +19,43 @@ const positiveId = (value, name = "id") => {
   return parsed;
 };
 const text = (value, max, fallback = "") => String(value ?? fallback).trim().slice(0, max);
+
+export const toIsoDate = (value) => {
+  if (!value) return null;
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return null;
+    const year = value.getFullYear();
+    const month = String(value.getMonth() + 1).padStart(2, "0");
+    const day = String(value.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+  const str = String(value).trim();
+  const match = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (match) return `${match[1]}-${match[2]}-${match[3]}`;
+  const parsed = new Date(str);
+  if (!Number.isNaN(parsed.getTime())) {
+    const year = parsed.getUTCFullYear();
+    const month = String(parsed.getUTCMonth() + 1).padStart(2, "0");
+    const day = String(parsed.getUTCDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+  return null;
+};
+
 const validDate = (value, name = "reportDate") => {
-  const result = String(value ?? "").slice(0, 10);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(result) || Number.isNaN(new Date(`${result}T00:00:00Z`).getTime())) throw fail(400, "INVALID_DAILY_REPORT", `${name} must be a valid date`);
+  const result = toIsoDate(value);
+  if (!result) throw fail(400, "INVALID_DAILY_REPORT", `${name} must be a valid date`);
   return result;
 };
+
 const nextDate = (value) => {
-  const date = new Date(`${String(value).slice(0, 10)}T00:00:00Z`);
-  date.setUTCDate(date.getUTCDate() + 1);
+  const iso = toIsoDate(value);
+  if (!iso) {
+    const now = new Date();
+    return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}-${String(now.getUTCDate()).padStart(2, "0")}`;
+  }
+  const [y, m, d] = iso.split("-").map(Number);
+  const date = new Date(Date.UTC(y, m - 1, d + 1));
   return date.toISOString().slice(0, 10);
 };
 const serviceLabel = (row) => row.service_type === "Other" ? text(row.service_type_other, 500, "Other") : text(row.service_category || row.service_type, 500);
@@ -115,7 +144,7 @@ const publicReport = (row, context, photos = []) => {
   const frozen = row.status === "final" && row.prefill_snapshot_jsonb && Object.keys(row.prefill_snapshot_jsonb).length ? row.prefill_snapshot_jsonb : snapshot(context);
   return {
     id: row.id, workflowId: row.workflow_id, serviceRequestId: row.service_request_id,
-    dayNumber: row.day_number, reportDate: String(row.report_date).slice(0, 10), status: String(row.status).toUpperCase(),
+    dayNumber: row.day_number, reportDate: toIsoDate(row.report_date), status: String(row.status).toUpperCase(),
     data: row.data_jsonb || {}, prefills: frozen, preparedBy: preparedBy(row), photos,
     generatedAt: row.generated_at, downloadUrl: safeUrl(row.generated_pdf_s3_key),
     finalizedAt: row.finalized_at, createdAt: row.created_at, updatedAt: row.updated_at, locked: row.status === "final",
@@ -171,7 +200,7 @@ export const createDailyReport = async ({ requestId: requestIdValue, actorUserId
     const context = requireExecution(await getContext(client, requestId, { lock: true }));
     const sequence = (await client.query("SELECT COALESCE(MAX(day_number),0)::int AS day_number,MAX(report_date) AS report_date FROM public.inspection_daily_reports WHERE workflow_id=$1", [context.workflow.id])).rows[0];
     const dayNumber = nextDailyReportNumber(sequence.day_number);
-    const fallbackDate = sequence.report_date ? nextDate(sequence.report_date) : String(context.request.requiredBy || new Date().toISOString()).slice(0, 10);
+    const fallbackDate = sequence.report_date ? nextDate(sequence.report_date) : toIsoDate(context.request.requiredBy) || toIsoDate(new Date());
     const reportDate = validDate(input.reportDate || fallbackDate);
     const data = normalizeDailyReportData(input.data || {}, defaultsFromContext(context, reportDate));
     const inserted = await client.query(
@@ -199,7 +228,7 @@ export const updateDailyReport = async ({ requestId: requestIdValue, dailyReport
     const context = requireExecution(await getContext(client, requestId, { lock: true }));
     const report = await fetchReport(client, context, dailyReportId, { lock: true });
     if (report.status === "final") throw fail(409, "DAILY_REPORT_FINAL", "Final Daily Reports are read-only");
-    const reportDate = input.reportDate ? validDate(input.reportDate) : String(report.report_date).slice(0, 10);
+    const reportDate = input.reportDate ? validDate(input.reportDate) : toIsoDate(report.report_date);
     const data = normalizeDailyReportData(input.data ?? report.data_jsonb, report.data_jsonb);
     await client.query("UPDATE public.inspection_daily_reports SET report_date=$1,data_jsonb=$2,generated_pdf_s3_key=NULL,generated_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=$3", [reportDate, JSON.stringify(data), report.id]);
     await writeAdminAudit(client, { actorUserId, action: "daily_report.updated", targetType: "inspection_daily_report", targetId: report.id, summary: `Updated Day ${report.day_number} Daily Report` });
@@ -219,7 +248,7 @@ const materializePdf = async (report, context, photoRows, status) => {
     bytes: await readPrivateObject(photo.photo_s3_key, 8 * 1024 * 1024),
   })));
   return generateDailyReportPdf({
-    report: { ...report, dayNumber: report.day_number, reportDate: String(report.report_date).slice(0, 10), data: report.data_jsonb, status, preparedBy: preparedBy(report) },
+    report: { ...report, dayNumber: report.day_number, reportDate: toIsoDate(report.report_date || report.reportDate), data: report.data_jsonb, status, preparedBy: preparedBy(report) },
     context: effectiveContext, photos,
   });
 };

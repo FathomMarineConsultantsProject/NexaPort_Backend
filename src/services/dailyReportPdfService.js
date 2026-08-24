@@ -14,11 +14,18 @@ const LINE = rgb(0.78, 0.82, 0.84);
 const PALE = rgb(0.95, 0.97, 0.97);
 const YELLOW = rgb(0.99, 0.79, 0.02);
 
+import { toIsoDate } from "./dailyReportService.js";
+
 const clean = (value, fallback = "Not provided") => String(value ?? "").trim() || fallback;
 const asDate = (value) => {
-  if (!value) return "Not provided";
-  const date = new Date(`${String(value).slice(0, 10)}T00:00:00Z`);
-  return Number.isNaN(date.getTime()) ? clean(value) : date.toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric", timeZone: "UTC" });
+  const iso = toIsoDate(value);
+  if (!iso) return "Not provided";
+  const [y, m, d] = iso.split("-").map(Number);
+  const months = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December"
+  ];
+  return `${String(d).padStart(2, "0")} ${months[m - 1]} ${y}`;
 };
 const wrap = (font, text, size, width) => {
   const words = clean(text).replace(/\s+/g, " ").split(" ");
