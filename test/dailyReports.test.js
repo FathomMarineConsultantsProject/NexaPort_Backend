@@ -119,10 +119,12 @@ test("large camera images are constrained before PDF embedding", async () => {
   assert.ok(prepared.bytes.length < sourceImage.length);
 });
 
-test("private S3 photo retrieval is sequential, bounded, and tolerates an unavailable object", async () => {
+test("private S3 photo retrieval is sequential, bounded, cached, and tolerates an unavailable object", async () => {
   const service = await source("../src/services/dailyReportService.js");
   assert.match(service, /for \(const photo of photoRows\)/);
-  assert.match(service, /readPrivateObject\(photo\.photo_s3_key, 8 \* 1024 \* 1024\)/);
+  assert.match(service, /readPrivateObject\(key, 8 \* 1024 \* 1024\)/);
+  assert.match(service, /const imageCache = new Map\(\)/);
+  assert.match(service, /imageCache\.set\(key, preparedImage\)/);
   assert.match(service, /photograph unavailable during PDF generation/);
   assert.doesNotMatch(service, /Promise\.all\(photoRows/);
 });

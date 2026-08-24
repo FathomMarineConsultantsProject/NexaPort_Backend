@@ -1,23 +1,35 @@
-import { createPresignedDeleteUrl, createPresignedGetUrl, createPresignedPutUrl } from "../utils/s3Presign.js";
+import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { getS3UploadConfig } from "../utils/s3Presign.js";
+
+let client;
+const getClient = () => {
+  if (client) return client;
+  const { region, accessKeyId, secretAccessKey } = getS3UploadConfig();
+  client = new S3Client({ region, credentials: { accessKeyId, secretAccessKey } });
+  return client;
+};
+
+export const setPrivateObjectClientForTests = (value) => { client = value; };
+
+const objectConfig = () => {
+  const { bucket } = getS3UploadConfig();
+  return { Bucket: bucket };
+};
 
 export async function readPrivateObject(key, maxBytes = 12 * 1024 * 1024) {
-  const { url } = createPresignedGetUrl({ key, expiresInSeconds: 120 });
-  const response = await fetch(url);
-  if (!response.ok) throw new Error("Private source file could not be read.");
-  const length = Number(response.headers.get("content-length"));
+  const response = await getClient().send(new GetObjectCommand({ ...objectConfig(), Key: key }));
+  const length = Number(response.ContentLength);
   if (length && length > maxBytes) throw new Error("Private source file exceeds the supported size.");
-  const bytes = Buffer.from(await response.arrayBuffer());
+  if (!response.Body) throw new Error("Private source file could not be read.");
+  const bytes = Buffer.from(await response.Body.transformToByteArray());
   if (bytes.length > maxBytes) throw new Error("Private source file exceeds the supported size.");
   return bytes;
 }
 
 export async function deletePrivateObject(key) {
-  const response = await fetch(createPresignedDeleteUrl({ key } ), { method: "DELETE" });
-  if (!response.ok && response.status !== 404) throw new Error("Temporary source file could not be deleted.");
+  await getClient().send(new DeleteObjectCommand({ ...objectConfig(), Key: key }));
 }
 
 export async function writePrivateObject(key, contentType, bytes) {
-  const uploadUrl = createPresignedPutUrl({ key, contentType, expiresIn: 120 });
-  const response = await fetch(uploadUrl, { method: "PUT", headers: { "content-type": contentType }, body: bytes });
-  if (!response.ok) throw new Error("Generated report could not be stored.");
+  await getClient().send(new PutObjectCommand({ ...objectConfig(), Key: key, ContentType: contentType, Body: bytes }));
 }

@@ -241,14 +241,21 @@ export const updateDailyReport = async ({ requestId: requestIdValue, dailyReport
   } finally { client.release(); }
 };
 
-const materializePdf = async (report, context, photoRows, status) => {
+export const materializeDailyReportPdf = async (report, context, photoRows, status) => {
   const effectiveContext = status === "final" ? snapshot(context) : context;
   const photos = [];
+  const imageCache = new Map();
   for (const photo of photoRows) {
     const item = { caption: photo.caption, inspectionArea: photo.inspection_area, relatedActivityId: photo.related_activity_id };
     try {
-      const sourceBytes = await readPrivateObject(photo.photo_s3_key, 8 * 1024 * 1024);
-      photos.push({ ...item, preparedImage: await prepareDailyReportImage(sourceBytes) });
+      const key = photo.photo_s3_key;
+      let preparedImage = imageCache.get(key);
+      if (!preparedImage) {
+        const sourceBytes = await readPrivateObject(key, 8 * 1024 * 1024);
+        preparedImage = await prepareDailyReportImage(sourceBytes);
+        imageCache.set(key, preparedImage);
+      }
+      photos.push({ ...item, preparedImage });
     } catch (error) {
       console.warn("Daily Report photograph unavailable during PDF generation", { photoId: photo.id, message: error.message });
       photos.push(item);
@@ -267,7 +274,7 @@ export const generateDailyReport = async ({ requestId: requestIdValue, dailyRepo
   const report = await fetchReport(pool, context, dailyReportId);
   if (report.status === "final" && report.generated_pdf_s3_key) return getDailyReport(requestId, report.id);
   const photos = await fetchPhotos(pool, report.id);
-  const bytes = await materializePdf(report, context, photos, report.status);
+  const bytes = await materializeDailyReportPdf(report, context, photos, report.status);
   const key = `inspection-daily-reports/workflows/${context.workflow.id}/reports/${report.id}/generated/${report.status}-${crypto.randomUUID()}.pdf`;
   await writePrivateObject(key, "application/pdf", bytes);
   const client = await pool.connect();
@@ -293,7 +300,7 @@ export const finalizeDailyReport = async ({ requestId: requestIdValue, dailyRepo
   const fieldErrors = dailyReportFinalizationErrors(report, context);
   if (fieldErrors.length) throw fail(400, "DAILY_REPORT_INCOMPLETE", "Complete the required Daily Report information before finalizing", { fieldErrors });
   const photos = await fetchPhotos(pool, report.id);
-  const bytes = await materializePdf(report, context, photos, "final");
+  const bytes = await materializeDailyReportPdf(report, context, photos, "final");
   const key = `inspection-daily-reports/workflows/${context.workflow.id}/reports/${report.id}/generated/final-${crypto.randomUUID()}.pdf`;
   await writePrivateObject(key, "application/pdf", bytes);
   const client = await pool.connect();
