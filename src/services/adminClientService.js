@@ -129,19 +129,11 @@ const updateColumns = async (client, table, values, allowed, keyColumn, keyValue
   await client.query(`UPDATE ${table} SET ${entries.map(([field], index) => `${field}=$${index + 1}`).join(",")},updated_at=CURRENT_TIMESTAMP WHERE ${keyColumn}=$${params.length}`, params);
 };
 
-const assertUniqueClientValues = async (client, userId, profileId, user, company) => {
+const assertUniqueAccountEmail = async (client, userId, user) => {
   const errors = {};
   if (Object.hasOwn(user, "email")) {
     const duplicate = await client.query(`SELECT id FROM users WHERE LOWER(email)=LOWER($1) AND id<>$2 LIMIT 1`, [normalized(user.email), userId]);
     if (duplicate.rows.length) errors["user.email"] = "Email is already in use.";
-  }
-  if (clean(company.registration_number) && clean(company.country)) {
-    const duplicate = await client.query(`SELECT id FROM client_companies WHERE LOWER(TRIM(country))=LOWER(TRIM($1)) AND LOWER(TRIM(registration_number))=LOWER(TRIM($2)) AND client_profile_id<>$3 LIMIT 1`, [company.country, company.registration_number, profileId || 0]);
-    if (duplicate.rows.length) errors["company.registration_number"] = "Registration number is already in use in this country.";
-  }
-  if (clean(company.imo_company_number)) {
-    const duplicate = await client.query(`SELECT id FROM client_companies WHERE LOWER(TRIM(imo_company_number))=LOWER(TRIM($1)) AND client_profile_id<>$2 LIMIT 1`, [company.imo_company_number, profileId || 0]);
-    if (duplicate.rows.length) errors["company.imo_company_number"] = "IMO Company Number is already in use.";
   }
   if (Object.keys(errors).length) throw validationError(errors);
 };
@@ -162,7 +154,7 @@ export const updateAdminClient = async (userId, payload, actorUserId) => {
     for (const field of Object.keys(company)) company[field] = field.includes("email") ? (nullable(company[field]) && normalized(company[field])) : nullable(company[field]);
     const existingCompany = target.rows[0].profile_id ? await client.query(`SELECT id,legal_name,company_type,registered_address,country,registration_number,website,imo_company_number,tax_number,authorized_representative_name,authorized_representative_designation,authorized_representative_email,authorized_representative_phone FROM client_companies WHERE client_profile_id=$1`, [target.rows[0].profile_id]) : { rows: [] };
     validatePatch({ user, profile, company: { ...(existingCompany.rows[0] || {}), ...company } }, { creatingCompany: Object.keys(company).length > 0 && !existingCompany.rows.length });
-    await assertUniqueClientValues(client, userId, target.rows[0].profile_id, user, { ...(existingCompany.rows[0] || {}), ...company });
+    await assertUniqueAccountEmail(client, userId, user);
     await updateColumns(client, "users", user, USER_FIELDS, "id", userId);
     let profileId = target.rows[0].profile_id;
     if (Object.keys(profile).length || Object.keys(company).length) profileId = await ensureProfile(client, userId, profileId);

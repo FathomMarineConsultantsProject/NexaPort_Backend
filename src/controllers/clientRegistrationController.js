@@ -37,6 +37,27 @@ const SERVICE_NAMES = [
 const emailValid = (email) => /^\S+@\S+\.\S+$/.test(email);
 const clean = (value) => String(value ?? "").trim();
 const optional = (value) => clean(value) || null;
+const canReuseAccount = (requestUser, account) => Boolean(
+  account && Number(account.role_id) === 3 && requestUser &&
+  (Number(requestUser.id) === Number(account.id) || Number(requestUser.role_id) === 1)
+);
+
+export const clientRegistrationDatabaseError = (error) => {
+  if (error?.code !== "23505") return null;
+  const constraint = String(error.constraint || "").toLowerCase();
+  const detail = String(error.detail || "").toLowerCase();
+  const table = String(error.table || "").toLowerCase();
+  if ((table === "users" || constraint.includes("users")) && (constraint.includes("email") || detail.includes("(email)"))) {
+    return { status: 409, code: "ACCOUNT_EMAIL_EXISTS", message: "This login email belongs to another account. Sign in with that account to continue registration." };
+  }
+  if ((table === "users" || constraint.includes("users")) && (constraint.includes("username") || detail.includes("(username)"))) {
+    return { status: 409, code: "ACCOUNT_USERNAME_EXISTS", message: "The generated account username conflicted. Please submit the registration again." };
+  }
+  if (constraint.includes("client_profiles") && (constraint.includes("user") || detail.includes("(user_id)"))) {
+    return { status: 409, code: "CLIENT_REGISTRATION_EXISTS", message: "This account already has a Client registration." };
+  }
+  return null;
+};
 
 const rateBuckets = new Map();
 const consumeRateLimit = ({ scope, keys, limit, windowMs }) => {
@@ -66,8 +87,10 @@ export const createClientRegistrationDraft = async (req, res) => {
   }
 
   try {
-    const existing = await pool.query(`SELECT id FROM users WHERE LOWER(email) = $1 LIMIT 1`, [email]);
-    if (existing.rows.length) return res.status(409).json({ success: false, message: "An account with this email already exists." });
+    const existing = await pool.query(`SELECT id, role_id FROM users WHERE LOWER(email) = $1 LIMIT 1`, [email]);
+    if (existing.rows.length && !canReuseAccount(req.user, existing.rows[0])) {
+      return res.status(409).json({ success: false, code: "ACCOUNT_EMAIL_EXISTS", message: "This login email belongs to another account. Sign in with that account to continue registration." });
+    }
     const draftId = crypto.randomUUID();
     const registrationDraftToken = createRegistrationDraftToken({ email, draftId });
     return res.json({ success: true, registrationDraftToken, expiresIn: process.env.CLIENT_REGISTRATION_TOKEN_TTL || "60m" });
@@ -199,19 +222,32 @@ export const registerClient = async (req, res) => {
   try {
     await client.query("BEGIN");
     transactionOpen = true;
-    const duplicate = await client.query(`SELECT id FROM users WHERE LOWER(email) = $1 LIMIT 1`, [email]);
-    if (duplicate.rows.length) {
+    const accountResult = await client.query(
+      `SELECT id, full_name, email, username, role_id, phone, is_active, created_at FROM users WHERE LOWER(email) = $1 LIMIT 1 FOR UPDATE`,
+      [email]
+    );
+    const existingAccount = accountResult.rows[0] || null;
+    if (existingAccount && !canReuseAccount(req.user, existingAccount)) {
       await client.query("ROLLBACK");
-      return res.status(409).json({ success: false, message: "An account with this email already exists." });
+      return res.status(409).json({ success: false, code: "ACCOUNT_EMAIL_EXISTS", message: "This login email belongs to another account. Sign in with that account to continue registration." });
     }
 
-    const username = await generatedUsername(client, email);
-    const passwordHash = await bcrypt.hash(body.password, 10);
-    const userResult = await client.query(
-      `INSERT INTO users (full_name, email, username, password_hash, role_id, phone, is_active) VALUES ($1,$2,$3,$4,3,$5,true) RETURNING id, full_name, email, username, role_id, phone, is_active, created_at`,
-      [clean(body.full_name), email, username, passwordHash, clean(body.mobile_number)]
-    );
-    const user = userResult.rows[0];
+    let user = existingAccount;
+    if (user) {
+      const existingProfile = await client.query(`SELECT id FROM client_profiles WHERE user_id=$1 LIMIT 1 FOR UPDATE`, [user.id]);
+      if (existingProfile.rows.length) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({ success: false, code: "CLIENT_REGISTRATION_EXISTS", message: "This account already has a Client registration. Continue from your verification status page." });
+      }
+    } else {
+      const username = await generatedUsername(client, email);
+      const passwordHash = await bcrypt.hash(body.password, 10);
+      const userResult = await client.query(
+        `INSERT INTO users (full_name, email, username, password_hash, role_id, phone, is_active) VALUES ($1,$2,$3,$4,3,$5,true) RETURNING id, full_name, email, username, role_id, phone, is_active, created_at`,
+        [clean(body.full_name), email, username, passwordHash, clean(body.mobile_number)]
+      );
+      user = userResult.rows[0];
+    }
     const profileResult = await client.query(
       `INSERT INTO client_profiles (user_id, designation, declared_vessel_count, verification_status, verification_submitted_at) VALUES ($1,$2,$3,'pending',CURRENT_TIMESTAMP) RETURNING *`,
       [user.id, clean(body.designation), Number(body.declared_vessel_count)]
@@ -283,8 +319,9 @@ export const registerClient = async (req, res) => {
     if (transactionOpen) {
       try { await client.query("ROLLBACK"); } catch {}
     }
-    if (error.code === "23505") return res.status(409).json({ success: false, message: "Email, company registration number, IMO company number, or another unique value already exists." });
-    console.error("Client registration transaction failed", { name: error?.name, code: error?.code });
+    const knownConflict = clientRegistrationDatabaseError(error);
+    if (knownConflict) return res.status(knownConflict.status).json({ success: false, code: knownConflict.code, message: knownConflict.message });
+    console.error("Client registration transaction failed", { name: error?.name, code: error?.code, table: error?.table, constraint: error?.constraint });
     return res.status(500).json({ success: false, code: "CLIENT_REGISTRATION_FAILED", message: "Unable to create Client registration." });
   } finally {
     client.release();

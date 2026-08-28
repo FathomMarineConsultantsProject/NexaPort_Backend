@@ -44,7 +44,7 @@ test("generic Client editing is allowlisted and excludes account activation and 
   assert.doesNotMatch(userFields, /is_active|role_id|password/);
   assert.doesNotMatch(profileFields, /verification_status|verified_at|verified_by_user_id/);
   assert.match(service, /LOWER\(email\)=LOWER\(\$1\)/);
-  assert.match(service, /LOWER\(TRIM\(country\)\).*LOWER\(TRIM\(registration_number\)\)/s);
+  assert.doesNotMatch(service, /Registration number is already in use|IMO Company Number is already in use/);
   assert.match(service, /code: "CLIENT_VALIDATION_FAILED"/);
 });
 

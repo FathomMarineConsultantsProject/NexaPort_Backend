@@ -120,7 +120,10 @@ export const updateMyClientOnboarding = async (req, res) => {
     return res.json({ success: true, message: "Client registration updated.", data: await getOnboardingData(pool, refreshed) });
   } catch (error) {
     await client.query("ROLLBACK");
-    if (error.code === "23505") return res.status(409).json({ success: false, message: "Company registration or IMO company number already exists." });
+    if (error?.code) {
+      console.error("Client onboarding update failed", { name: error?.name, code: error?.code, table: error?.table, constraint: error?.constraint });
+      return res.status(500).json({ success: false, code: "CLIENT_ONBOARDING_UPDATE_FAILED", message: "Failed to update Client registration." });
+    }
     return res.status(400).json({ success: false, message: error.message || "Failed to update Client registration." });
   } finally {
     client.release();

@@ -63,6 +63,34 @@ export const createRequireAuth = ({
 
 export const requireAuth = createRequireAuth();
 
+// Public registration routes may also be used by a signed-in Client.  An absent
+// or non-account bearer token is ignored because the registration draft token is
+// validated separately by the controller.  A valid account token is resolved
+// against the database so an existing account can be reused safely.
+export const optionalAuth = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith("Bearer ") || !process.env.JWT_SECRET) return next();
+  let decoded;
+  try {
+    decoded = jwt.verify(authHeader.slice(7), process.env.JWT_SECRET);
+  } catch {
+    return next();
+  }
+  if (!decoded?.id) return next();
+  try {
+    const current = await pool.query(
+      `SELECT id, full_name, email, username, role_id, is_active FROM users WHERE id = $1 LIMIT 1`,
+      [decoded.id]
+    );
+    if (!current.rows[0]?.is_active) return res.status(401).json({ success: false, code: "ACCOUNT_INACTIVE", message: "This account is inactive or no longer exists" });
+    req.user = current.rows[0];
+    return next();
+  } catch (error) {
+    console.error("Optional authentication database lookup failed", { category: "database_unavailable", code: safeDatabaseErrorCode(error) });
+    return res.status(503).json({ success: false, message: "Authentication service temporarily unavailable" });
+  }
+};
+
 export const allowRoles = (...roles) => {
   return (req, res, next) => {
     if (!roles.includes(Number(req.user.role_id))) {

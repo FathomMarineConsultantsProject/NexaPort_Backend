@@ -5,7 +5,7 @@ import {
   presignConsultantUpload,
   registerConsultant,
 } from "../controllers/consultantRegistrationController.js";
-import { requireAuth } from "../middlewares/authMiddleware.js";
+import { optionalAuth, requireAuth } from "../middlewares/authMiddleware.js";
 import {
   confirmClientRegistrationDocument,
   createClientRegistrationDraft,
@@ -17,10 +17,10 @@ import { registerCompany } from "../controllers/maritimeCompanyController.js";
 const router = express.Router();
 
 router.post("/register", register);
-router.post("/client-registration/draft", createClientRegistrationDraft);
+router.post("/client-registration/draft", optionalAuth, createClientRegistrationDraft);
 router.post("/client-registration/documents/upload-url", presignClientRegistrationDocument);
 router.post("/client-registration/documents/confirm", confirmClientRegistrationDocument);
-router.post("/register-client", registerClient);
+router.post("/register-client", optionalAuth, registerClient);
 router.post("/register-consultant/upload-url", presignConsultantUpload);
 router.post("/register-consultant", registerConsultant);
 router.post("/register-maritime-company", registerCompany);
