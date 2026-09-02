@@ -115,7 +115,7 @@ const normalizeFlagServices = (body, errors) => {
   };
 };
 
-const normalizeSubmittedPorts = (ports, errors) => {
+export const normalizeSubmittedPorts = (ports, errors) => {
   if (!Array.isArray(ports)) {
     errors.push("Ports must be an array");
     return [];
@@ -130,8 +130,8 @@ const normalizeSubmittedPorts = (ports, errors) => {
       return;
     }
 
-    const clean = port.trim();
-    if (!clean || clean.length > 200) {
+    const clean = port.trim().replace(/\s+/g, " ");
+    if (!clean || clean.length > 200 || /[<>]/.test(clean)) {
       errors.push("Ports must contain valid port names");
       return;
     }
@@ -146,7 +146,7 @@ const normalizeSubmittedPorts = (ports, errors) => {
   return normalized;
 };
 
-const validateCanonicalPorts = async (client, submittedPorts) => {
+export const resolveCoveragePorts = async (client, submittedPorts) => {
   if (!submittedPorts.length) return [];
 
   const normalizedNames = submittedPorts.map((port) => port.toLowerCase());
@@ -164,11 +164,16 @@ const validateCanonicalPorts = async (client, submittedPorts) => {
     result.rows.map((row) => [row.port_name.trim().toLowerCase(), row.port_name])
   );
 
-  if (canonicalByName.size !== normalizedNames.length) {
-    throw new Error("Every selected port must exist and be active");
-  }
+  return submittedPorts.map((name) => canonicalByName.get(name.toLowerCase()) || name);
+};
 
-  return normalizedNames.map((name) => canonicalByName.get(name));
+export const persistExpertPorts = async (client, expertId, ports) => {
+  for (const portName of ports) {
+    await client.query(
+      `INSERT INTO expert_ports (expert_id, port_name) VALUES ($1, $2)`,
+      [expertId, portName]
+    );
+  }
 };
 
 const validateActiveFlags = async (client, flagServices) => {
@@ -497,15 +502,10 @@ export const registerConsultant = async (req, res) => {
 
     const expert = expertResult.rows[0];
 
-    const canonicalPorts = await validateCanonicalPorts(client, data.ports);
+    const coveragePorts = await resolveCoveragePorts(client, data.ports);
     await validateActiveFlags(client, data.flagServices);
 
-    for (const portName of canonicalPorts) {
-      await client.query(
-        `INSERT INTO expert_ports (expert_id, port_name) VALUES ($1, $2)`,
-        [expert.id, portName]
-      );
-    }
+    await persistExpertPorts(client, expert.id, coveragePorts);
 
     for (const flagService of data.flagServices) {
       const expertFlagResult = await client.query(

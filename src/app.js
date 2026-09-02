@@ -24,6 +24,7 @@ import flagRoutes from "./routes/flagRoutes.js";
 import appointedSurveyorRoutes from "./routes/appointedSurveyorRoutes.js";
 import inspectorDirectoryRoutes from "./routes/inspectorDirectoryRoutes.js";
 import publicStatsRoutes from "./routes/publicStatsRoutes.js";
+import publicPortRoutes from "./routes/publicPortRoutes.js";
 import maritimeDirectoryRoutes from "./routes/maritimeDirectoryRoutes.js";
 import maritimeCompanyRoutes from "./routes/maritimeCompanyRoutes.js";
 import templateRoutes from "./routes/templateRoutes.js";
@@ -75,6 +76,7 @@ app.use("/api", testRoutes);
 
 app.use("/api/auth", authRoutes);
 app.use("/api/public", publicStatsRoutes);
+app.use("/api/public", publicPortRoutes);
 
 //Main APIs
 app.use("/api/users", userRoutes);
