@@ -398,7 +398,9 @@ test("client verification documents are optional without allowing duplicate cate
 });
 
 test("generic public registration cannot accept role 1 or role 2", async () => {
-  const controller = await readFile(new URL("../src/controllers/authController.js", import.meta.url), "utf8");
+  const source = await readFile(new URL("../src/controllers/authController.js", import.meta.url), "utf8");
+  // Scope this assertion to public registration; authenticated role switching validates membership separately.
+  const controller = source.slice(source.indexOf("export const register ="), source.indexOf("export const login ="));
   assert.match(controller, /passwordHash,\s*3,\s*phone/);
   assert.doesNotMatch(controller, /req\.body\.(role|role_id)|requestedRoleId/);
 });

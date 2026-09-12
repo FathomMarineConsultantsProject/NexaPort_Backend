@@ -1,4 +1,5 @@
 import { pool } from "../config/db.js";
+import { activateRole } from "../services/userRoleService.js";
 import { createPresignedGetUrl } from "../utils/s3Presign.js";
 
 const roleName = (roleId) => {
@@ -48,6 +49,7 @@ export const getMyProfile = async (req, res) => {
       photo_s3_key: photoS3Key,
       ...user
     } = result.rows[0];
+    Object.assign(user, activateRole(user, req.user.roles || [Number(req.user.role_id)], req.user.role_id));
     const photo =
       Number(user.role_id) === 2 && photoS3Key
         ? createPresignedGetUrl({ key: photoS3Key })
@@ -105,6 +107,11 @@ export const updateMyProfile = async (req, res) => {
     );
 
     const user = result.rows[0];
+    Object.assign(user, activateRole(user, req.user.roles || [Number(req.user.role_id)], req.user.role_id));
+    if (user.role_id === 3) {
+      const profile = await pool.query("SELECT verification_status FROM client_profiles WHERE user_id=$1", [user.id]);
+      user.verification_status = profile.rows[0]?.verification_status || "missing";
+    }
 
     res.json({
       success: true,

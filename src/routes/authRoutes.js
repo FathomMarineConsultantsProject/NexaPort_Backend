@@ -1,6 +1,6 @@
 import express from "express";
 import { register, login, getMe, sendForgotPasswordOtp,
-  resetForgottenPassword, } from "../controllers/authController.js";
+  resetForgottenPassword, switchRole, } from "../controllers/authController.js";
 import {
   presignConsultantUpload,
   registerConsultant,
@@ -26,6 +26,7 @@ router.post("/register-consultant", registerConsultant);
 router.post("/register-maritime-company", registerCompany);
 router.post("/login", login);
 router.get("/me", requireAuth, getMe);
+router.post("/switch-role", requireAuth, switchRole);
 router.post(
   "/forgot-password/send-otp",
   sendForgotPasswordOtp

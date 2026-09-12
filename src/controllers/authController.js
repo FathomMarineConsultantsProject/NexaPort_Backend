@@ -1,6 +1,7 @@
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import { pool } from "../config/db.js";
+import { loadUserRoles, activateRole } from "../services/userRoleService.js";
 import { sendPasswordResetOtp } from "../services/emailService.js";
 import {
   generateOtp,
@@ -16,6 +17,7 @@ export const createToken = (user) => {
       email: user.email,
       username: user.username,
       role_id: user.role_id,
+      ...(user.active_role !== undefined ? { active_role: user.active_role } : {}),
     },
     process.env.JWT_SECRET,
     { expiresIn: process.env.JWT_EXPIRES_IN || "7d" }
@@ -152,9 +154,9 @@ export const login = async (req, res) => {
       LEFT JOIN client_profiles cp ON cp.user_id = u.id
       LEFT JOIN public.maritime_company_accounts mca ON mca.user_id = u.id
       LEFT JOIN public.maritime_directory_entities mde ON mde.id = mca.entity_id
-      WHERE u.email = $1 OR u.username = $1
+      WHERE LOWER(u.email) = $1 OR LOWER(u.username) = $1
       `,
-      [identifier.toLowerCase()]
+      [identifier.trim().toLowerCase()]
     );
 
     if (!result.rows.length) {
@@ -183,6 +185,7 @@ export const login = async (req, res) => {
     }
 
     delete user.password_hash;
+    Object.assign(user, activateRole(user, await loadUserRoles(pool, user)));
     if (Number(user.role_id) === 3 && !user.verification_status) {
       user.verification_status = "missing";
     }
@@ -220,6 +223,10 @@ export const getMe = async (req, res) => {
       [req.user.id]
     );
 
+    if (result.rows[0]) Object.assign(result.rows[0], activateRole(
+      result.rows[0], await loadUserRoles(pool, result.rows[0]), req.user.role_id
+    ));
+
     res.json({
       success: true,
       data: result.rows[0]
@@ -238,6 +245,29 @@ export const getMe = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to fetch profile",
+    });
+  }
+};
+
+export const switchRole = async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT u.id,u.full_name,u.email,u.username,u.role_id,u.is_active,u.phone,
+        COALESCE(cp.verification_status,mde.review_status) AS verification_status,
+        CASE WHEN mca.user_id IS NOT NULL THEN 'maritime_company' END AS account_type
+       FROM users u LEFT JOIN client_profiles cp ON cp.user_id=u.id
+       LEFT JOIN maritime_company_accounts mca ON mca.user_id=u.id
+       LEFT JOIN maritime_directory_entities mde ON mde.id=mca.entity_id WHERE u.id=$1`, [req.user.id]
+    );
+    const current = result.rows[0];
+    if (!current?.is_active) return res.status(401).json({ success: false, message: "Account is inactive" });
+    if (!Number.isInteger(req.body?.role_id)) return res.status(400).json({ success: false, message: "A numeric role_id is required" });
+    const user = activateRole(current, await loadUserRoles(pool, current), req.body.role_id);
+    if (user.role_id === 3 && !user.verification_status) user.verification_status = "missing";
+    return res.json({ success: true, user, token: createToken(user) });
+  } catch (error) {
+    return res.status(error.status === 403 ? 403 : 503).json({
+      success: false, message: error.status === 403 ? "Role is not assigned to this account" : "Role switching temporarily unavailable",
     });
   }
 };

@@ -1,5 +1,14 @@
 import jwt from "jsonwebtoken";
 import { pool } from "../config/db.js";
+import { loadUserRoles, activateRole } from "../services/userRoleService.js";
+
+const queryCurrentUser = async (userId) => {
+  const result = await pool.query(
+    `SELECT id, full_name, email, username, role_id, is_active FROM users WHERE id = $1 LIMIT 1`, [userId]
+  );
+  if (result.rows[0]) result.rows[0].roles = await loadUserRoles(pool, result.rows[0]);
+  return result;
+};
 
 const safeDatabaseErrorCode = (error) => {
   const code = String(error?.code || "UNKNOWN").toUpperCase();
@@ -8,10 +17,7 @@ const safeDatabaseErrorCode = (error) => {
 
 export const createRequireAuth = ({
   verifyToken = (token) => jwt.verify(token, process.env.JWT_SECRET),
-  queryUser = (userId) => pool.query(
-    `SELECT id, full_name, email, username, role_id, is_active FROM users WHERE id = $1 LIMIT 1`,
-    [userId]
-  ),
+  queryUser = queryCurrentUser,
   logError = console.error,
 } = {}) => async (req, res, next) => {
   const authHeader = req.headers.authorization;
@@ -57,7 +63,13 @@ export const createRequireAuth = ({
     });
   }
 
-  req.user = user;
+  try {
+    // Old tokens keep using the current database default; new tokens carry an explicit active role.
+    req.user = decoded.active_role === undefined ? user
+      : activateRole(user, user.roles || [Number(user.role_id)], decoded.active_role);
+  } catch {
+    return res.status(403).json({ success: false, message: "Active role is no longer assigned" });
+  }
   next();
 };
 
@@ -78,12 +90,13 @@ export const optionalAuth = async (req, res, next) => {
   }
   if (!decoded?.id) return next();
   try {
-    const current = await pool.query(
-      `SELECT id, full_name, email, username, role_id, is_active FROM users WHERE id = $1 LIMIT 1`,
-      [decoded.id]
-    );
+    const current = await queryCurrentUser(decoded.id);
     if (!current.rows[0]?.is_active) return res.status(401).json({ success: false, code: "ACCOUNT_INACTIVE", message: "This account is inactive or no longer exists" });
-    req.user = current.rows[0];
+    try {
+      req.user = activateRole(current.rows[0], current.rows[0].roles, decoded.active_role ?? current.rows[0].role_id);
+    } catch {
+      return res.status(403).json({ success: false, message: "Active role is no longer assigned" });
+    }
     return next();
   } catch (error) {
     console.error("Optional authentication database lookup failed", { category: "database_unavailable", code: safeDatabaseErrorCode(error) });

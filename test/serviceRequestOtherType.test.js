@@ -34,10 +34,11 @@ const createClient = (capture) => ({
         service_type: values[0],
         service_category: values[1],
         service_type_other: values[2],
-        title: values[3],
-        scope_of_work: values[4],
-        moderation_status: values[20],
-        status: values[21],
+        inspection_method_id: values[3],
+        title: values[4],
+        scope_of_work: values[5],
+        moderation_status: values[21],
+        status: values[22],
       }] };
     }
     return { rows: [] };
@@ -77,6 +78,7 @@ test("Other request with valid details succeeds and returns camelCase details", 
 test("Other request stores canonical type, category, and trimmed details", async () => {
   const { capture } = await runCreate({ ...baseBody, serviceType: "Other", serviceTypeOther: "  Specialist rigging review  " });
   assert.deepEqual(capture.values.slice(0, 3), ["Other", "Other", "Specialist rigging review"]);
+  assert.equal(capture.values[3], null);
   assert.match(capture.sql, /service_type_other/);
 });
 
@@ -127,7 +129,7 @@ const runAdminUpdate = async (existing, body) => {
       if (/UPDATE service_requests SET/.test(sql)) {
         capture.sql = sql;
         capture.values = values;
-        return { rows: [{ ...existing, service_type: values[0], service_category: values[1], service_type_other: values[2] }] };
+        return { rows: [{ ...existing, service_type: values[0], service_category: values[1], service_type_other: values[2], inspection_method_id: values[3] }] };
       }
       return { rows: [] };
     },
@@ -146,11 +148,13 @@ test("Super Admin can edit a normal request into Other", async () => {
   const { capture, res } = await runAdminUpdate({ id: 7, moderation_status: "pending", service_type: "Audit", service_category: "Internal", service_type_other: null }, { serviceType: "Other", serviceTypeOther: "  Propeller balancing  " });
   assert.equal(res.statusCode, 200);
   assert.deepEqual(capture.values.slice(0, 3), ["Other", "Other", "Propeller balancing"]);
+  assert.equal(capture.values[3], null);
 });
 
 test("Super Admin can edit Other into a normal type and clears the column", async () => {
   const { capture } = await runAdminUpdate({ id: 7, moderation_status: "pending", service_type: "Other", service_category: "Other", service_type_other: "Old details" }, { serviceType: "Inspection", serviceCategory: "Pre-purchase" });
   assert.deepEqual(capture.values.slice(0, 3), ["Inspection", "Pre-purchase", null]);
+  assert.equal(capture.values[3], null);
 });
 
 test("Consultant-safe response includes Other service details", async () => {
@@ -171,7 +175,7 @@ test("Consultant-safe response still hides protected request fields", async () =
   const res = response();
   try {
     await getServiceRequests({ query: {}, user: { id: 2, role_id: 2 } }, res);
-    assert.deepEqual(Object.keys(res.body.data[0]).sort(), ["id", "inspectionDate", "inspectionType", "portOfInspection", "serviceType", "serviceTypeOther", "vesselType"].sort());
+    assert.deepEqual(Object.keys(res.body.data[0]).sort(), ["id", "inspectionDate", "inspectionMethodId", "inspectionType", "inspectionVertical", "portOfInspection", "serviceType", "serviceTypeOther", "vesselType"].sort());
   } finally {
     pool.query = originalQuery;
   }
@@ -179,7 +183,7 @@ test("Consultant-safe response still hides protected request fields", async () =
 
 test("request moderation remains pending on creation", async () => {
   const { capture, res } = await runCreate(baseBody);
-  assert.equal(capture.values[20], "pending");
+  assert.equal(capture.values[21], "pending");
   assert.equal(res.body.data.moderationStatus, "pending");
 });
 

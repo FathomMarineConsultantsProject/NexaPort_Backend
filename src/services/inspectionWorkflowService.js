@@ -26,7 +26,7 @@ const positiveId = (value, name = "id") => {
   if (!Number.isInteger(parsed) || parsed <= 0) throw workflowError(400, "INVALID_ID", `${name} must be a positive integer`);
   return parsed;
 };
-const serviceLabelSql = `CASE WHEN sr.service_type='Other' THEN COALESCE(NULLIF(TRIM(sr.service_type_other),''),'Other') ELSE COALESCE(NULLIF(TRIM(sr.service_category),''),sr.service_type) END`;
+const serviceLabelSql = `CASE WHEN sr.service_type='Other' THEN COALESCE(NULLIF(TRIM(sr.service_type_other),''),'Other') ELSE COALESCE(NULLIF(TRIM(sr.service_type),''),sr.service_category) END`;
 
 const mapQuote = (row) => {
   if (!row) return null;
@@ -135,7 +135,7 @@ export const getInspectionWorkflow = async (requestIdValue, queryable = pool) =>
   const closeout=workflow?await getInvoiceWorkflowState(requestId,queryable):{inspectionCompletion:{completed:false,completedAt:null},invoice:null};
   return {
     workflow: workflow ? { id:workflow.id,currentStage:workflow.current_stage,selectedQuotationId:workflow.selected_quotation_id,startedAt:workflow.started_at,completedAt:workflow.completed_at,createdAt:workflow.created_at,updatedAt:workflow.updated_at } : null,
-    request: { id:request.id,reference:request.title||`Request #${request.id}`,title:request.title,serviceType:request.service_type,serviceCategory:request.service_category,serviceTypeOther:request.service_type_other,service:request.service_label,scope:request.scope_of_work,urgency:request.urgency,requiredBy:request.required_by,status:request.status,moderationStatus:request.moderation_status,approvedBudgetUsd:request.approved_budget_usd==null?null:Number(request.approved_budget_usd),vessel:{name:request.vessel_name,imoNumber:request.imo_number,type:request.vessel_type,flag:request.flag_state},port:{name:request.port_name,country:request.country,eta:request.eta,locationSummary:request.location_summary} },
+    request: { id:request.id,reference:request.title||`Request #${request.id}`,title:request.title,inspectionMethodId:request.inspection_method_id==null?null:Number(request.inspection_method_id),inspectionVertical:request.service_category,serviceType:request.service_type,serviceCategory:request.service_category,serviceTypeOther:request.service_type_other,service:request.service_label,scope:request.scope_of_work,urgency:request.urgency,requiredBy:request.required_by,status:request.status,moderationStatus:request.moderation_status,approvedBudgetUsd:request.approved_budget_usd==null?null:Number(request.approved_budget_usd),vessel:{name:request.vessel_name,imoNumber:request.imo_number,type:request.vessel_type,flag:request.flag_state},port:{name:request.port_name,country:request.country,eta:request.eta,locationSummary:request.location_summary} },
     client: { id:request.requester_user_id,name:request.requester_name||request.client_user_name,email:request.client_email,phone:request.client_phone },
     quotations,selectedQuotation,acceptedQuotation,surveyor,proposal,proposals,
     counts:{ quotationsAwaitingReview:quotations.filter((q)=>AWAITING_QUOTATION_STATUSES.includes(String(q.status).toLowerCase())).length },

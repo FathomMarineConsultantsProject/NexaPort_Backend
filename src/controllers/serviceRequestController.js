@@ -5,14 +5,31 @@ import { createServiceRequestApprovedNotifications } from "../services/adminNoti
 import { writeAdminAudit } from "../services/adminAuditService.js";
 import { getServiceRequestEditPermission } from "../services/serviceRequestEditPermission.js";
 import { getActiveProposalForRequest, mapProposalRow } from "../services/commercialProposalService.js";
+import { findInspectionMethod } from "../services/inspectionCatalogueService.js";
 
 const SERVICE_TYPES = new Set(["Audit", "Inspection", "Survey", "Other"]);
 
-const validateServiceSelection = ({ serviceType, serviceCategory, serviceTypeOther }) => {
+const validateServiceSelection = async (queryable, { inspectionMethodId, serviceType, serviceCategory, serviceTypeOther }) => {
   const normalizedType = typeof serviceType === "string" ? serviceType.trim() : "";
   const normalizedCategory = typeof serviceCategory === "string" ? serviceCategory.trim() : "";
   const normalizedOther = typeof serviceTypeOther === "string" ? serviceTypeOther.trim() : "";
   const fieldErrors = {};
+
+  if (inspectionMethodId !== undefined && inspectionMethodId !== null && inspectionMethodId !== "") {
+    const method = await findInspectionMethod(queryable, inspectionMethodId);
+    if (!method) {
+      fieldErrors.inspectionMethodId = "Select a valid inspection type.";
+      return { fieldErrors };
+    }
+    return {
+      fieldErrors,
+      inspectionMethodId: Number(method.id),
+      inspectionVertical: method.vertical_name,
+      serviceType: method.name,
+      serviceCategory: method.vertical_name,
+      serviceTypeOther: null,
+    };
+  }
 
   if (!SERVICE_TYPES.has(normalizedType)) {
     fieldErrors.serviceType = "Select a valid service type.";
@@ -32,6 +49,8 @@ const validateServiceSelection = ({ serviceType, serviceCategory, serviceTypeOth
 
   return {
     fieldErrors,
+    inspectionMethodId: null,
+    inspectionVertical: normalizedType === "Other" ? "Other" : normalizedCategory,
     serviceType: normalizedType,
     serviceCategory: normalizedType === "Other" ? "Other" : normalizedCategory,
     serviceTypeOther: normalizedType === "Other" ? normalizedOther : null,
@@ -46,6 +65,9 @@ const sendValidationError = (res, fieldErrors) => res.status(400).json({
 });
 
 const serviceSummary = (request) => {
+  if (request.inspection_method_id && request.service_type) {
+    return String(request.service_type).trim();
+  }
   if (request.service_type !== "Other") {
     return String(request.service_category || request.service_type || "").trim();
   }
@@ -74,6 +96,9 @@ const calculateApprovedBudget = (clientBudget, adjustmentType, adjustmentMode, a
 
 const mapRequestRow = (row) => ({
   id: row.id,
+  inspectionMethodId: row.inspection_method_id == null ? null : Number(row.inspection_method_id),
+  inspectionVertical: row.inspection_vertical || row.service_category || null,
+  inspectionType: row.inspection_type || (row.service_type === "Other" ? row.service_type_other : row.service_type || row.service_category),
   serviceType: row.service_type,
   serviceCategory: row.service_category,
   serviceTypeOther: row.service_type_other ?? null,
@@ -123,6 +148,8 @@ const mapRequestRow = (row) => ({
 
 const serializeApprovedServiceRequestForConsultant = (row) => ({
   id: row.id,
+  inspectionMethodId: row.inspection_method_id == null ? null : Number(row.inspection_method_id),
+  inspectionVertical: row.inspection_vertical || null,
   serviceType: row.service_type,
   serviceTypeOther: row.service_type_other ?? null,
   inspectionType: row.inspection_type,
@@ -164,6 +191,7 @@ export const createServiceRequest = async (req, res) => {
 
   try {
     const {
+      inspectionMethodId,
       serviceType,
       serviceCategory,
       serviceTypeOther,
@@ -184,7 +212,7 @@ export const createServiceRequest = async (req, res) => {
       requiredCertification,
     } = req.body;
 
-    const serviceSelection = validateServiceSelection({ serviceType, serviceCategory, serviceTypeOther });
+    const serviceSelection = await validateServiceSelection(client, { inspectionMethodId, serviceType, serviceCategory, serviceTypeOther });
     const fieldErrors = { ...serviceSelection.fieldErrors };
     if (!String(title || "").trim()) fieldErrors.title = "Request title is required.";
     if (!String(scopeOfWork || "").trim()) fieldErrors.scopeOfWork = "Scope of work is required.";
@@ -212,6 +240,7 @@ export const createServiceRequest = async (req, res) => {
         service_type,
         service_category,
         service_type_other,
+        inspection_method_id,
         title,
         scope_of_work,
         urgency,
@@ -236,7 +265,7 @@ export const createServiceRequest = async (req, res) => {
       )
       VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
-        $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24
+        $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25
       )
       RETURNING *
       `,
@@ -244,6 +273,7 @@ export const createServiceRequest = async (req, res) => {
         serviceSelection.serviceType,
         serviceSelection.serviceCategory,
         serviceSelection.serviceTypeOther,
+        serviceSelection.inspectionMethodId,
         String(title).trim(),
         String(scopeOfWork).trim(),
         urgency || "routine",
@@ -318,11 +348,13 @@ export const getServiceRequests = async (req, res) => {
         `
         SELECT
           sr.id,
+          sr.inspection_method_id,
+          sr.service_category AS inspection_vertical,
           sr.service_type,
           sr.service_type_other,
           CASE
             WHEN sr.service_type = 'Other' THEN CONCAT('Other — ', sr.service_type_other)
-            ELSE COALESCE(NULLIF(TRIM(sr.service_category), ''), NULLIF(TRIM(sr.service_type), ''))
+            ELSE COALESCE(NULLIF(TRIM(sr.service_type), ''), NULLIF(TRIM(sr.service_category), ''))
           END AS inspection_type,
           sr.vessel_type,
           sr.required_by AS inspection_date,
@@ -429,11 +461,13 @@ export const getServiceRequestById = async (req, res) => {
         `
         SELECT
           sr.id,
+          sr.inspection_method_id,
+          sr.service_category AS inspection_vertical,
           sr.service_type,
           sr.service_type_other,
           CASE
             WHEN sr.service_type = 'Other' THEN CONCAT('Other — ', sr.service_type_other)
-            ELSE COALESCE(NULLIF(TRIM(sr.service_category), ''), NULLIF(TRIM(sr.service_type), ''))
+            ELSE COALESCE(NULLIF(TRIM(sr.service_type), ''), NULLIF(TRIM(sr.service_category), ''))
           END AS inspection_type,
           sr.vessel_type,
           sr.required_by AS inspection_date,
@@ -638,6 +672,7 @@ export const updateServiceRequest = async (req, res) => {
       requiredCertification: "required_certification",
     };
     const clientAllowed = new Set([
+      "inspectionMethodId",
       "serviceType", "serviceCategory", "title", "scopeOfWork", "urgency",
       "serviceTypeOther",
       "budgetUsd", "requiredBy", "vesselName", "imoNumber", "vesselType",
@@ -646,9 +681,10 @@ export const updateServiceRequest = async (req, res) => {
     ]);
     const updates = [];
     const values = [];
-    const serviceFields = ["serviceType", "serviceCategory", "serviceTypeOther"];
+    const serviceFields = ["inspectionMethodId", "serviceType", "serviceCategory", "serviceTypeOther"];
     if (serviceFields.some((field) => field in req.body)) {
-      const serviceSelection = validateServiceSelection({
+      const serviceSelection = await validateServiceSelection(client, {
+        inspectionMethodId: "inspectionMethodId" in req.body ? req.body.inspectionMethodId : request.inspection_method_id,
         serviceType: "serviceType" in req.body ? req.body.serviceType : request.service_type,
         serviceCategory: "serviceCategory" in req.body ? req.body.serviceCategory : request.service_category,
         serviceTypeOther: "serviceTypeOther" in req.body ? req.body.serviceTypeOther : request.service_type_other,
@@ -661,6 +697,7 @@ export const updateServiceRequest = async (req, res) => {
         ["service_type", serviceSelection.serviceType],
         ["service_category", serviceSelection.serviceCategory],
         ["service_type_other", serviceSelection.serviceTypeOther],
+        ["inspection_method_id", serviceSelection.inspectionMethodId],
       ]) {
         values.push(value);
         updates.push(`${column} = $${values.length}`);

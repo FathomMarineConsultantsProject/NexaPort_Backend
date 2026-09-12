@@ -1,4 +1,5 @@
 import { pool } from "../config/db.js";
+import { getInspectionCatalogue } from "../services/inspectionCatalogueService.js";
 
 export const getSpecialties = async (req, res) => {
   try {
@@ -75,6 +76,7 @@ export const getServiceRequestDropdowns = async (req, res) => {
       statuses,
       vesselTypes,
       flagStates,
+      inspectionCatalogue,
     ] = await Promise.all([
       pool.query(`SELECT id, name FROM master_service_types ORDER BY name ASC`),
 
@@ -95,6 +97,8 @@ export const getServiceRequestDropdowns = async (req, res) => {
       pool.query(`SELECT id, name FROM master_vessel_types ORDER BY name ASC`),
 
       pool.query(`SELECT id, name FROM master_flag_states ORDER BY name ASC`),
+
+      getInspectionCatalogue(pool),
     ]);
 
     const categoriesByType = {};
@@ -119,6 +123,7 @@ export const getServiceRequestDropdowns = async (req, res) => {
         statuses: statuses.rows,
         vesselTypes: vesselTypes.rows,
         flagStates: flagStates.rows,
+        inspectionVerticals: inspectionCatalogue,
       },
     });
   } catch (error) {

@@ -5,3 +5,6 @@ node_modules
 !.env.example
 *.md
 sql
+.vercel
+.env*
+scripts
