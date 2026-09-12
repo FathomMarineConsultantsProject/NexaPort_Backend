@@ -12,6 +12,7 @@ const requestListSelect = `
   sr.id,
   sr.title,
   sr.service_type,
+  sr.inspection_method_id,
   sr.service_category,
   sr.service_type_other,
   sr.vessel_name,
@@ -147,6 +148,16 @@ const expertProfileCte = `
 `;
 
 const expertMatchSql = `
+  (
+    sr.inspection_method_id IS NOT NULL
+    AND EXISTS (
+      SELECT 1
+      FROM expert_inspection_methods eim
+      WHERE eim.expert_id = expert_profile.id
+        AND eim.inspection_method_id = sr.inspection_method_id
+    )
+  )
+  OR
   EXISTS (
     SELECT 1 FROM expert_ports ep
     WHERE ep.expert_id = expert_profile.id
@@ -228,6 +239,7 @@ export const getExpertDashboard = async (req, res) => {
         `${expertProfileCte}
         SELECT ${requestListSelect},
           CONCAT_WS(' + ',
+            CASE WHEN sr.inspection_method_id IS NOT NULL AND EXISTS (SELECT 1 FROM expert_inspection_methods eim WHERE eim.expert_id = expert_profile.id AND eim.inspection_method_id = sr.inspection_method_id) THEN 'Inspection capability' END,
             CASE WHEN EXISTS (SELECT 1 FROM expert_ports ep WHERE ep.expert_id = expert_profile.id AND LOWER(TRIM(ep.port_name)) = LOWER(TRIM(sr.port_name))) THEN 'Port' END,
             CASE WHEN EXISTS (SELECT 1 FROM expert_vessel_types evt JOIN master_vessel_types mvt ON mvt.id = evt.vessel_type_id WHERE evt.expert_id = expert_profile.id AND LOWER(TRIM(mvt.name)) = LOWER(TRIM(sr.vessel_type))) THEN 'Vessel type' END,
             CASE WHEN (
@@ -242,7 +254,14 @@ export const getExpertDashboard = async (req, res) => {
         WHERE sr.moderation_status = 'approved'
           AND LOWER(sr.status) IN ('open', 'pending', 'active')
           AND (${expertMatchSql})
-        ORDER BY sr.required_by ASC NULLS LAST, sr.created_at DESC
+        ORDER BY
+          CASE WHEN sr.inspection_method_id IS NOT NULL AND EXISTS (
+            SELECT 1 FROM expert_inspection_methods eim
+            WHERE eim.expert_id = expert_profile.id
+              AND eim.inspection_method_id = sr.inspection_method_id
+          ) THEN 0 ELSE 1 END,
+          sr.required_by ASC NULLS LAST,
+          sr.created_at DESC
         LIMIT 8
         `,
         [userId]

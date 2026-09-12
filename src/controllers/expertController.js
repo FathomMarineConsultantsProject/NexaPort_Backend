@@ -4,6 +4,10 @@ import {
   createPresignedGetUrl,
   createPresignedPutUrl,
 } from "../utils/s3Presign.js";
+import {
+  getExpertInspectionCapabilities,
+  replaceExpertInspectionMethods,
+} from "../services/inspectionCatalogueService.js";
 
 const EXPERT_PHOTO_TYPES = new Set([
   "image/png",
@@ -200,6 +204,7 @@ const getExpertFullData = async (expertId) => {
     ports,
     registrationDetails,
     flagServices,
+    inspectionCapabilities,
   ] =
     await Promise.all([
       pool.query(
@@ -270,6 +275,7 @@ const getExpertFullData = async (expertId) => {
         `,
         [expertId]
       ),
+      getExpertInspectionCapabilities(pool, expertId),
     ]);
 
   const registrationRow = registrationDetails.rows[0] || null;
@@ -290,6 +296,7 @@ const getExpertFullData = async (expertId) => {
     languages: languages.rows,
     ports: ports.rows,
     flag_services: flagServices.rows,
+    inspection_capabilities: inspectionCapabilities,
     registration_details: registrationRow ? safeRegistrationDetails : null,
     photo_url: photo?.url || null,
     photo_expires_at: photo?.expiresAt || null,
@@ -747,6 +754,8 @@ export const createExpert = async (req, res) => {
       ports = [],
       languages = [],
       user_id,
+      inspection_method_ids = [],
+      inspectionMethodIds,
     } = req.body;
 
     if (!full_name) {
@@ -841,6 +850,12 @@ export const createExpert = async (req, res) => {
       );
     }
 
+    await replaceExpertInspectionMethods(
+      client,
+      expert.id,
+      inspectionMethodIds ?? inspection_method_ids
+    );
+
     await client.query("COMMIT");
 
     const fullExpert = await getExpertFullData(expert.id);
@@ -907,6 +922,8 @@ export const updateExpert = async (req, res) => {
       registration_details,
       photo_s3_key,
       cv_s3_key,
+      inspection_method_ids,
+      inspectionMethodIds,
     } = req.body;
 
     if (
@@ -1081,6 +1098,14 @@ export const updateExpert = async (req, res) => {
           [id, languageName]
         );
       }
+    }
+
+    if (inspectionMethodIds !== undefined || inspection_method_ids !== undefined) {
+      await replaceExpertInspectionMethods(
+        client,
+        id,
+        inspectionMethodIds ?? inspection_method_ids
+      );
     }
 
     await client.query("COMMIT");

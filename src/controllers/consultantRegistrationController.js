@@ -3,6 +3,7 @@ import crypto from "crypto";
 import { pool } from "../config/db.js";
 import { createPresignedPutUrl } from "../utils/s3Presign.js";
 import { createRegistrationNotifications } from "../services/adminNotificationService.js";
+import { normalizeInspectionMethodIds, replaceExpertInspectionMethods } from "../services/inspectionCatalogueService.js";
 
 const nameRegex = /^[A-Za-z\s'-]+$/;
 const phoneRegex = /^[0-9+\-\s()]+$/;
@@ -196,6 +197,12 @@ const validateActiveFlags = async (client, flagServices) => {
 
 const validateRegistrationPayload = (body) => {
   const errors = [];
+  let inspectionMethodIds = [];
+  try {
+    inspectionMethodIds = normalizeInspectionMethodIds(body.inspectionMethodIds);
+  } catch (error) {
+    errors.push(error.message);
+  }
 
   const data = {
     firstName: requiredString(body, "firstName", "First name", errors),
@@ -234,6 +241,7 @@ const validateRegistrationPayload = (body) => {
     qualifications: normalizeArray(body.qualifications),
     experienceByQualification: normalizeObject(body.experienceByQualification),
     vesselTypes: normalizeArray(body.vesselTypes),
+    inspectionMethodIds,
     ports: normalizeSubmittedPorts(body.ports, errors),
     shoresideExperience: normalizeArray(body.shoresideExperience),
     surveyingExperience: normalizeArray(body.surveyingExperience),
@@ -506,6 +514,7 @@ export const registerConsultant = async (req, res) => {
     await validateActiveFlags(client, data.flagServices);
 
     await persistExpertPorts(client, expert.id, coveragePorts);
+    await replaceExpertInspectionMethods(client, expert.id, data.inspectionMethodIds);
 
     for (const flagService of data.flagServices) {
       const expertFlagResult = await client.query(
