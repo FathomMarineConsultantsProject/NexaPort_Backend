@@ -126,6 +126,16 @@ test("timeout covers unresponsive provider and body parsing, even if transport i
   }
 });
 
+test("provider permission diagnostics expose only known reasons, never raw messages or keys", async () => {
+  for (const [body, code] of [
+    [{ error: { message: "test-secret private message", details: [{ reason: "API_KEY_HTTP_REFERRER_BLOCKED" }] } }, "AI_PROVIDER_API_KEY_HTTP_REFERRER_BLOCKED"],
+    [{ error: { message: "Your API key was reported as leaked. test-secret" } }, "AI_PROVIDER_KEY_REVOKED"],
+    [{ error: { message: "test-secret", details: [{ reason: "test-secret" }] } }, "AI_PROVIDER_ACCESS_DENIED"],
+  ]) {
+    await assert.rejects(generateScope({}, { env, fetchImpl: async () => ({ ok: false, status: 403, json: async () => body }) }), (error) => error.code === code && !error.message.includes("test-secret"));
+  }
+});
+
 test("controller calls Gemini with canonical context and returns success without provider metadata", async () => {
   let received;
   const controller = createScopeGenerationController({ queryable: { query: async () => ({ rows: [{ name: "Pre-Purchase Inspections", vertical_name: "Vessel Condition" }] }) }, generate: async (context) => { received = context; return { scopeOfWork: "Scope" }; } });
