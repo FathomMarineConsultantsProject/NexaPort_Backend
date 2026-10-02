@@ -1,6 +1,6 @@
 import { findInspectionMethod } from "./inspectionCatalogueService.js";
 import { resolveRequestPort } from "./requestParticularsService.js";
-import { generateGeminiScope, scopeError } from "./geminiScopeService.js";
+import { generateOpenRouterScope, scopeError } from "./openRouterScopeService.js";
 
 const fail = scopeError;
 const limits = { keywords: 1000, vesselType: 240, portName: 240, terminalName: 240, eta: 40, existingScope: 12000, legacyCertification: 2000 };
@@ -31,4 +31,4 @@ export async function resolveScopeInput(body, queryable) {
   return context;
 }
 
-export const generateScope = generateGeminiScope;
+export const generateScope = generateOpenRouterScope;

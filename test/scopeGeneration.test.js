@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { resolveScopeInput, generateScope } from "../src/services/scopeGenerationService.js";
-import { resolveGeminiScopeConfig, DEFAULT_GEMINI_SCOPE_MODEL } from "../src/services/geminiScopeService.js";
+import { resolveScopeProviderConfig, DEFAULT_SCOPE_MODEL } from "../src/services/openRouterScopeService.js";
 import { createScopeGenerationController } from "../src/controllers/scopeGenerationController.js";
 import router from "../src/routes/serviceRequestRoutes.js";
 import { createRequireAuth, allowRoles } from "../src/middlewares/authMiddleware.js";
@@ -10,19 +10,19 @@ import { pool } from "../src/config/db.js";
 import express from "express";
 import jwt from "jsonwebtoken";
 const response = () => ({ statusCode: 200, status(value) { this.statusCode = value; return this; }, json(value) { this.body = value; return this; } });
-const env = { GEMINI_API_KEY: "test-secret", GEMINI_MODEL: "gemini-test-model" };
+const env = { OPENROUTER_API_KEY: "test-secret", OPENROUTER_MODEL: "gemini-test-model" };
 
-test("scope uses only the Gemini key and ignores all deployed model overrides", () => {
-  const deployed = { GEMINI_API_KEY: "test-secret", GEMINI_TEMPLATE_MODEL: "models/gemini-template-test" };
-  assert.equal(resolveGeminiScopeConfig(deployed).model, DEFAULT_GEMINI_SCOPE_MODEL);
-  assert.equal(resolveGeminiScopeConfig({ ...deployed, GEMINI_MODEL: "invalid-model" }).model, DEFAULT_GEMINI_SCOPE_MODEL);
-  assert.equal(resolveGeminiScopeConfig({ GEMINI_API_KEY: "test-secret" }).model, DEFAULT_GEMINI_SCOPE_MODEL);
+test("scope uses only the OpenRouter key and ignores all deployed model overrides", () => {
+  const deployed = { OPENROUTER_API_KEY: "test-secret", OPENROUTER_TEMPLATE_MODEL: "models/gemini-template-test" };
+  assert.equal(resolveScopeProviderConfig(deployed).model, DEFAULT_SCOPE_MODEL);
+  assert.equal(resolveScopeProviderConfig({ ...deployed, OPENROUTER_MODEL: "invalid-model" }).model, DEFAULT_SCOPE_MODEL);
+  assert.equal(resolveScopeProviderConfig({ OPENROUTER_API_KEY: "test-secret" }).model, DEFAULT_SCOPE_MODEL);
 });
 
-test("HTTP scope endpoint enforces auth, returns Gemini scope and structured configuration errors", async () => {
+test("HTTP scope endpoint enforces auth, returns OpenRouter scope and structured configuration errors", async () => {
   const originalQuery = pool.query, originalFetch = globalThis.fetch;
-  const savedEnv = Object.fromEntries(["JWT_SECRET", "GEMINI_API_KEY", "GEMINI_MODEL"].map((key) => [key, process.env[key]]));
-  Object.assign(process.env, { JWT_SECRET: "request-test-jwt", GEMINI_API_KEY: "request-test-gemini", GEMINI_MODEL: "gemini-test-model" });
+  const savedEnv = Object.fromEntries(["JWT_SECRET", "OPENROUTER_API_KEY", "OPENROUTER_MODEL"].map((key) => [key, process.env[key]]));
+  Object.assign(process.env, { JWT_SECRET: "request-test-jwt", OPENROUTER_API_KEY: "request-test-gemini", OPENROUTER_MODEL: "gemini-test-model" });
   pool.query = async (sql) => {
     if (/SELECT id, full_name/.test(sql)) return { rows: [{ id: 501, role_id: 3, full_name: "Client", is_active: true }] };
     if (/to_regclass/.test(sql)) return { rows: [{ membership_table: null }] };
@@ -31,9 +31,9 @@ test("HTTP scope endpoint enforces auth, returns Gemini scope and structured con
   };
   let providerCalls = 0;
   globalThis.fetch = async (url) => {
-    assert.ok(url.startsWith("https://generativelanguage.googleapis.com/"));
+    assert.ok(url.startsWith("https://openrouter.ai/api/v1/chat/completions"));
     providerCalls += 1;
-    return { ok: true, json: async () => ({ candidates: [{ finishReason: "STOP", content: { parts: [{ text: "Inspect hull and machinery." }] } }] }) };
+    return { ok: true, json: async () => ({ choices: [{ finish_reason: "stop", message: { content: "Inspect hull and machinery." } }] }) };
   };
   const app = express(); app.use(express.json()); app.use("/api/service-requests", router);
   const server = app.listen(0, "127.0.0.1");
@@ -46,7 +46,7 @@ test("HTTP scope endpoint enforces auth, returns Gemini scope and structured con
     const invalid = await send({ keywords: "" }); assert.equal(invalid.status, 400);
     const good = await send({ keywords: "hull" }); assert.equal(good.status, 200);
     assert.deepEqual(await good.json(), { success: true, scopeOfWork: "Inspect hull and machinery." });
-    delete process.env.GEMINI_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
     const unconfigured = await send({ keywords: "hull" }); assert.equal(unconfigured.status, 503);
     assert.equal((await unconfigured.json()).code, "AI_PROVIDER_NOT_CONFIGURED");
     assert.equal(providerCalls, 1);
@@ -90,35 +90,35 @@ test("keywords/context are bounded and invalid method/Port rejected before provi
 });
 
 
-test("mocked Gemini extracts visible text parts, sends context and keeps the key only in headers", async () => {
+test("mocked OpenRouter extracts visible text parts, sends context and keeps the key only in headers", async () => {
   const result = await generateScope({ keywords: "hull", service: "Pre-Purchase Inspections", terminalName: "A" }, { env, fetchImpl: async (url, options) => {
-    assert.equal(url, `https://generativelanguage.googleapis.com/v1beta/models/${DEFAULT_GEMINI_SCOPE_MODEL}:generateContent`);
-    assert.equal(options.headers["x-goog-api-key"], "test-secret");
+    assert.equal(url, "https://openrouter.ai/api/v1/chat/completions");
+    assert.equal(options.headers.Authorization, "Bearer test-secret");
     assert.ok(!url.includes("test-secret"));
     const payload = JSON.parse(options.body);
-    assert.deepEqual(payload.generationConfig, { temperature: 0.3, maxOutputTokens: 3000, thinkingConfig: { thinkingLevel: "minimal" } });
-    assert.equal(JSON.parse(payload.contents[0].parts[0].text).terminalName, "A");
-    assert.match(payload.systemInstruction.parts[0].text, /selected service as primary context/);
+    assert.deepEqual({ model: payload.model, max_tokens: payload.max_tokens, reasoning: payload.reasoning }, { model: DEFAULT_SCOPE_MODEL, max_tokens: 3000, reasoning: { enabled: false } });
+    assert.equal(JSON.parse(payload.messages[1].content).terminalName, "A");
+    assert.match(payload.messages[0].content, /selected service as primary context/);
     assert.ok(!options.body.includes("test-secret"));
-    return { ok: true, json: async () => ({ candidates: [{ finishReason: "STOP", content: { parts: [{ thought: true, text: "Hidden thinking" }, { text: " Inspect hull " }, { text: "and machinery. " }] } }] }) };
+    return { ok: true, json: async () => ({ choices: [{ finish_reason: "stop", message: { content: " Inspect hull and machinery. " } }] }) };
   } });
   assert.deepEqual(result, { scopeOfWork: "Inspect hull and machinery." });
 });
 
-test("missing Gemini key fails before provider invocation and OpenRouter config is insufficient", async () => {
+test("missing OpenRouter key fails before provider invocation and Gemini config is insufficient", async () => {
   let called = false;
-  await assert.rejects(generateScope({}, { env: { OPENROUTER_API_KEY: "unrelated-key" }, fetchImpl: async () => { called = true; } }), (error) => error.status === 503 && error.code === "AI_PROVIDER_NOT_CONFIGURED");
+  await assert.rejects(generateScope({}, { env: { GEMINI_API_KEY: "unrelated-key" }, fetchImpl: async () => { called = true; } }), (error) => error.status === 503 && error.code === "AI_PROVIDER_NOT_CONFIGURED");
   assert.equal(called, false);
 });
 
-test("Gemini failures and invalid output return safe structured provider errors", async () => {
-  const codes = { 400: "AI_PROVIDER_REQUEST_REJECTED", 401: "AI_PROVIDER_AUTH_FAILED", 403: "AI_PROVIDER_ACCESS_DENIED", 404: "AI_PROVIDER_MODEL_UNAVAILABLE", 429: "AI_PROVIDER_RATE_LIMITED", 500: "AI_PROVIDER_ERROR" };
+test("OpenRouter failures and invalid output return safe structured provider errors", async () => {
+  const codes = { 400: "AI_PROVIDER_REQUEST_REJECTED", 401: "AI_PROVIDER_AUTH_FAILED", 402: "AI_PROVIDER_PAYMENT_REQUIRED", 403: "AI_PROVIDER_ACCESS_DENIED", 404: "AI_PROVIDER_MODEL_UNAVAILABLE", 429: "AI_PROVIDER_RATE_LIMITED", 500: "AI_PROVIDER_ERROR" };
   for (const [statusValue, code] of Object.entries(codes)) {
     const status = Number(statusValue);
-    await assert.rejects(generateScope({}, { env, fetchImpl: async () => ({ ok: false, status, json: async () => ({ error: "test-secret" }) }) }), (error) => error.code === code && error.providerStatus === status && !error.message.includes("test-secret") && error.status === (status === 429 ? 429 : [401, 403, 404].includes(status) ? 503 : 502));
+    await assert.rejects(generateScope({}, { env, fetchImpl: async () => ({ ok: false, status, json: async () => ({ error: "test-secret" }) }) }), (error) => error.code === code && error.providerStatus === status && !error.message.includes("test-secret") && error.status === (status === 429 ? 429 : [401, 402, 403, 404].includes(status) ? 503 : 502));
   }
   await assert.rejects(generateScope({}, { env, fetchImpl: async () => { throw new Error("Headers test-secret stack"); } }), (error) => error.status === 502 && error.code === "AI_PROVIDER_CONNECTION_ERROR" && !error.message.includes("test-secret"));
-  for (const content of [{}, { candidates: [{ content: { parts: [] } }] }, { candidates: [{ finishReason: "MAX_TOKENS", content: { parts: [{ text: "Partial scope" }] } }] }, { candidates: [{ content: { parts: [{ text: "x".repeat(12001) }] } }] }, { candidates: [{ content: { parts: [{ text: "test-secret" }] } }] }]) await assert.rejects(generateScope({}, { env, fetchImpl: async () => ({ ok: true, json: async () => content }) }), (error) => error.status === 502 && error.code === "AI_PROVIDER_INVALID_RESPONSE");
+  for (const content of [{}, { choices: [] }, { choices: [{ finish_reason: "length", message: { content: "Partial scope" } }] }, { choices: [{ message: { content: "x".repeat(12001) } }] }, { choices: [{ message: { content: "test-secret" } }] }]) await assert.rejects(generateScope({}, { env, fetchImpl: async () => ({ ok: true, json: async () => content }) }), (error) => error.status === 502 && error.code === "AI_PROVIDER_INVALID_RESPONSE");
 });
 
 test("timeout covers unresponsive provider and body parsing, even if transport ignores abort", async () => {
@@ -127,18 +127,7 @@ test("timeout covers unresponsive provider and body parsing, even if transport i
   }
 });
 
-test("provider permission diagnostics expose only known reasons, never raw messages or keys", async () => {
-  for (const [body, code] of [
-    [{ error: { message: "test-secret private message", details: [{ reason: "API_KEY_HTTP_REFERRER_BLOCKED" }] } }, "AI_PROVIDER_API_KEY_HTTP_REFERRER_BLOCKED"],
-    [{ error: { message: "Your API key was reported as leaked. test-secret" } }, "AI_PROVIDER_KEY_REVOKED"],
-    [{ error: { message: "Your project has been denied access. test-secret" } }, "AI_PROVIDER_PROJECT_ACCESS_DENIED"],
-    [{ error: { message: "test-secret", details: [{ reason: "test-secret" }] } }, "AI_PROVIDER_ACCESS_DENIED"],
-  ]) {
-    await assert.rejects(generateScope({}, { env, fetchImpl: async () => ({ ok: false, status: 403, json: async () => body }) }), (error) => error.code === code && !error.message.includes("test-secret"));
-  }
-});
-
-test("controller calls Gemini with canonical context and returns success without provider metadata", async () => {
+test("controller calls OpenRouter with canonical context and returns success without provider metadata", async () => {
   let received;
   const controller = createScopeGenerationController({ queryable: { query: async () => ({ rows: [{ name: "Pre-Purchase Inspections", vertical_name: "Vessel Condition" }] }) }, generate: async (context) => { received = context; return { scopeOfWork: "Scope" }; } });
   const res = response();
