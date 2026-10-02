@@ -37,3 +37,16 @@ test("combined result preserves source/type labels and pagination", async () => 
   assert.deepEqual(result.items.map((item) => item.inspector_type), ["nexaport_consultant", "flag_inspector", "accredited_inspector", "appointed_surveyor"]);
   assert.ok(result.items.every((item) => !("image_key" in item) && !("total" in item)));
 });
+
+test("unfiltered searches include active Consultants for name, organization, location, ports and expertise", () => {
+  for (const q of ["Jane", "Marine Ltd", "Singapore", "Rotterdam", "Engineering"]) {
+    const { sql, values, filters } = buildInspectorSearchQuery({ q });
+    assert.equal(filters.type, "");
+    assert.equal(values[0], `%${q}%`);
+    assert.equal(values[3], "");
+    assert.equal((sql.match(/'nexaport_consultant'::text/g) || []).length, 1);
+    assert.match(sql, /FROM experts e LEFT JOIN users u/);
+    assert.match(sql, /u.is_active=true/);
+    for (const field of ["organization", "country", "country_location", "base_ports", "discipline"]) assert.ok(sql.includes(`COALESCE(${field},'') ILIKE $1`));
+  }
+});
