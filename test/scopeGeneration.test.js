@@ -12,10 +12,10 @@ import jwt from "jsonwebtoken";
 const response = () => ({ statusCode: 200, status(value) { this.statusCode = value; return this; }, json(value) { this.body = value; return this; } });
 const env = { GEMINI_API_KEY: "test-secret", GEMINI_MODEL: "gemini-test-model" };
 
-test("scope configuration supports deployed Gemini model name and optional scope override", () => {
+test("scope uses only the Gemini key and ignores all deployed model overrides", () => {
   const deployed = { GEMINI_API_KEY: "test-secret", GEMINI_TEMPLATE_MODEL: "models/gemini-template-test" };
-  assert.equal(resolveGeminiScopeConfig(deployed).model, "gemini-template-test");
-  assert.equal(resolveGeminiScopeConfig({ ...deployed, GEMINI_MODEL: "gemini-scope-test" }).model, "gemini-scope-test");
+  assert.equal(resolveGeminiScopeConfig(deployed).model, DEFAULT_GEMINI_SCOPE_MODEL);
+  assert.equal(resolveGeminiScopeConfig({ ...deployed, GEMINI_MODEL: "invalid-model" }).model, DEFAULT_GEMINI_SCOPE_MODEL);
   assert.equal(resolveGeminiScopeConfig({ GEMINI_API_KEY: "test-secret" }).model, DEFAULT_GEMINI_SCOPE_MODEL);
 });
 
@@ -92,10 +92,11 @@ test("keywords/context are bounded and invalid method/Port rejected before provi
 
 test("mocked Gemini extracts visible text parts, sends context and keeps the key only in headers", async () => {
   const result = await generateScope({ keywords: "hull", service: "Pre-Purchase Inspections", terminalName: "A" }, { env, fetchImpl: async (url, options) => {
-    assert.equal(url, "https://generativelanguage.googleapis.com/v1beta/models/gemini-test-model:generateContent");
+    assert.equal(url, `https://generativelanguage.googleapis.com/v1beta/models/${DEFAULT_GEMINI_SCOPE_MODEL}:generateContent`);
     assert.equal(options.headers["x-goog-api-key"], "test-secret");
     assert.ok(!url.includes("test-secret"));
     const payload = JSON.parse(options.body);
+    assert.deepEqual(payload.generationConfig, { temperature: 0.3, maxOutputTokens: 3000, thinkingConfig: { thinkingLevel: "minimal" } });
     assert.equal(JSON.parse(payload.contents[0].parts[0].text).terminalName, "A");
     assert.match(payload.systemInstruction.parts[0].text, /selected service as primary context/);
     assert.ok(!options.body.includes("test-secret"));
