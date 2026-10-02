@@ -38,17 +38,23 @@ export async function generateGeminiScope(context, { env = process.env, fetchImp
         429: ["AI_PROVIDER_RATE_LIMITED", "The AI provider limit was reached. Please retry later."],
       };
       const [code, message] = failures[response.status] || ["AI_PROVIDER_ERROR", "Unable to generate the scope right now."];
-      const error = scopeError(response.status === 429 ? 429 : 502, code, message);
+      const error = scopeError(response.status === 429 ? 429 : [401, 403, 404].includes(response.status) ? 503 : 502, code, message);
       if ([400, 401, 403].includes(response.status)) {
         const failure = await response.json().catch(() => null);
         const reasons = new Set(["API_KEY_INVALID", "API_KEY_EXPIRED", "API_KEY_NOT_FOUND", "API_KEY_SERVICE_BLOCKED", "API_KEY_HTTP_REFERRER_BLOCKED", "API_KEY_IP_ADDRESS_BLOCKED", "SERVICE_DISABLED", "CONSUMER_INVALID"]);
         const reason = failure?.error?.details?.find((detail) => reasons.has(detail?.reason))?.reason;
         if (reason) {
+          error.status = 503;
           error.code = `AI_PROVIDER_${reason}`;
           error.message = "The backend Gemini key or project configuration needs attention.";
         } else if (/reported as leaked|leaked (?:api )?key/i.test(String(failure?.error?.message || ""))) {
+          error.status = 503;
           error.code = "AI_PROVIDER_KEY_REVOKED";
           error.message = "Google has blocked the configured Gemini key. Replace it in the backend deployment.";
+        } else if (/project has been denied access/i.test(String(failure?.error?.message || ""))) {
+          error.status = 503;
+          error.code = "AI_PROVIDER_PROJECT_ACCESS_DENIED";
+          error.message = "Google has denied this project's Gemini access. Review the project in Google AI Studio.";
         }
       }
       error.providerStatus = response.status;

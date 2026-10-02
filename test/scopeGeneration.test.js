@@ -115,7 +115,7 @@ test("Gemini failures and invalid output return safe structured provider errors"
   const codes = { 400: "AI_PROVIDER_REQUEST_REJECTED", 401: "AI_PROVIDER_AUTH_FAILED", 403: "AI_PROVIDER_ACCESS_DENIED", 404: "AI_PROVIDER_MODEL_UNAVAILABLE", 429: "AI_PROVIDER_RATE_LIMITED", 500: "AI_PROVIDER_ERROR" };
   for (const [statusValue, code] of Object.entries(codes)) {
     const status = Number(statusValue);
-    await assert.rejects(generateScope({}, { env, fetchImpl: async () => ({ ok: false, status, json: async () => ({ error: "test-secret" }) }) }), (error) => error.code === code && error.providerStatus === status && !error.message.includes("test-secret") && error.status === (status === 429 ? 429 : 502));
+    await assert.rejects(generateScope({}, { env, fetchImpl: async () => ({ ok: false, status, json: async () => ({ error: "test-secret" }) }) }), (error) => error.code === code && error.providerStatus === status && !error.message.includes("test-secret") && error.status === (status === 429 ? 429 : [401, 403, 404].includes(status) ? 503 : 502));
   }
   await assert.rejects(generateScope({}, { env, fetchImpl: async () => { throw new Error("Headers test-secret stack"); } }), (error) => error.status === 502 && error.code === "AI_PROVIDER_CONNECTION_ERROR" && !error.message.includes("test-secret"));
   for (const content of [{}, { candidates: [{ content: { parts: [] } }] }, { candidates: [{ finishReason: "MAX_TOKENS", content: { parts: [{ text: "Partial scope" }] } }] }, { candidates: [{ content: { parts: [{ text: "x".repeat(12001) }] } }] }, { candidates: [{ content: { parts: [{ text: "test-secret" }] } }] }]) await assert.rejects(generateScope({}, { env, fetchImpl: async () => ({ ok: true, json: async () => content }) }), (error) => error.status === 502 && error.code === "AI_PROVIDER_INVALID_RESPONSE");
@@ -131,6 +131,7 @@ test("provider permission diagnostics expose only known reasons, never raw messa
   for (const [body, code] of [
     [{ error: { message: "test-secret private message", details: [{ reason: "API_KEY_HTTP_REFERRER_BLOCKED" }] } }, "AI_PROVIDER_API_KEY_HTTP_REFERRER_BLOCKED"],
     [{ error: { message: "Your API key was reported as leaked. test-secret" } }, "AI_PROVIDER_KEY_REVOKED"],
+    [{ error: { message: "Your project has been denied access. test-secret" } }, "AI_PROVIDER_PROJECT_ACCESS_DENIED"],
     [{ error: { message: "test-secret", details: [{ reason: "test-secret" }] } }, "AI_PROVIDER_ACCESS_DENIED"],
   ]) {
     await assert.rejects(generateScope({}, { env, fetchImpl: async () => ({ ok: false, status: 403, json: async () => body }) }), (error) => error.code === code && !error.message.includes("test-secret"));
