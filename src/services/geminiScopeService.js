@@ -32,7 +32,15 @@ export async function generateGeminiScope(context, { env = process.env, fetchImp
       }),
     });
     if (!response.ok) {
-      const error = scopeError(response.status === 429 ? 429 : 502, response.status === 429 ? "AI_PROVIDER_RATE_LIMITED" : "AI_PROVIDER_ERROR", "Unable to generate the scope right now.");
+      const failures = {
+        400: ["AI_PROVIDER_REQUEST_REJECTED", "The AI provider rejected the generation request."],
+        401: ["AI_PROVIDER_AUTH_FAILED", "The AI provider credentials need attention."],
+        403: ["AI_PROVIDER_ACCESS_DENIED", "The AI provider denied access. Check the backend key permissions."],
+        404: ["AI_PROVIDER_MODEL_UNAVAILABLE", "The configured AI model is unavailable. Check the backend model setting."],
+        429: ["AI_PROVIDER_RATE_LIMITED", "The AI provider limit was reached. Please retry later."],
+      };
+      const [code, message] = failures[response.status] || ["AI_PROVIDER_ERROR", "Unable to generate the scope right now."];
+      const error = scopeError(response.status === 429 ? 429 : 502, code, message);
       error.providerStatus = response.status;
       throw error;
     }
@@ -49,6 +57,6 @@ export async function generateGeminiScope(context, { env = process.env, fetchImp
   } catch (error) {
     if (controller.signal.aborted) throw scopeError(504, "AI_PROVIDER_TIMEOUT", "Scope generation timed out. Please retry or write your scope manually.");
     if (error.safe) throw error;
-    throw scopeError(502, "AI_PROVIDER_ERROR", "Unable to generate the scope right now.");
+    throw scopeError(502, "AI_PROVIDER_CONNECTION_ERROR", "Unable to reach the AI provider or read its response.");
   } finally { clearTimeout(timer); }
 }

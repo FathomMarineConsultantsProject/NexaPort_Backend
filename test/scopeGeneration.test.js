@@ -111,8 +111,12 @@ test("missing Gemini key fails before provider invocation and OpenRouter config 
 });
 
 test("Gemini failures and invalid output return safe structured provider errors", async () => {
-  for (const status of [401, 403, 404, 429, 500]) await assert.rejects(generateScope({}, { env, fetchImpl: async () => ({ ok: false, status, json: async () => ({ error: "test-secret" }) }) }), (error) => !error.message.includes("test-secret") && error.status === (status === 429 ? 429 : 502));
-  await assert.rejects(generateScope({}, { env, fetchImpl: async () => { throw new Error("Headers test-secret stack"); } }), (error) => error.status === 502 && !error.message.includes("test-secret"));
+  const codes = { 400: "AI_PROVIDER_REQUEST_REJECTED", 401: "AI_PROVIDER_AUTH_FAILED", 403: "AI_PROVIDER_ACCESS_DENIED", 404: "AI_PROVIDER_MODEL_UNAVAILABLE", 429: "AI_PROVIDER_RATE_LIMITED", 500: "AI_PROVIDER_ERROR" };
+  for (const [statusValue, code] of Object.entries(codes)) {
+    const status = Number(statusValue);
+    await assert.rejects(generateScope({}, { env, fetchImpl: async () => ({ ok: false, status, json: async () => ({ error: "test-secret" }) }) }), (error) => error.code === code && error.providerStatus === status && !error.message.includes("test-secret") && error.status === (status === 429 ? 429 : 502));
+  }
+  await assert.rejects(generateScope({}, { env, fetchImpl: async () => { throw new Error("Headers test-secret stack"); } }), (error) => error.status === 502 && error.code === "AI_PROVIDER_CONNECTION_ERROR" && !error.message.includes("test-secret"));
   for (const content of [{}, { candidates: [{ content: { parts: [] } }] }, { candidates: [{ finishReason: "MAX_TOKENS", content: { parts: [{ text: "Partial scope" }] } }] }, { candidates: [{ content: { parts: [{ text: "x".repeat(12001) }] } }] }, { candidates: [{ content: { parts: [{ text: "test-secret" }] } }] }]) await assert.rejects(generateScope({}, { env, fetchImpl: async () => ({ ok: true, json: async () => content }) }), (error) => error.status === 502 && error.code === "AI_PROVIDER_INVALID_RESPONSE");
 });
 
