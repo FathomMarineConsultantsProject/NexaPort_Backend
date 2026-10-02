@@ -7,6 +7,8 @@ import { getServiceRequestEditPermission } from "../services/serviceRequestEditP
 import { getActiveProposalForRequest, mapProposalRow } from "../services/commercialProposalService.js";
 import { findInspectionMethod } from "../services/inspectionCatalogueService.js";
 
+import { normalizeRequestParticulars, resolveRequestCompany, resolveRequestPort, REQUEST_PARTICULAR_FIELDS } from "../services/requestParticularsService.js";
+
 const SERVICE_TYPES = new Set(["Audit", "Inspection", "Survey", "Other"]);
 
 const validateServiceSelection = async (queryable, { inspectionMethodId, serviceType, serviceCategory, serviceTypeOther }) => {
@@ -18,7 +20,7 @@ const validateServiceSelection = async (queryable, { inspectionMethodId, service
   if (inspectionMethodId !== undefined && inspectionMethodId !== null && inspectionMethodId !== "") {
     const method = await findInspectionMethod(queryable, inspectionMethodId);
     if (!method) {
-      fieldErrors.inspectionMethodId = "Select a valid inspection type.";
+      fieldErrors.inspectionMethodId = "Select a valid service.";
       return { fieldErrors };
     }
     return {
@@ -113,6 +115,10 @@ const mapRequestRow = (row) => ({
   adminBudgetAdjustmentValue: Number(row.admin_budget_adjustment_value || 0),
   requiredBy: row.required_by,
   requesterName: row.requester_name,
+  companyName: row.linked_company_name || null,
+  companyVerified: Boolean(row.linked_company_name),
+  terminalName: row.terminal_name || null,
+  agentDetails: { companyName: row.agent_company_name || null, contactName: row.agent_contact_name || null, email: row.agent_email || null, phone: row.agent_phone || null },
   requesterUserId: row.requester_user_id,
   status: row.status,
   moderationStatus: row.moderation_status,
@@ -156,6 +162,7 @@ const serializeApprovedServiceRequestForConsultant = (row) => ({
   vesselType: row.vessel_type,
   inspectionDate: row.inspection_date,
   portOfInspection: row.port_of_inspection,
+  terminalName: row.terminal_name || null,
 });
 
 const serializeServiceRequestForAdmin = mapRequestRow;
@@ -213,7 +220,8 @@ export const createServiceRequest = async (req, res) => {
     } = req.body;
 
     const serviceSelection = await validateServiceSelection(client, { inspectionMethodId, serviceType, serviceCategory, serviceTypeOther });
-    const fieldErrors = { ...serviceSelection.fieldErrors };
+    const particulars = normalizeRequestParticulars(req.body);
+    const fieldErrors = { ...serviceSelection.fieldErrors, ...particulars.fieldErrors };
     if (!String(title || "").trim()) fieldErrors.title = "Request title is required.";
     if (!String(scopeOfWork || "").trim()) fieldErrors.scopeOfWork = "Scope of work is required.";
     if (Object.keys(fieldErrors).length) {
@@ -222,9 +230,18 @@ export const createServiceRequest = async (req, res) => {
 
     await client.query("BEGIN");
 
+    const companyName = await resolveRequestCompany(client, req.user.id);
     let portId = null;
+    let resolvedPortName = portName || null;
+    let resolvedCountry = country || null;
+    if (req.body.portId != null && req.body.portId !== "") {
+      const port = await resolveRequestPort(client, req.body.portId);
+      portId = port.id;
+      resolvedPortName = port.port_name;
+      resolvedCountry = port.country;
+    }
 
-    if (portName && country) {
+    if (!portId && portName && country) {
       const port = await findOrCreatePort({
         port_name: portName,
         country,
@@ -261,11 +278,11 @@ export const createServiceRequest = async (req, res) => {
         moderation_status,
         status,
         client_budget_usd,
-        approved_budget_usd
+        approved_budget_usd, terminal_name, agent_company_name, agent_contact_name, agent_email, agent_phone
       )
       VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
-        $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25
+        $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30
       )
       RETURNING *
       `,
@@ -279,14 +296,14 @@ export const createServiceRequest = async (req, res) => {
         urgency || "routine",
         budgetUsd || null,
         requiredBy || null,
-        requesterName || req.user.full_name || null,
+        Number(req.user.role_id) === 3 ? companyName : (companyName || String(requesterName || "").trim() || null),
         vesselName || null,
         imoNumber || null,
         vesselType || null,
         flagState || null,
         portId,
-        portName || null,
-        country || null,
+        resolvedPortName,
+        resolvedCountry,
         eta || null,
         locationSummary || null,
         requiredCertification || null,
@@ -295,6 +312,7 @@ export const createServiceRequest = async (req, res) => {
         "open",
         budgetUsd || null,
         budgetUsd || null,
+        ...Object.keys(REQUEST_PARTICULAR_FIELDS).map((key) => particulars.values[key] ?? null),
       ]
     );
 
@@ -303,10 +321,11 @@ export const createServiceRequest = async (req, res) => {
     res.status(201).json({
       success: true,
       message: "Service request created successfully",
-      data: mapRequestRow(result.rows[0]),
+      data: mapRequestRow({ ...result.rows[0], linked_company_name: companyName }),
     });
   } catch (error) {
     await client.query("ROLLBACK");
+    if (error.status === 400) return sendValidationError(res, { portId: error.message });
     console.error("Create service request error:", error);
 
     res.status(500).json({
@@ -358,6 +377,7 @@ export const getServiceRequests = async (req, res) => {
           END AS inspection_type,
           sr.vessel_type,
           sr.required_by AS inspection_date,
+          sr.terminal_name,
           sr.port_name AS port_of_inspection
         FROM service_requests sr
         WHERE ${conditions.join(" AND ")}
@@ -419,6 +439,7 @@ export const getServiceRequests = async (req, res) => {
       `
       SELECT 
         sr.*,
+        (SELECT cc.legal_name FROM client_profiles cp JOIN client_companies cc ON cc.client_profile_id=cp.id WHERE cp.user_id=sr.requester_user_id LIMIT 1) AS linked_company_name,
         COUNT(q.id) AS quotation_count,
         EXISTS(SELECT 1 FROM request_expert_assignments rea WHERE rea.service_request_id=sr.id) AS has_assignment,
         (SELECT iw.current_stage FROM inspection_workflows iw WHERE iw.service_request_id=sr.id LIMIT 1) AS workflow_stage
@@ -471,6 +492,7 @@ export const getServiceRequestById = async (req, res) => {
           END AS inspection_type,
           sr.vessel_type,
           sr.required_by AS inspection_date,
+          sr.terminal_name,
           sr.port_name AS port_of_inspection
         FROM service_requests sr
         WHERE sr.id = $1
@@ -492,6 +514,7 @@ export const getServiceRequestById = async (req, res) => {
       `
       SELECT 
         sr.*,
+        (SELECT cc.legal_name FROM client_profiles cp JOIN client_companies cc ON cc.client_profile_id=cp.id WHERE cp.user_id=sr.requester_user_id LIMIT 1) AS linked_company_name,
         COUNT(q.id) AS quotation_count,
         EXISTS(SELECT 1 FROM request_expert_assignments rea WHERE rea.service_request_id=sr.id) AS has_assignment,
         (SELECT iw.current_stage FROM inspection_workflows iw WHERE iw.service_request_id=sr.id LIMIT 1) AS workflow_stage
@@ -637,6 +660,7 @@ export const updateServiceRequest = async (req, res) => {
     await client.query("BEGIN");
     const existing = await client.query(
       `SELECT sr.*,
+        (SELECT cc.legal_name FROM client_profiles cp JOIN client_companies cc ON cc.client_profile_id=cp.id WHERE cp.user_id=sr.requester_user_id LIMIT 1) AS linked_company_name,
               (SELECT COUNT(*)::int FROM quotations q WHERE q.service_request_id=sr.id) AS quotation_count,
               EXISTS(SELECT 1 FROM quotations q WHERE q.service_request_id=sr.id AND LOWER(q.status)='accepted') AS has_accepted_quotation,
               EXISTS(SELECT 1 FROM request_expert_assignments rea WHERE rea.service_request_id=sr.id) AS has_assignment,
@@ -655,7 +679,18 @@ export const updateServiceRequest = async (req, res) => {
       return res.status(permission.status).json({ success: false, code: permission.code, message: permission.message });
     }
 
+    const particulars = normalizeRequestParticulars(req.body);
+    if (Object.keys(particulars.fieldErrors).length) {
+      await client.query("ROLLBACK");
+      return sendValidationError(res, particulars.fieldErrors);
+    }
+    const normalizedBody = { ...req.body, ...particulars.values };
+    if (Object.hasOwn(req.body, "portId") && req.body.portId != null && req.body.portId !== "") {
+      const port = await resolveRequestPort(client, req.body.portId);
+      Object.assign(normalizedBody, { portId: port.id, portName: port.port_name, country: port.country });
+    }
     const fieldMap = {
+      ...Object.fromEntries(Object.entries(REQUEST_PARTICULAR_FIELDS).map(([key, [column]]) => [key, column])),
       title: "title",
       scopeOfWork: "scope_of_work",
       urgency: "urgency",
@@ -672,6 +707,7 @@ export const updateServiceRequest = async (req, res) => {
       requiredCertification: "required_certification",
     };
     const clientAllowed = new Set([
+      ...Object.keys(REQUEST_PARTICULAR_FIELDS), "portId",
       "inspectionMethodId",
       "serviceType", "serviceCategory", "title", "scopeOfWork", "urgency",
       "serviceTypeOther",
@@ -704,10 +740,12 @@ export const updateServiceRequest = async (req, res) => {
       }
     }
     for (const [bodyField, column] of Object.entries(fieldMap)) {
-      if (!(bodyField in req.body) || (roleId === 3 && !clientAllowed.has(bodyField))) continue;
-      values.push(req.body[bodyField] === "" ? null : req.body[bodyField]);
+      if (!(bodyField in normalizedBody) || (roleId === 3 && !clientAllowed.has(bodyField))) continue;
+      values.push(normalizedBody[bodyField] === "" ? null : normalizedBody[bodyField]);
       updates.push(`${column} = $${values.length}`);
     }
+
+    if (!("portId" in normalizedBody) && "portName" in req.body && req.body.portName !== request.port_name) updates.push("port_id = NULL");
 
     let editedClientBudget;
     if ("budgetUsd" in req.body) {
@@ -833,9 +871,10 @@ export const updateServiceRequest = async (req, res) => {
     const message = roleId === 3
       ? (request.moderation_status === "rejected" ? "Request resubmitted for review" : "Request updated and submitted for review")
       : "Service request updated successfully";
-    return res.json({ success: true, message, data: mapRequestRow(result.rows[0]) });
+    return res.json({ success: true, message, data: mapRequestRow({ ...result.rows[0], linked_company_name: request.linked_company_name }) });
   } catch (error) {
     await client.query("ROLLBACK");
+    if (error.status === 400) return sendValidationError(res, { portId: error.message });
     console.error("Update service request error:", error);
     res.status(500).json({
       success: false,

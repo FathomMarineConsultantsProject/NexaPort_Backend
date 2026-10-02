@@ -175,7 +175,7 @@ test("Consultant-safe response still hides protected request fields", async () =
   const res = response();
   try {
     await getServiceRequests({ query: {}, user: { id: 2, role_id: 2 } }, res);
-    assert.deepEqual(Object.keys(res.body.data[0]).sort(), ["id", "inspectionDate", "inspectionMethodId", "inspectionType", "inspectionVertical", "portOfInspection", "serviceType", "serviceTypeOther", "vesselType"].sort());
+    assert.deepEqual(Object.keys(res.body.data[0]).sort(), ["id", "inspectionDate", "inspectionMethodId", "inspectionType", "inspectionVertical", "portOfInspection", "serviceType", "serviceTypeOther", "terminalName", "vesselType"].sort());
   } finally {
     pool.query = originalQuery;
   }

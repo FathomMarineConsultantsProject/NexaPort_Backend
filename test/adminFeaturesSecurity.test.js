@@ -127,9 +127,10 @@ test("request moderation is explicit and Consultant responses are allowlisted", 
   assert.match(routes, /post\("\/:id\/approve", requireAuth, allowRoles\(1\), approveServiceRequest\)/);
 });
 
-test("approval notifications target active role-2 users with expert profiles and safe payload", async () => {
+test("approval notifications target active primary and membership Consultants with safe payload", async () => {
   const service = await source("src/services/adminNotificationService.js");
-  assert.match(service, /JOIN public\.experts e ON e\.user_id = u\.id/);
+  assert.match(service, /FROM public\.user_roles ur WHERE ur\.user_id = u\.id AND ur\.role_id = 2/);
+  assert.doesNotMatch(service, /JOIN public\.experts/);
   assert.match(service, /u\.role_id = 2/);
   assert.match(service, /u\.is_active = TRUE/);
   assert.match(service, /service_request_approved/);

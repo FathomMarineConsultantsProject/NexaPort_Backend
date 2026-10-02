@@ -1,3 +1,4 @@
+import { postOpenRouter } from "./openRouterTransport.js";
 import { z } from "zod";
 import { SUPPORTED_TEMPLATE_FIELD_TYPES } from "./templateFieldSanitizer.js";
 
@@ -33,7 +34,7 @@ async function oneRequest(payload, model, { env, fetchImpl, signal }) {
   const timeout = AbortSignal.timeout(timeoutMs); const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
   let response;
   try {
-    response = await fetchImpl("https://openrouter.ai/api/v1/chat/completions", { method: "POST", signal: combined, headers: { Authorization: `Bearer ${env.OPENROUTER_API_KEY}`, "Content-Type": "application/json" }, body: JSON.stringify({ model, temperature: 0, max_tokens: bounded(env.OPENROUTER_TEMPLATE_MAX_OUTPUT_TOKENS, 6000, 1200, 12000), reasoning: { effort: env.OPENROUTER_TEMPLATE_REASONING_EFFORT || "low" }, provider: { require_parameters: true, zdr: true }, response_format: { type: "json_schema", json_schema: jsonSchema }, messages: [{ role: "system", content: prompt }, { role: "user", content: JSON.stringify(payload) }] }) });
+    response = await postOpenRouter({ model, temperature: 0, max_tokens: bounded(env.OPENROUTER_TEMPLATE_MAX_OUTPUT_TOKENS, 6000, 1200, 12000), reasoning: { effort: env.OPENROUTER_TEMPLATE_REASONING_EFFORT || "low" }, provider: { require_parameters: true, zdr: true }, response_format: { type: "json_schema", json_schema: jsonSchema }, messages: [{ role: "system", content: prompt }, { role: "user", content: JSON.stringify(payload) }] }, { env, fetchImpl, signal: combined });
   } catch (error) {
     const timeoutFailure = timeout.aborted && !signal?.aborted;
     throw Object.assign(new Error(timeoutFailure ? "OpenRouter template analysis timed out." : "OpenRouter template analysis is unavailable."), { status: 503, reason: timeoutFailure ? "timeout" : "network_error", retryable: !timeoutFailure, provider: "openrouter", cause: error });

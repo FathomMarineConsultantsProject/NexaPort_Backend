@@ -1,3 +1,4 @@
+import { postOpenRouter } from "./openRouterTransport.js";
 import { isProvenanceOnlyLabel } from "../utils/templateProvenance.js";
 
 const SOURCE_TYPES = new Set(["pdf", "xml", "docx", "xlsx"]);
@@ -177,7 +178,7 @@ export async function requestOpenRouter(input, { fetchImpl = globalThis.fetch, e
     const timeout = AbortSignal.timeout(timeoutMs); const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
     let response;
     try {
-      response = await fetchImpl("https://openrouter.ai/api/v1/chat/completions", { method: "POST", headers: { Authorization: `Bearer ${env.OPENROUTER_API_KEY}`, "Content-Type": "application/json" }, signal: combined, body: JSON.stringify({ model, temperature: 0, max_tokens: maxTokens, reasoning: { effort: reasoningEffort }, provider: { require_parameters: true, zdr: true }, response_format: { type: "json_schema", json_schema: schema }, messages: [{ role: "system", content: templateAiPrompts[input.mode] }, { role: "user", content: JSON.stringify(input) }] }) });
+      response = await postOpenRouter({ model, temperature: 0, max_tokens: maxTokens, reasoning: { effort: reasoningEffort }, provider: { require_parameters: true, zdr: true }, response_format: { type: "json_schema", json_schema: schema }, messages: [{ role: "system", content: templateAiPrompts[input.mode] }, { role: "user", content: JSON.stringify(input) }] }, { env, fetchImpl, signal: combined });
     } catch (error) { if (attempt === 0 && !signal?.aborted) continue; throw fail(error?.name === "TimeoutError" ? "Template analysis timed out." : "The template-analysis provider is unavailable.", 503, true, error?.name === "TimeoutError" ? "timeout" : "network_error"); }
     if (!response.ok) {
       const retryable = response.status >= 500; if (attempt === 0 && retryable) continue;

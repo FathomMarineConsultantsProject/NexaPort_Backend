@@ -45,7 +45,7 @@ export const createServiceRequestApprovedNotifications = async (
   queryable,
   { requestId, inspectionType, vesselType, inspectionDate, portOfInspection }
 ) => {
-  const message = `A new ${inspectionType} request is available at ${portOfInspection} for ${inspectionDate}.`;
+  const message = `A new ${inspectionType} request is available at ${portOfInspection}.`;
   const payload = JSON.stringify({
     request_id: requestId,
     inspection_type: inspectionType,
@@ -74,9 +74,10 @@ export const createServiceRequestApprovedNotifications = async (
       $2,
       $3::jsonb
     FROM public.users u
-    JOIN public.experts e ON e.user_id = u.id
-    WHERE u.role_id = 2
-      AND u.is_active = TRUE
+    WHERE u.is_active = TRUE
+      AND (u.role_id = 2 OR EXISTS (
+        SELECT 1 FROM public.user_roles ur WHERE ur.user_id = u.id AND ur.role_id = 2
+      ))
     ON CONFLICT (recipient_user_id, type, entity_type, entity_id)
     DO NOTHING
     RETURNING id

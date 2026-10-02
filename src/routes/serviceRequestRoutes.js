@@ -1,3 +1,4 @@
+import { generateRequestScope } from "../controllers/scopeGenerationController.js";
 import express from "express";
 import {
   approveServiceRequest,
@@ -22,6 +23,8 @@ import { allowRoles, requireAuth } from "../middlewares/authMiddleware.js";
 import { requireApprovedClient } from "../middlewares/clientApprovalMiddleware.js";
 
 const router = express.Router();
+
+router.post("/generate-scope", requireAuth, requireApprovedClient, allowRoles(1, 3), generateRequestScope);
 
 router.get("/", requireAuth, requireApprovedClient, getServiceRequests);
 router.get("/:id", requireAuth, requireApprovedClient, getServiceRequestById);

@@ -114,7 +114,7 @@ test("invalid inspectionMethodId fails field validation", async () => {
       user: { id: 3, role_id: 3, full_name: "Client" },
     }, res);
     assert.equal(res.statusCode, 400);
-    assert.equal(res.body.field_errors.inspectionMethodId, "Select a valid inspection type.");
+    assert.equal(res.body.field_errors.inspectionMethodId, "Select a valid service.");
   } finally {
     pool.connect = originalConnect;
   }
