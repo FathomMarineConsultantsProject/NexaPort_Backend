@@ -2,6 +2,7 @@ import { pool } from "../config/db.js";
 import { MARITIME_DIRECTORY_TABLES, MARITIME_DIRECTORY_TYPES } from "../config/maritimeDirectorySchema.js";
 import { writeAdminAudit } from "./adminAuditService.js";
 import { createPresignedGetUrl } from "../utils/s3Presign.js";
+import { serializeMaritimeEnrichment } from "../utils/maritimeDirectoryEnrichment.js";
 
 const T = MARITIME_DIRECTORY_TABLES;
 const TYPE_SET = new Set(MARITIME_DIRECTORY_TYPES);
@@ -139,7 +140,7 @@ export const getMaritimeEntity = async (entityId, queryable = pool) => {
   const types = await queryable.query(`SELECT directory_type FROM ${T.entityTypes} WHERE entity_id=$1 ORDER BY directory_type`, [entityId]);
   const { logo_s3_key: logoKey, ...safeEntity } = entity.rows[0];
   if (logoKey) safeEntity.logo_url = createPresignedGetUrl({ key: logoKey }).url;
-  const result = { entity: safeEntity, directory_types: types.rows.map((row) => row.directory_type) };
+  const result = { entity: safeEntity, directory_types: types.rows.map((row) => row.directory_type), ...serializeMaritimeEnrichment(safeEntity) };
   for (const [name, sql] of detailQueries) result[name] = uniqueCollectionRows((await queryable.query(sql, [entityId])).rows);
   return result;
 };
