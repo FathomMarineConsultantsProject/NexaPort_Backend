@@ -145,11 +145,14 @@ export const getMaritimeEntity = async (entityId, queryable = pool) => {
 };
 
 export const listMaritimeEntities = async (query, queryable = pool) => {
-  if (!TYPE_SET.has(query.type)) throw validationError({ type: "Select a supported directory type." });
+  if (!TYPE_SET.has(query.type) && query.type !== "owners_managers") throw validationError({ type: "Select a supported directory type." });
   const page = Math.max(1, Number.parseInt(query.page, 10) || 1);
   const limit = Math.min(100, Math.max(1, Number.parseInt(query.limit, 10) || 20));
-  const conditions = ["EXISTS (SELECT 1 FROM public.maritime_directory_entity_types mt WHERE mt.entity_id=e.id AND mt.directory_type=$1)"];
-  const values = [query.type];
+  const companyType = query.type === "owners_managers" ? clean(query.companyType) || "all" : query.type;
+  if (query.type === "owners_managers" && !["all", "owner", "manager", "both"].includes(companyType)) throw validationError({ companyType: "Select a supported company type." });
+  const typeSql = companyType === "all" ? "mt.directory_type = ANY($1::text[])" : companyType === "both" ? "mt.directory_type=$1 AND EXISTS (SELECT 1 FROM public.maritime_directory_entity_types mt2 WHERE mt2.entity_id=e.id AND mt2.directory_type='manager')" : "mt.directory_type=$1";
+  const conditions = [`EXISTS (SELECT 1 FROM public.maritime_directory_entity_types mt WHERE mt.entity_id=e.id AND ${typeSql})`];
+  const values = [companyType === "all" ? ["owner", "manager"] : companyType === "both" ? "owner" : companyType];
   const add = (sql, value) => { values.push(value); conditions.push(sql.replaceAll("?", `$${values.length}`)); };
   if (clean(query.search)) add(`(e.company_name ILIKE '%' || ? || '%' OR e.description ILIKE '%' || ? || '%' OR EXISTS (SELECT 1 FROM public.maritime_directory_services s WHERE s.entity_id=e.id AND s.service_name ILIKE '%' || ? || '%') OR EXISTS (SELECT 1 FROM public.maritime_directory_ports p WHERE p.entity_id=e.id AND p.port_name ILIKE '%' || ? || '%') OR EXISTS (SELECT 1 FROM public.maritime_directory_products p WHERE p.entity_id=e.id AND p.product_name ILIKE '%' || ? || '%'))`, clean(query.search));
   if (clean(query.country)) add("LOWER(e.country)=LOWER(?)", clean(query.country));
@@ -164,14 +167,16 @@ export const listMaritimeEntities = async (query, queryable = pool) => {
   const where = conditions.join(" AND ");
   const count = await queryable.query(`SELECT COUNT(*)::int AS total FROM ${T.entities} e WHERE ${where}`, values);
   values.push(limit, (page - 1) * limit);
-  const data = await queryable.query(`SELECT e.id,e.company_name,e.slug,e.logo_url,e.logo_s3_key,e.country,e.city,e.public_email,e.public_phone,e.website,
+  const sort = query.sort === "name-desc" ? "DESC" : "ASC";
+  if (query.sort && !["name-asc", "name-desc"].includes(query.sort)) throw validationError({ sort: "Unsupported sort order." });
+  const data = await queryable.query(`SELECT e.id,e.company_name,e.slug,e.logo_url,e.logo_s3_key,e.country,e.city,e.public_email,e.public_phone,e.website,e.extra_data,
     CASE WHEN length(coalesce(e.description,''))>180 THEN left(e.description,177)||'...' ELSE e.description END AS description_excerpt,
     ARRAY(SELECT mt.directory_type FROM ${T.entityTypes} mt WHERE mt.entity_id=e.id ORDER BY mt.directory_type) AS directory_types,
     e.review_status,e.is_active,e.data_source,e.created_at,e.updated_at,
     (SELECT COUNT(*)::int FROM ${T.services} s WHERE s.entity_id=e.id) AS service_count,
     (SELECT COUNT(*)::int FROM ${T.ports} p WHERE p.entity_id=e.id) AS port_count,
     (SELECT COUNT(*)::int FROM ${T.branches} b WHERE b.entity_id=e.id) AS branch_count
-    FROM ${T.entities} e WHERE ${where} ORDER BY e.company_name,e.id LIMIT $${values.length - 1} OFFSET $${values.length}`, values);
+    FROM ${T.entities} e WHERE ${where} ORDER BY e.company_name ${sort},e.id ${sort} LIMIT $${values.length - 1} OFFSET $${values.length}`, values);
   const total = count.rows[0].total;
   return { data: data.rows.map(({ logo_s3_key: logoKey, ...row }) => ({ ...row, logo_url: logoKey ? createPresignedGetUrl({ key: logoKey }).url : row.logo_url })), pagination: { page, limit, total, pages: Math.ceil(total / limit) } };
 };

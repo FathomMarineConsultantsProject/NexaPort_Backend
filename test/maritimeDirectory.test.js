@@ -110,6 +110,19 @@ test("list search is parameterized and fixed-table only", async () => {
   await listMaritimeEntities({ type: "supplier", search: "%' OR 1=1 --" }, queryable); assert.ok(calls.every(({ sql }) => !sql.includes("OR 1=1"))); assert.equal(calls[0].params[1], "%' OR 1=1 --");
 });
 
+test("combined owners and managers filter keeps pagination, country, search and global sort on server", async () => {
+  const calls = [];
+  const queryable = { query: async (sql, params) => { calls.push({ sql, params }); return /SELECT COUNT/.test(sql) && !/service_count/.test(sql) ? { rows: [{ total: 2 }] } : { rows: [{ id: ID, company_name: "A Marine", directory_types: ["owner", "manager", "supplier"] }] }; } };
+  const result = await listMaritimeEntities({ type: "owners_managers", companyType: "both", country: "Singapore", search: "Marine", sort: "name-desc", page: "2", limit: "1" }, queryable);
+  assert.equal(result.pagination.total, 2);
+  assert.deepEqual(result.data[0].directory_types, ["owner", "manager", "supplier"]);
+  assert.match(calls[0].sql, /mt2\.directory_type='manager'/);
+  assert.match(calls[1].sql, /ORDER BY e\.company_name DESC,e\.id DESC/);
+  assert.deepEqual(calls[1].params.slice(-2), [1, 1]);
+  assert.ok(calls[0].params.includes("Singapore"));
+  assert.ok(calls[0].params.includes("Marine"));
+});
+
 test("controller exposes stable error fields rather than database implementation fields", async () => {
   const controller = await source("src/controllers/maritimeDirectoryController.js");
   assert.match(controller, /MARITIME_DIRECTORY_REQUEST_FAILED/);

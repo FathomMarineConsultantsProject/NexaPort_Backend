@@ -11,7 +11,8 @@ test("maritime company registration is transactional, pending, and server-contro
   assert.match(service, /await client\.query\("ROLLBACK"\)/);
   assert.match(service, /VALUES \(\$1,\$2,\$3,\$4,4,\$5,true\)/);
   assert.match(service, /'self_registered','pending'/);
-  assert.match(service, /types\.length !== 1/);
+  assert.match(service, /unique\.length > 3/);
+  assert.match(service, /await replaceTypes\(client, entityId, directoryTypes\)/);
   assert.match(service, /maritime_company_accounts \(user_id,entity_id,primary_type\)/);
 });
 
@@ -22,7 +23,7 @@ test("company profile routes require authentication and role 4", async () => {
   assert.match(routes, /router\.patch\("\/profile"/);
 });
 
-test("standalone migration preserves imported multi-type records and guards company single-type records", async () => {
+test("standalone migrations preserve account linkage and allow multiple directory types", async () => {
   const sql = await source("../sql/maritime_company_accounts_001.sql");
   assert.match(sql, /BEGIN;/);
   assert.match(sql, /CREATE TABLE IF NOT EXISTS public\.maritime_company_accounts/);
@@ -30,4 +31,6 @@ test("standalone migration preserves imported multi-type records and guards comp
   assert.match(sql, /primary_type IN \('service_provider','ship_agent','supplier'\)/);
   assert.match(sql, /maritime_company_single_type_guard/);
   assert.doesNotMatch(sql, /DELETE FROM public\.maritime_directory_entities/i);
+  const multiType = await source("../sql/maritime_company_accounts_002_allow_multiple_types.sql");
+  assert.match(multiType, /DROP TRIGGER IF EXISTS maritime_company_single_type_guard/);
 });

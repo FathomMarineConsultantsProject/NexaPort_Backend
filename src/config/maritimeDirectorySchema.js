@@ -17,4 +17,6 @@ export const MARITIME_DIRECTORY_TYPES = Object.freeze([
   "supplier",
   "shipyard",
   "tug_boat",
+  "owner",
+  "manager",
 ]);
