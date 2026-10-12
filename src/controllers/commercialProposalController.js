@@ -75,6 +75,8 @@ export const saveDraft = async (req, res) => {
     const {
       quotationId,
       adminMarkupUsd,
+      feeMode,
+      feePercentage,
       clientNotes,
       internalAdminNotes,
       estimatedAttendanceDays,
@@ -84,6 +86,8 @@ export const saveDraft = async (req, res) => {
       requestId,
       quotationId,
       adminMarkupUsd,
+      feeMode,
+      feePercentage,
       clientNotes,
       internalAdminNotes,
       estimatedAttendanceDays,

@@ -31,7 +31,14 @@ const serviceLabelSql = `CASE WHEN sr.service_type='Other' THEN COALESCE(NULLIF(
 
 const mapQuote = (row) => {
   if (!row) return null;
-  const totals = calculateQuotationTotals(row, row.admin_markup_usd || 0);
+  const approved = row.internal_review_status === "approved"
+    ? row.revisions?.find((revision) => Number(revision.id) === Number(row.approved_revision_id)) : null;
+  const financialSource = approved ? {
+    total_quote_usd: approved.baseFee, travel_cost: approved.travelCost,
+    accommodation_cost: approved.accommodationCost, report_fee: approved.reportFee,
+    urgency_surcharge: approved.urgencySurcharge,
+  } : row;
+  const totals = calculateQuotationTotals(financialSource, row.admin_markup_usd || 0);
   return {
     id: row.id, serviceRequestId: row.service_request_id, expertId: row.expert_id,
     consultantName: row.expert_name, consultantRating: row.expert_rating == null ? null : Number(row.expert_rating),
@@ -39,9 +46,10 @@ const mapQuote = (row) => {
     internalStatus: row.internal_review_status, latestRevisionId: row.latest_revision_id,
     approvedRevisionId: row.approved_revision_id,
     revisions: row.revisions || [],
-    baseFeeUsd: Number(row.total_quote_usd || 0), travelCostUsd: Number(row.travel_cost || 0),
-    accommodationCostUsd: Number(row.accommodation_cost || 0), reportFeeUsd: Number(row.report_fee || 0),
-    urgencySurchargeUsd: Number(row.urgency_surcharge || 0), consultantTotalUsd: totals.consultantTotalUsd,
+    currency: approved?.currency || "USD",
+    baseFeeUsd: Number(financialSource.total_quote_usd || 0), travelCostUsd: Number(financialSource.travel_cost || 0),
+    accommodationCostUsd: Number(financialSource.accommodation_cost || 0), reportFeeUsd: Number(financialSource.report_fee || 0),
+    urgencySurchargeUsd: Number(financialSource.urgency_surcharge || 0), consultantTotalUsd: approved ? approved.consultantTotal : totals.consultantTotalUsd,
     adminMarkupUsd: Number(row.admin_markup_usd || 0), clientTotalUsd: Number(row.client_total_usd || totals.clientTotalUsd),
     coverLetter: row.cover_letter, createdAt: row.created_at, updatedAt: row.updated_at,
   };

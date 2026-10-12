@@ -60,7 +60,7 @@ export const createQuotationThread = async ({ actor, body }) => {
     await writeAdminAudit(db,{actorUserId:actor.id,action:"quotation.submitted",targetType:"quotation",targetId:q.id,summary:`Submitted quotation revision 1 for request ${requestId}`});
     await db.query(`INSERT INTO public.admin_notifications(recipient_user_id,type,entity_type,entity_id,title,message,payload)
       SELECT u.id,'quotation_submitted','quotation_revision',$1,'Quotation submitted','A Consultant quotation is ready for internal review.',$2::jsonb
-      FROM users u WHERE u.role_id=1 AND u.is_active=true
+      FROM users u WHERE u.is_active=true AND (u.role_id=1 OR EXISTS (SELECT 1 FROM public.user_roles ur WHERE ur.user_id=u.id AND ur.role_id=1))
       ON CONFLICT(recipient_user_id,type,entity_type,entity_id) DO NOTHING`,[String(revision.id),JSON.stringify({request_id:requestId,quotation_id:q.id,revision_id:revision.id})]);
     await db.query("COMMIT");
     return { ...q, latest_revision_id:revision.id,internal_review_status:"awaiting_review" };
@@ -90,7 +90,7 @@ export const submitQuotationRevision = async ({ quotationId, actor, body }) => {
     await db.query(`UPDATE quotations SET latest_revision_id=$1,approved_revision_id=NULL,internal_review_status='awaiting_review',total_quote_usd=$2,attendance_days=$3,travel_cost=$4,accommodation_cost=$5,report_fee=$6,urgency_surcharge=$7,cover_letter=$8,updated_at=CURRENT_TIMESTAMP WHERE id=$9`,[revision.id,v.baseFee,v.attendanceDays,v.travelCost,v.accommodationCost,v.reportFee,v.urgencySurcharge,v.coverLetter,q.id]);
     await writeAdminAudit(db,{actorUserId:actor.id,action:"quotation.revised",targetType:"quotation",targetId:q.id,summary:`Submitted quotation revision ${revision.revision_number}`});
     await db.query(`INSERT INTO public.admin_notifications(recipient_user_id,type,entity_type,entity_id,title,message,payload)
-      SELECT u.id,'quotation_revision_submitted','quotation_revision',$1,'Revised quotation submitted','A Consultant submitted a revised quotation for review.',$2::jsonb FROM users u WHERE u.role_id=1 AND u.is_active=true ON CONFLICT(recipient_user_id,type,entity_type,entity_id) DO NOTHING`,[String(revision.id),JSON.stringify({request_id:q.service_request_id,quotation_id:q.id,revision_id:revision.id})]);
+      SELECT u.id,'quotation_revision_submitted','quotation_revision',$1,'Revised quotation submitted','A Consultant submitted a revised quotation for review.',$2::jsonb FROM users u WHERE u.is_active=true AND (u.role_id=1 OR EXISTS (SELECT 1 FROM public.user_roles ur WHERE ur.user_id=u.id AND ur.role_id=1)) ON CONFLICT(recipient_user_id,type,entity_type,entity_id) DO NOTHING`,[String(revision.id),JSON.stringify({request_id:q.service_request_id,quotation_id:q.id,revision_id:revision.id})]);
     await db.query("COMMIT"); return revision;
   } catch(e) { await db.query("ROLLBACK"); throw e; } finally { db.release(); }
 };

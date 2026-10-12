@@ -154,8 +154,8 @@ export const createProposalApprovedNotification = async (
       $2,
       $3::jsonb
     FROM public.users u
-    WHERE u.role_id = 1
-      AND u.is_active = TRUE
+    WHERE u.is_active = TRUE
+      AND (u.role_id = 1 OR EXISTS (SELECT 1 FROM public.user_roles ur WHERE ur.user_id=u.id AND ur.role_id=1))
     ON CONFLICT (recipient_user_id, type, entity_type, entity_id)
     DO NOTHING
     `,
@@ -225,8 +225,8 @@ export const createProposalRejectedNotification = async (
       $2,
       $3::jsonb
     FROM public.users u
-    WHERE u.role_id = 1
-      AND u.is_active = TRUE
+    WHERE u.is_active = TRUE
+      AND (u.role_id = 1 OR EXISTS (SELECT 1 FROM public.user_roles ur WHERE ur.user_id=u.id AND ur.role_id=1))
     ON CONFLICT (recipient_user_id, type, entity_type, entity_id)
     DO NOTHING
     `,

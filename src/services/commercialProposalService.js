@@ -5,7 +5,6 @@ import {
   createProposalRejectedNotification,
   createProposalSentNotification,
 } from "./adminNotificationService.js";
-import { calculateQuotationTotals } from "./quotationAcceptanceService.js";
 
 const proposalError = (status, code, message) =>
   Object.assign(new Error(message), { status, code });
@@ -18,22 +17,39 @@ const positiveId = (value, name = "id") => {
   return parsed;
 };
 
-export const calculateProposalFinancials = (quote, adminMarkupUsd = 0) => {
-  const base = Number(quote?.total_quote_usd || 0);
-  const expenses = [
-    quote?.travel_cost,
-    quote?.accommodation_cost,
-    quote?.report_fee,
-    quote?.urgency_surcharge,
-  ].reduce((sum, val) => sum + (Number.isFinite(Number(val)) ? Number(val) : 0), 0);
-
-  const totals = calculateQuotationTotals(quote, adminMarkupUsd);
+const decimalUnits = (value, label, scale = 2) => {
+  const raw = String(value ?? "0").trim();
+  if (!/^\d+(?:\.\d{1,2})?$/.test(raw)) throw proposalError(400,"INVALID_AMOUNT",`${label} must be a finite, nonnegative amount with at most two decimals.`);
+  const [whole, fraction = ""] = raw.split(".");
+  const units = BigInt(whole) * 10n ** BigInt(scale) + BigInt(fraction.padEnd(scale,"0"));
+  if (units > 999999999999n) throw proposalError(400,"INVALID_AMOUNT",`${label} exceeds the supported amount.`);
+  return units;
+};
+const dollars = (cents) => Number(cents) / 100;
+export const calculateProposalFinancials = (quote, adminMarkupUsd = 0, feeMode = "custom", feePercentage = null) => {
+  if (!quote || !["custom","percentage"].includes(feeMode)) throw proposalError(400,"INVALID_FEE_MODE","Choose a valid fee calculation mode.");
+  if (feeMode === "percentage" && (feePercentage === null || feePercentage === undefined || String(feePercentage).trim() === ""))
+    throw proposalError(400,"INVALID_AMOUNT","Fee percentage is required.");
+  const base = decimalUnits(quote.total_quote_usd,"Consultant base fee");
+  const expenses = ["travel_cost","accommodation_cost","report_fee","urgency_surcharge"]
+    .reduce((sum, key) => sum + decimalUnits(quote[key],key), 0n);
+  const consultantTotal = base + expenses;
+  const percentageUnits = feeMode === "percentage" ? decimalUnits(feePercentage,"Fee percentage") : null;
+  if (percentageUnits !== null && percentageUnits > 999999n)
+    throw proposalError(400,"INVALID_AMOUNT","Fee percentage exceeds the supported amount.");
+  const fee = feeMode === "percentage"
+    ? (consultantTotal * percentageUnits + 5000n) / 10000n
+    : decimalUnits(adminMarkupUsd,"Nexaport fee");
+  if (consultantTotal > 999999999999n || fee > 999999999999n || consultantTotal + fee > 999999999999n)
+    throw proposalError(400,"INVALID_AMOUNT","Commercial total exceeds the supported amount.");
   return {
-    consultantBaseQuoteUsd: base,
-    consultantExpensesUsd: expenses,
-    consultantTotalUsd: totals.consultantTotalUsd,
-    adminMarkupUsd: totals.markupUsd,
-    clientTotalUsd: totals.clientTotalUsd,
+    consultantBaseQuoteUsd: dollars(base),
+    consultantExpensesUsd: dollars(expenses),
+    consultantTotalUsd: dollars(consultantTotal),
+    adminMarkupUsd: dollars(fee),
+    clientTotalUsd: dollars(consultantTotal + fee),
+    feeMode,
+    feePercentage: percentageUnits === null ? null : Number(percentageUnits) / 100,
   };
 };
 
@@ -73,6 +89,8 @@ export const mapProposalRow = (row, user = {}) => {
       consultantExpensesUsd: Number(row.consultant_expenses_usd),
       consultantTotalUsd: Number(row.consultant_total_usd),
       adminMarkupUsd: Number(row.admin_markup_usd),
+      feeMode: row.fee_mode || "custom",
+      feePercentage: row.fee_percentage == null ? null : Number(row.fee_percentage),
       internalAdminNotes: row.internal_admin_notes || null,
       createdByUserId: row.created_by_user_id,
       sentByUserId: row.sent_by_user_id,
@@ -169,7 +187,9 @@ export const getActiveProposalForRequest = async (requestIdValue, queryable = po
 export const createOrUpdateDraftProposal = async ({
   requestId: rawRequestId,
   quotationId: rawQuotationId,
-  adminMarkupUsd = 0,
+  adminMarkupUsd,
+  feeMode,
+  feePercentage,
   clientNotes = null,
   internalAdminNotes = null,
   estimatedAttendanceDays = null,
@@ -218,8 +238,8 @@ export const createOrUpdateDraftProposal = async ({
       Number(quote.expert_id) <= 0) {
     throw proposalError(409,"QUOTATION_INTERNAL_APPROVAL_REQUIRED","Latest Consultant quotation revision requires internal approval.");
   }
-
-  const financials = calculateProposalFinancials({total_quote_usd:approvedRevision.base_fee,travel_cost:approvedRevision.travel_cost,accommodation_cost:approvedRevision.accommodation_cost,report_fee:approvedRevision.report_fee,urgency_surcharge:approvedRevision.urgency_surcharge}, adminMarkupUsd);
+  if (approvedRevision.currency && approvedRevision.currency.trim() !== "USD")
+    throw proposalError(409,"UNSUPPORTED_CURRENCY","The approved Consultant revision currency is not supported by this USD proposal.");
 
   // Check if there is an existing draft for this request
   const existingDraft = await queryable.query(
@@ -227,9 +247,27 @@ export const createOrUpdateDraftProposal = async ({
     [requestId]
   );
 
+  const savedDraft = existingDraft.rows[0] || null;
+  const mode = feeMode || (adminMarkupUsd !== undefined ? "custom" : savedDraft?.fee_mode || "percentage");
+  const percentage = mode === "percentage" ? (feePercentage ?? savedDraft?.fee_percentage ?? "25") : null;
+  const amount = mode === "custom" ? (adminMarkupUsd ?? savedDraft?.admin_markup_usd ?? "0") : "0";
+  const financials = calculateProposalFinancials({total_quote_usd:approvedRevision.base_fee,travel_cost:approvedRevision.travel_cost,accommodation_cost:approvedRevision.accommodation_cost,report_fee:approvedRevision.report_fee,urgency_surcharge:approvedRevision.urgency_surcharge}, amount, mode, percentage);
+  if (approvedRevision.consultant_total != null && Number(approvedRevision.consultant_total) !== financials.consultantTotalUsd)
+    throw proposalError(409,"QUOTATION_TOTAL_MISMATCH","Approved Consultant revision components do not match its saved total.");
+
   let proposal;
   if (existingDraft.rows.length) {
     const draftId = existingDraft.rows[0].id;
+    const unchanged = Number(savedDraft.quotation_id) === quotationId &&
+      Number(savedDraft.approved_quotation_revision_id) === Number(approvedRevision.id) &&
+      Number(savedDraft.admin_markup_usd) === financials.adminMarkupUsd &&
+      Number(savedDraft.client_total_usd) === financials.clientTotalUsd &&
+      (savedDraft.fee_mode || "custom") === mode &&
+      (savedDraft.fee_percentage == null ? null : Number(savedDraft.fee_percentage)) === financials.feePercentage &&
+      (savedDraft.client_notes || null) === (clientNotes || null) &&
+      (savedDraft.internal_admin_notes || null) === (internalAdminNotes || null) &&
+      Number(savedDraft.estimated_attendance_days || 0) === Number(estimatedAttendanceDays || approvedRevision.attendance_days || 0);
+    if (unchanged) return getProposalById(draftId, queryable);
     const updated = await queryable.query(
       `
       UPDATE commercial_proposals
@@ -244,6 +282,8 @@ export const createOrUpdateDraftProposal = async ({
              internal_admin_notes = $9,
              estimated_attendance_days = $10,
              approved_quotation_revision_id = $12,
+             fee_mode = $13,
+             fee_percentage = $14,
              updated_at = CURRENT_TIMESTAMP
        WHERE id = $11
        RETURNING *
@@ -261,6 +301,8 @@ export const createOrUpdateDraftProposal = async ({
         estimatedAttendanceDays || approvedRevision.attendance_days || null,
         draftId,
         approvedRevision.id,
+        financials.feeMode,
+        financials.feePercentage,
       ]
     );
     proposal = updated.rows[0];
@@ -295,9 +337,11 @@ export const createOrUpdateDraftProposal = async ({
         internal_admin_notes,
         estimated_attendance_days,
         approved_quotation_revision_id,
+        fee_mode,
+        fee_percentage,
         status,
         created_by_user_id
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$14,'draft',$13)
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$14,$15,$16,'draft',$13)
       RETURNING *
       `,
       [
@@ -315,6 +359,8 @@ export const createOrUpdateDraftProposal = async ({
         estimatedAttendanceDays || approvedRevision.attendance_days || null,
         actorUserId,
         approvedRevision.id,
+        financials.feeMode,
+        financials.feePercentage,
       ]
     );
     proposal = created.rows[0];
