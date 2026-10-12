@@ -54,9 +54,9 @@ test("queue and transitions enforce approved requests, ownership, and transactio
   assert.match(service, /requireApprovedWorkflowRequest\(request\)/);
   assert.match(service, /service_request_id=\$2/);
   assert.match(service, /await client\.query\("BEGIN"\)/);
-  assert.match(service, /acceptQuotationOperation/);
+  assert.match(service, /CLIENT_APPROVAL_REQUIRED/);
   assert.match(service, /current_stage='surveyor'/);
-  assert.ok(service.indexOf("acceptQuotationOperation") < service.lastIndexOf("current_stage='surveyor'"));
+  assert.ok(service.indexOf("CLIENT_APPROVAL_REQUIRED") < service.lastIndexOf("current_stage='surveyor'"));
   assert.match(service, /if\(!workflow\)/);
 });
 

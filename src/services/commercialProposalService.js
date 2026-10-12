@@ -45,6 +45,7 @@ export const mapProposalRow = (row, user = {}) => {
     id: Number(row.id),
     serviceRequestId: Number(row.service_request_id),
     quotationId: Number(row.quotation_id),
+    approvedQuotationRevisionId: row.approved_quotation_revision_id == null ? null : Number(row.approved_quotation_revision_id),
     expertId: Number(row.expert_id),
     revisionNumber: Number(row.revision_number),
     clientTotalUsd: Number(row.client_total_usd),
@@ -87,18 +88,7 @@ export const mapProposalRow = (row, user = {}) => {
     };
   }
 
-  // Consultant (Role 2): only sees consultant quote and neutral status if proposal is for them
-  if (roleId === 2) {
-    return {
-      ...base,
-      consultantTotalUsd: Number(row.consultant_total_usd),
-      // Hide all client amounts & markups
-      clientTotalUsd: undefined,
-      finalTotalUsd: undefined,
-    };
-  }
-
-  return base;
+  return null;
 };
 
 export const getProposalById = async (proposalIdValue, queryable = pool) => {
@@ -146,7 +136,7 @@ export const getProposalsForRequest = async (requestIdValue, queryable = pool) =
   return result.rows;
 };
 
-export const getActiveProposalForRequest = async (requestIdValue, queryable = pool) => {
+export const getActiveProposalForRequest = async (requestIdValue, queryable = pool, clientVisible = false) => {
   const requestId = positiveId(requestIdValue, "requestId");
   const result = await queryable.query(
     `
@@ -160,6 +150,7 @@ export const getActiveProposalForRequest = async (requestIdValue, queryable = po
       LEFT JOIN expert_registration_details erd ON erd.expert_id = e.id
      WHERE cp.service_request_id = $1
        AND cp.status IN ('sent', 'approved', 'draft', 'rejected')
+       AND ($2::boolean = false OR cp.status IN ('sent','approved','rejected'))
      ORDER BY CASE cp.status
                 WHEN 'sent' THEN 1
                 WHEN 'draft' THEN 2
@@ -170,7 +161,7 @@ export const getActiveProposalForRequest = async (requestIdValue, queryable = po
               cp.revision_number DESC
      LIMIT 1
     `,
-    [requestId]
+    [requestId, clientVisible]
   );
   return result.rows[0] || null;
 };
@@ -188,12 +179,15 @@ export const createOrUpdateDraftProposal = async ({
   const requestId = positiveId(rawRequestId, "requestId");
   const quotationId = positiveId(rawQuotationId, "quotationId");
 
+  // Serialize draft allocation with sends and other Admin drafts for this request.
+  await queryable.query("SELECT id FROM service_requests WHERE id=$1 FOR UPDATE", [requestId]);
+
   const quoteResult = await queryable.query(
     `
     SELECT q.*, sr.moderation_status, sr.status AS request_status
       FROM quotations q
       JOIN service_requests sr ON sr.id = q.service_request_id
-     WHERE q.id = $1 AND q.service_request_id = $2
+     WHERE q.id = $1 AND q.service_request_id = $2 FOR UPDATE OF q
     `,
     [quotationId, requestId]
   );
@@ -215,7 +209,17 @@ export const createOrUpdateDraftProposal = async ({
     throw proposalError(409, "QUOTATION_EXPERT_MISSING", "Quotation is missing an associated consultant profile.");
   }
 
-  const financials = calculateProposalFinancials(quote, adminMarkupUsd);
+  const approvedRevision = (await queryable.query(`
+    SELECT r.* FROM quotation_revisions r
+    JOIN quotation_revision_decisions d ON d.revision_id=r.id AND d.decision='approved'
+    WHERE r.id=$1 AND r.quotation_id=$2`, [quote.approved_revision_id, quotationId])).rows[0];
+  if (quote.internal_review_status !== "approved" || !approvedRevision ||
+      Number(quote.latest_revision_id) !== Number(approvedRevision.id) ||
+      Number(quote.expert_id) <= 0) {
+    throw proposalError(409,"QUOTATION_INTERNAL_APPROVAL_REQUIRED","Latest Consultant quotation revision requires internal approval.");
+  }
+
+  const financials = calculateProposalFinancials({total_quote_usd:approvedRevision.base_fee,travel_cost:approvedRevision.travel_cost,accommodation_cost:approvedRevision.accommodation_cost,report_fee:approvedRevision.report_fee,urgency_surcharge:approvedRevision.urgency_surcharge}, adminMarkupUsd);
 
   // Check if there is an existing draft for this request
   const existingDraft = await queryable.query(
@@ -239,6 +243,7 @@ export const createOrUpdateDraftProposal = async ({
              client_notes = $8,
              internal_admin_notes = $9,
              estimated_attendance_days = $10,
+             approved_quotation_revision_id = $12,
              updated_at = CURRENT_TIMESTAMP
        WHERE id = $11
        RETURNING *
@@ -253,11 +258,19 @@ export const createOrUpdateDraftProposal = async ({
         financials.clientTotalUsd,
         clientNotes,
         internalAdminNotes,
-        estimatedAttendanceDays || quote.attendance_days || null,
+        estimatedAttendanceDays || approvedRevision.attendance_days || null,
         draftId,
+        approvedRevision.id,
       ]
     );
     proposal = updated.rows[0];
+    await writeAdminAudit(queryable, {
+      actorUserId,
+      action: "commercial_proposal.draft_updated",
+      targetType: "commercial_proposal",
+      targetId: proposal.id,
+      summary: `Updated draft proposal from approved quotation revision #${approvedRevision.id} for request #${requestId}`,
+    });
   } else {
     // Determine next revision number
     const maxRevResult = await queryable.query(
@@ -281,9 +294,10 @@ export const createOrUpdateDraftProposal = async ({
         client_notes,
         internal_admin_notes,
         estimated_attendance_days,
+        approved_quotation_revision_id,
         status,
         created_by_user_id
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'draft',$13)
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$14,'draft',$13)
       RETURNING *
       `,
       [
@@ -298,8 +312,9 @@ export const createOrUpdateDraftProposal = async ({
         financials.clientTotalUsd,
         clientNotes,
         internalAdminNotes,
-        estimatedAttendanceDays || quote.attendance_days || null,
+        estimatedAttendanceDays || approvedRevision.attendance_days || null,
         actorUserId,
+        approvedRevision.id,
       ]
     );
     proposal = created.rows[0];
@@ -309,7 +324,7 @@ export const createOrUpdateDraftProposal = async ({
       action: "commercial_proposal.created",
       targetType: "commercial_proposal",
       targetId: proposal.id,
-      summary: `Created draft proposal Revision #${proposal.revision_number} for request #${requestId}`,
+      summary: `Created draft proposal Revision #${proposal.revision_number} from approved quotation revision #${approvedRevision.id} for request #${requestId}`,
     });
   }
 
@@ -381,6 +396,18 @@ export const sendProposalToClient = async ({
     throw proposalError(409, "PROPOSAL_NOT_DRAFT", `Only draft proposals can be sent. Current status: ${proposal.status}`);
   }
 
+  const quoteGate=(await queryable.query(`SELECT q.id,q.expert_id,q.latest_revision_id,q.approved_revision_id,q.internal_review_status,
+    r.id AS revision_id FROM quotations q
+    JOIN quotation_revisions r ON r.id=q.approved_revision_id
+    JOIN quotation_revision_decisions d ON d.revision_id=r.id AND d.decision='approved'
+    WHERE q.id=$1 FOR UPDATE OF q`,[proposal.quotation_id])).rows[0];
+  if (!quoteGate || quoteGate.internal_review_status!=="approved" ||
+      Number(quoteGate.expert_id)!==Number(proposal.expert_id) ||
+      Number(quoteGate.latest_revision_id)!==Number(proposal.approved_quotation_revision_id) ||
+      Number(quoteGate.approved_revision_id)!==Number(proposal.approved_quotation_revision_id)) {
+    throw proposalError(409,"QUOTATION_INTERNAL_APPROVAL_REQUIRED","Proposal is not based on the latest approved Consultant quotation revision.");
+  }
+
   // Supersede any previously active sent proposal for this request
   await queryable.query(
     `
@@ -423,6 +450,7 @@ export const sendProposalToClient = async ({
   if (request.requester_user_id) {
     await createProposalSentNotification(queryable, {
       requestId,
+      proposalId: proposal.id,
       recipientUserId: request.requester_user_id,
       revisionNumber: proposal.revision_number,
       clientTotalUsd: proposal.client_total_usd,
@@ -437,7 +465,7 @@ export const sendProposalToClient = async ({
     action: "commercial_proposal.sent",
     targetType: "commercial_proposal",
     targetId: proposal.id,
-    summary: `Sent commercial proposal Revision #${proposal.revision_number} ($${proposal.client_total_usd}) to Client for request #${requestId}`,
+    summary: `Sent commercial proposal Revision #${proposal.revision_number} based on approved quotation revision #${proposal.approved_quotation_revision_id} ($${proposal.client_total_usd}) to Client for request #${requestId}`,
   });
 
   return getProposalById(proposal.id, queryable);
@@ -514,7 +542,7 @@ export const rejectProposalByClient = async ({
 
   const proposalResult = await queryable.query(
     `
-    SELECT cp.*, sr.requester_user_id, sr.vessel_name, sr.status AS request_status
+    SELECT cp.*, sr.requester_user_id, sr.active_proposal_id, sr.vessel_name, sr.status AS request_status
       FROM commercial_proposals cp
       JOIN service_requests sr ON sr.id = cp.service_request_id
      WHERE cp.id = $1 FOR UPDATE OF cp, sr
@@ -543,6 +571,9 @@ export const rejectProposalByClient = async ({
 
   if (proposal.status !== "sent") {
     throw proposalError(409, "PROPOSAL_NOT_DECIDABLE", `This proposal is not available for a decision (Status: ${proposal.status}).`);
+  }
+  if (proposal.active_proposal_id != null && Number(proposal.active_proposal_id)!==Number(proposal.id)) {
+    throw proposalError(409,"STALE_PROPOSAL","This is not the active Client proposal.");
   }
 
   // Update proposal to rejected
@@ -605,6 +636,7 @@ export const approveProposalByClient = async ({
     `
     SELECT cp.*,
            sr.requester_user_id,
+           sr.active_proposal_id,
            sr.moderation_status,
            sr.status AS request_status,
            sr.vessel_name,
@@ -648,6 +680,9 @@ export const approveProposalByClient = async ({
 
   if (proposal.moderation_status !== "approved") {
     throw proposalError(409, "REQUEST_NOT_APPROVED", "Service request must be approved.");
+  }
+  if (proposal.active_proposal_id != null && Number(proposal.active_proposal_id) !== Number(proposal.id)) {
+    throw proposalError(409,"STALE_PROPOSAL","This is not the active Client proposal.");
   }
 
   // 1. Mark proposal as approved

@@ -1,5 +1,6 @@
 import { pool } from "../config/db.js";
-import { acceptQuotationOperation, calculateQuotationTotals } from "../services/quotationAcceptanceService.js";
+import { calculateQuotationTotals } from "../services/quotationAcceptanceService.js";
+import { createQuotationThread, decideQuotationRevision, getNegotiation, submitQuotationRevision } from "../services/quotationNegotiationService.js";
 export { calculateQuotationTotals } from "../services/quotationAcceptanceService.js";
 
 const mapQuotationRow = (row, user) => {
@@ -10,9 +11,12 @@ const mapQuotationRow = (row, user) => {
     serviceRequestId: row.service_request_id,
     status: row.status,
     attendanceDays: row.attendance_days,
-    coverLetter: row.cover_letter,
+    coverLetter: roleId === 1 || roleId === 2 ? row.cover_letter : undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    internalStatus: roleId === 1 || roleId === 2 ? row.internal_review_status : undefined,
+    latestRevisionId: roleId === 1 || roleId === 2 ? row.latest_revision_id : undefined,
+    approvedRevisionId: roleId === 1 || roleId === 2 ? row.approved_revision_id : undefined,
   };
 
   if (roleId === 1) {
@@ -199,272 +203,33 @@ export const getQuotationById = async (req, res) => {
   }
 };
 
-export const createQuotation = async (req, res) => {
-  try {
-    const {
-      serviceRequestId,
-      totalQuoteUsd,
-      attendanceDays,
-      travelCost,
-      accommodationCost,
-      reportFee,
-      urgencySurcharge,
-      coverLetter,
-    } = req.body;
-
-    if (!serviceRequestId || !totalQuoteUsd) {
-      return res.status(400).json({
-        success: false,
-        message: "serviceRequestId and totalQuoteUsd are required",
-      });
-    }
-
-    const requestCheck = await pool.query(
-      `
-      SELECT id, status, moderation_status
-      FROM service_requests
-      WHERE id = $1
-      `,
-      [serviceRequestId]
-    );
-
-    if (!requestCheck.rows.length) {
-      return res.status(404).json({
-        success: false,
-        message: "Service request not found",
-      });
-    }
-    if (
-      Number(req.user.role_id) === 2 &&
-      requestCheck.rows[0].moderation_status !== "approved"
-    ) {
-      return res.status(404).json({
-        success: false,
-        code: "REQUEST_NOT_APPROVED",
-        message: "Service request is not available",
-      });
-    }
-    if (
-      Number(req.user.role_id) === 2 &&
-      !["open", "pending", "active"].includes(
-        String(requestCheck.rows[0].status || "").toLowerCase()
-      )
-    ) {
-      return res.status(403).json({
-        success: false,
-        message: "Quotation can only be submitted for open requests",
-      });
-    }
-
-    const expertCheck = await pool.query(
-      `
-      SELECT id
-      FROM experts
-      WHERE user_id = $1
-      `,
-      [req.user.id]
-    );
-
-    if (Number(req.user.role_id) === 2 && !expertCheck.rows.length) {
-      return res.status(400).json({
-        success: false,
-        message: "Expert profile is required before submitting quotation",
-      });
-    }
-
-    const expertId =
-      Number(req.user.role_id) === 2 ? expertCheck.rows[0].id : req.body.expertId;
-
-    const duplicateQuote = await pool.query(
-      `
-  SELECT id
-  FROM quotations
-  WHERE service_request_id = $1
-  AND expert_id = $2
-  `,
-      [serviceRequestId, expertId]
-    );
-
-    if (duplicateQuote.rows.length) {
-      return res.status(409).json({
-        success: false,
-        message: "You have already submitted a quotation for this request",
-      });
-    }
-
-    const result = await pool.query(
-      `
-      INSERT INTO quotations (
-        service_request_id,
-        expert_id,
-        expert_user_id,
-        total_quote_usd,
-        attendance_days,
-        travel_cost,
-        accommodation_cost,
-        report_fee,
-        urgency_surcharge,
-        cover_letter
-      )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-      RETURNING *
-      `,
-      [
-        serviceRequestId,
-        expertId || null,
-        req.user.id,
-        totalQuoteUsd,
-        attendanceDays || null,
-        travelCost || 0,
-        accommodationCost || 0,
-        reportFee || 0,
-        urgencySurcharge || 0,
-        coverLetter || null,
-      ]
-    );
-
-    res.status(201).json({
-      success: true,
-      message: "Quotation submitted successfully",
-      data: mapQuotationRow(result.rows[0], req.user),
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Failed to submit quotation",
-      error: error.message,
-    });
-  }
+const negotiationError = (res, error) => res.status(error.status || (error.code === "23505" ? 409 : 500)).json({success:false,code:error.code || "NEGOTIATION_ERROR",message:error.status ? error.message : "Unable to process quotation"});
+export const createQuotation = async (req,res) => {
+  try { const row=await createQuotationThread({actor:req.user,body:req.body}); return res.status(201).json({success:true,data:mapQuotationRow(row,req.user)}); }
+  catch(error) { return negotiationError(res,error); }
+};
+export const getQuotationNegotiation = async (req,res) => {
+  try { return res.json({success:true,data:await getNegotiation({quotationId:req.params.id,actor:req.user})}); }
+  catch(error) { return negotiationError(res,error); }
+};
+export const reviseQuotation = async (req,res) => {
+  try { return res.status(201).json({success:true,data:await submitQuotationRevision({quotationId:req.params.id,actor:req.user,body:req.body})}); }
+  catch(error) { return negotiationError(res,error); }
+};
+export const decideQuotation = async (req,res) => {
+  try { return res.json({success:true,data:await decideQuotationRevision({quotationId:req.params.id,actor:req.user,body:req.body})}); }
+  catch(error) { return negotiationError(res,error); }
 };
 
-export const updateQuotation = async (req, res) => {
-  try {
-    const { id } = req.params;
+export const updateQuotation = async (_req, res) => res.status(409).json({
+  success:false,code:"SUBMITTED_QUOTATION_IMMUTABLE",
+  message:"Submitted quotations can only change through a new requested revision."
+});
 
-    const existing = await pool.query(
-      `
-      SELECT
-        q.*,
-        sr.requester_user_id
-      FROM quotations q
-      LEFT JOIN service_requests sr ON sr.id = q.service_request_id
-      WHERE q.id = $1
-      `,
-      [id]
-    );
-
-    if (!existing.rows.length) {
-      return res.status(404).json({
-        success: false,
-        message: "Quotation not found",
-      });
-    }
-
-    if (!canAccessQuotation(req.user, existing.rows[0])) {
-      return res.status(403).json({
-        success: false,
-        message: "Only admin or quotation owner can update this quotation",
-      });
-    }
-
-    const {
-      totalQuoteUsd,
-      attendanceDays,
-      travelCost,
-      accommodationCost,
-      reportFee,
-      urgencySurcharge,
-      coverLetter,
-      status,
-    } = req.body;
-
-    const result = await pool.query(
-      `
-      UPDATE quotations
-      SET
-        total_quote_usd = COALESCE($1, total_quote_usd),
-        attendance_days = COALESCE($2, attendance_days),
-        travel_cost = COALESCE($3, travel_cost),
-        accommodation_cost = COALESCE($4, accommodation_cost),
-        report_fee = COALESCE($5, report_fee),
-        urgency_surcharge = COALESCE($6, urgency_surcharge),
-        cover_letter = COALESCE($7, cover_letter),
-        status = COALESCE($8, status),
-        updated_at = CURRENT_TIMESTAMP
-      WHERE id = $9
-      RETURNING *
-      `,
-      [
-        totalQuoteUsd || null,
-        attendanceDays || null,
-        travelCost || null,
-        accommodationCost || null,
-        reportFee || null,
-        urgencySurcharge || null,
-        coverLetter || null,
-        status || null,
-        id,
-      ]
-    );
-
-    res.json({
-      success: true,
-      message: "Quotation updated successfully",
-      data: mapQuotationRow(result.rows[0], req.user),
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Failed to update quotation",
-      error: error.message,
-    });
-  }
-};
-
-export const deleteQuotation = async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const existing = await pool.query(
-      `
-      SELECT
-        q.*,
-        sr.requester_user_id
-      FROM quotations q
-      LEFT JOIN service_requests sr ON sr.id = q.service_request_id
-      WHERE q.id = $1
-      `,
-      [id]
-    );
-
-    if (!existing.rows.length) {
-      return res.status(404).json({
-        success: false,
-        message: "Quotation not found",
-      });
-    }
-
-    if (!canAccessQuotation(req.user, existing.rows[0])) {
-      return res.status(403).json({
-        success: false,
-        message: "Only admin or quotation owner can delete this quotation",
-      });
-    }
-
-    await pool.query(`DELETE FROM quotations WHERE id = $1`, [id]);
-
-    res.json({
-      success: true,
-      message: "Quotation deleted successfully",
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Failed to delete quotation",
-      error: error.message,
-    });
-  }
-};
+export const deleteQuotation = async (_req, res) => res.status(409).json({
+  success:false,code:"QUOTATION_HISTORY_IMMUTABLE",
+  message:"Submitted quotation history cannot be deleted."
+});
 
 export const acceptQuotation = async (req, res) => {
   return res.status(409).json({

@@ -80,13 +80,10 @@ test("mapProposalRow sanitizes data strictly by role", () => {
   assert.equal(clientView.consultantBaseQuoteUsd, undefined);
   assert.equal(clientView.clientNotes, "Included 2 days attendance");
 
-  // Consultant (Role 2)
+  // Consultant and Provider receive no proposal object.
   const consultantView = mapProposalRow(row, { id: 40, role_id: 2 });
-  assert.equal(consultantView.consultantTotalUsd, 3500);
-  assert.equal(consultantView.finalTotalUsd, undefined);
-  assert.equal(consultantView.clientTotalUsd, undefined);
-  assert.equal(consultantView.adminMarkupUsd, undefined);
-  assert.equal(consultantView.internalAdminNotes, undefined);
+  assert.equal(consultantView, null);
+  assert.equal(mapProposalRow(row, { id: 41, role_id: 4 }), null);
 });
 
 test("createOrUpdateDraftProposal creates draft with calculated financials and revision number", async () => {
@@ -110,10 +107,14 @@ test("createOrUpdateDraftProposal creates draft with calculated financials and r
               attendance_days: 2,
               moderation_status: "approved",
               request_status: "open",
+              internal_review_status: "approved",
+              latest_revision_id: 201,
+              approved_revision_id: 201,
             },
           ],
         };
       }
+      if (s.includes("FROM QUOTATION_REVISIONS R")) return {rows:[{id:201,base_fee:3000,travel_cost:200,accommodation_cost:300,report_fee:0,urgency_surcharge:0,attendance_days:2}]};
       if (s.includes("STATUS = 'DRAFT' FOR UPDATE")) {
         return { rows: [] };
       }
@@ -135,6 +136,7 @@ test("createOrUpdateDraftProposal creates draft with calculated financials and r
               admin_markup_usd: 500,
               client_total_usd: 4000,
               status: "draft",
+              approved_quotation_revision_id: 201,
             },
           ],
         };
@@ -154,6 +156,7 @@ test("createOrUpdateDraftProposal creates draft with calculated financials and r
               admin_markup_usd: 500,
               client_total_usd: 4000,
               status: "draft",
+              approved_quotation_revision_id: 201,
               expert_name: "Capt. John Doe",
             },
           ],
@@ -211,10 +214,12 @@ test("sendProposalToClient transitions proposal to sent, sets pending_client_app
               revision_number: 1,
               client_total_usd: 4000,
               status: "draft",
+              approved_quotation_revision_id: 201,
             },
           ],
         };
       }
+      if (s.includes("FROM QUOTATIONS Q") && s.includes("JOIN QUOTATION_REVISIONS")) return {rows:[{id:50,expert_id:12,latest_revision_id:201,approved_revision_id:201,internal_review_status:"approved"}]};
       if (s.includes("UPDATE COMMERCIAL_PROPOSALS") && s.includes("STATUS = 'SENT'")) {
         return {
           rows: [

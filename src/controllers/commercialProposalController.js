@@ -23,7 +23,7 @@ const sendError = (res, error) => {
 export const getActiveProposal = async (req, res) => {
   try {
     const requestId = req.params.id || req.params.requestId;
-    const proposal = await getActiveProposalForRequest(requestId);
+    const proposal = await getActiveProposalForRequest(requestId, pool, Number(req.user.role_id) === 3);
     if (!proposal) {
       return res.json({ success: true, data: null });
     }

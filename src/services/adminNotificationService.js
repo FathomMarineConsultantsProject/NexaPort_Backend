@@ -90,13 +90,14 @@ export const createServiceRequestApprovedNotifications = async (
 
 export const createProposalSentNotification = async (
   queryable,
-  { requestId, recipientUserId, revisionNumber, clientTotalUsd, vesselName, serviceName }
+  { requestId, proposalId, recipientUserId, revisionNumber, clientTotalUsd, vesselName, serviceName }
 ) => {
   const title = "Commercial proposal ready for review";
   const message = `A commercial proposal (Revision #${revisionNumber}) for ${serviceName || "inspection"} on ${vesselName || "vessel"} ($${Number(clientTotalUsd || 0).toLocaleString()}) is ready for your review.`;
   const payload = JSON.stringify({
     request_id: requestId,
     revision_number: revisionNumber,
+    proposal_id: proposalId,
     client_total_usd: clientTotalUsd,
   });
 
@@ -116,7 +117,7 @@ export const createProposalSentNotification = async (
     DO NOTHING
     RETURNING id
     `,
-    [recipientUserId, String(requestId), title, message, payload]
+    [recipientUserId, String(proposalId), title, message, payload]
   );
 
   return result.rowCount;
@@ -187,7 +188,7 @@ export const createProposalApprovedNotification = async (
         String(proposalId),
         'Your quotation was accepted',
         `Your quotation for ${vesselName || "request"} has been accepted and confirmed for assignment.`,
-        payload,
+        JSON.stringify({ request_id:requestId, proposal_id:proposalId }),
       ]
     );
   }

@@ -633,8 +633,9 @@ export const getServiceRequestById = async (req, res) => {
       };
     });
 
-    const activeProposalRow = await getActiveProposalForRequest(id);
-    requestData.proposal = activeProposalRow ? mapProposalRow(activeProposalRow, req.user) : null;
+    const activeProposalRow = await getActiveProposalForRequest(id, pool, roleId === 3);
+    requestData.proposal = activeProposalRow && (roleId === 1 || ["sent", "approved", "rejected"].includes(activeProposalRow.status))
+      ? mapProposalRow(activeProposalRow, req.user) : null;
 
     res.json({
       success: true,

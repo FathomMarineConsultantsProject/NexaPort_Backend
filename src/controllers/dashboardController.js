@@ -206,11 +206,14 @@ export const getExpertDashboard = async (req, res) => {
           (SELECT COUNT(*) FROM quotations q
             WHERE q.expert_user_id = $1)::int AS quotes_submitted,
           (SELECT COUNT(*) FROM quotations q
-            WHERE q.expert_user_id = $1 AND LOWER(q.status) IN ('submitted', 'pending'))::int AS quotes_pending,
+            WHERE q.expert_user_id = $1 AND LOWER(q.status) IN ('submitted', 'pending') AND q.internal_review_status='awaiting_review')::int AS quotes_pending,
+          (SELECT COUNT(*) FROM quotations q WHERE q.expert_user_id=$1 AND q.internal_review_status='awaiting_review' AND q.status IN ('pending','submitted'))::int AS quotes_awaiting_admin,
+          (SELECT COUNT(*) FROM quotations q WHERE q.expert_user_id=$1 AND q.internal_review_status='revision_requested')::int AS quotes_revision_requested,
+          (SELECT COUNT(*) FROM quotations q WHERE q.expert_user_id=$1 AND q.internal_review_status='approved' AND q.status IN ('pending','submitted'))::int AS quotes_internally_approved,
           (SELECT COUNT(*) FROM quotations q
             WHERE q.expert_user_id = $1 AND LOWER(q.status) = 'accepted')::int AS quotes_accepted,
           (SELECT COUNT(*) FROM quotations q
-            WHERE q.expert_user_id = $1 AND LOWER(q.status) = 'rejected')::int AS quotes_rejected,
+            WHERE q.expert_user_id = $1 AND (LOWER(q.status) = 'rejected' OR q.internal_review_status='rejected'))::int AS quotes_rejected,
           (SELECT COUNT(DISTINCT sr.id)
             FROM service_requests sr, expert_profile
             WHERE LOWER(sr.status) IN ('assigned', 'active')
@@ -284,7 +287,7 @@ export const getExpertDashboard = async (req, res) => {
         `
         SELECT q.id, q.service_request_id, sr.title AS request_title,
           q.total_quote_usd, q.travel_cost, q.accommodation_cost, q.report_fee,
-          q.urgency_surcharge, q.status, q.created_at, q.updated_at
+          q.urgency_surcharge, q.status, q.internal_review_status, q.latest_revision_id, q.created_at, q.updated_at
         FROM quotations q
         JOIN service_requests sr ON sr.id = q.service_request_id
         WHERE q.expert_user_id = $1
@@ -339,7 +342,10 @@ export const getAdminDashboard = async (_req, res) => {
             WHERE sr.moderation_status = 'approved' AND LOWER(sr.status) = 'open'
               AND NOT EXISTS (SELECT 1 FROM quotations q WHERE q.service_request_id = sr.id))::int AS requests_awaiting_quotes,
           (SELECT COUNT(*) FROM quotations q
-            WHERE LOWER(q.status) IN ('submitted', 'pending'))::int AS quotes_awaiting_review,
+            WHERE LOWER(q.status) IN ('submitted', 'pending') AND q.internal_review_status='awaiting_review')::int AS quotes_awaiting_review,
+          (SELECT COUNT(*) FROM quotations q JOIN quotation_revisions r ON r.id=q.latest_revision_id WHERE q.internal_review_status='awaiting_review' AND r.revision_number>1)::int AS revised_quotes_awaiting_review,
+          (SELECT COUNT(*) FROM quotations q WHERE q.internal_review_status='revision_requested')::int AS quotes_waiting_consultant_revision,
+          (SELECT COUNT(*) FROM quotations q WHERE q.internal_review_status='approved' AND q.status IN ('pending','submitted'))::int AS quotes_ready_for_proposal,
           (SELECT COUNT(*) FROM commercial_proposals cp WHERE cp.status = 'sent')::int AS proposals_awaiting_client,
           (SELECT COUNT(*) FROM commercial_proposals cp JOIN service_requests sr ON sr.id = cp.service_request_id WHERE cp.status = 'rejected' AND sr.status = 'open' AND NOT EXISTS (SELECT 1 FROM commercial_proposals cp2 WHERE cp2.service_request_id = sr.id AND cp2.status IN ('sent', 'approved')))::int AS proposals_client_rejected,
           (SELECT COUNT(*) FROM service_requests WHERE LOWER(status) IN ('assigned', 'active'))::int AS active_jobs,
@@ -358,11 +364,11 @@ export const getAdminDashboard = async (_req, res) => {
         SELECT q.id, q.service_request_id, sr.title AS request_title,
           e.full_name AS consultant_name, q.total_quote_usd, q.travel_cost,
           q.accommodation_cost, q.report_fee, q.urgency_surcharge,
-          q.status, q.created_at
+          q.status, q.internal_review_status, q.created_at
         FROM quotations q
         JOIN service_requests sr ON sr.id = q.service_request_id
         LEFT JOIN experts e ON e.id = q.expert_id
-        WHERE LOWER(q.status) IN ('submitted', 'pending')
+        WHERE LOWER(q.status) IN ('submitted', 'pending') AND q.internal_review_status='awaiting_review'
         ORDER BY q.created_at ASC, q.id ASC
         LIMIT 8
       `),
@@ -389,7 +395,7 @@ export const getAdminDashboard = async (_req, res) => {
       pool.query(`
         SELECT q.id, q.service_request_id, sr.title AS request_title,
           e.full_name AS consultant_name, q.total_quote_usd,
-          q.admin_markup_usd, q.client_total_usd, q.status,
+          q.admin_markup_usd, q.client_total_usd, q.status, q.internal_review_status,
           q.created_at, q.updated_at
         FROM quotations q
         JOIN service_requests sr ON sr.id = q.service_request_id

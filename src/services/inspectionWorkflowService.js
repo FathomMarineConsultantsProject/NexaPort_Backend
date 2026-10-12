@@ -1,7 +1,7 @@
 import { resolveRequestCompany } from "./requestParticularsService.js";
 import { pool } from "../config/db.js";
 import { writeAdminAudit } from "./adminAuditService.js";
-import { acceptQuotationOperation, calculateQuotationTotals } from "./quotationAcceptanceService.js";
+import { calculateQuotationTotals } from "./quotationAcceptanceService.js";
 import { getProposalsForRequest, getActiveProposalForRequest, mapProposalRow } from "./commercialProposalService.js";
 import { createPresignedGetUrl } from "../utils/s3Presign.js";
 import { getPhaseTwoWorkflowState } from "./inspectionWorkflowPhase2Service.js";
@@ -36,6 +36,9 @@ const mapQuote = (row) => {
     id: row.id, serviceRequestId: row.service_request_id, expertId: row.expert_id,
     consultantName: row.expert_name, consultantRating: row.expert_rating == null ? null : Number(row.expert_rating),
     consultantLocation: row.expert_location, status: row.status, attendanceDays: row.attendance_days,
+    internalStatus: row.internal_review_status, latestRevisionId: row.latest_revision_id,
+    approvedRevisionId: row.approved_revision_id,
+    revisions: row.revisions || [],
     baseFeeUsd: Number(row.total_quote_usd || 0), travelCostUsd: Number(row.travel_cost || 0),
     accommodationCostUsd: Number(row.accommodation_cost || 0), reportFeeUsd: Number(row.report_fee || 0),
     urgencySurchargeUsd: Number(row.urgency_surcharge || 0), consultantTotalUsd: totals.consultantTotalUsd,
@@ -73,7 +76,7 @@ export const listInspectionWorkflows = async ({ search, stage, status } = {}) =>
        COALESCE(sr.accepted_expert_id,accepted_q.expert_id,assignment.expert_id) AS operational_expert_id,
        operational_expert.full_name AS accepted_expert_name,
        (SELECT COUNT(*)::int FROM quotations q
-          WHERE q.service_request_id=sr.id AND q.status IN ('pending','submitted')) AS quotations_awaiting_review,
+          WHERE q.service_request_id=sr.id AND q.status IN ('pending','submitted') AND q.internal_review_status='awaiting_review') AS quotations_awaiting_review,
        iw.id AS workflow_id,COALESCE(iw.current_stage,CASE WHEN sr.accepted_quotation_id IS NOT NULL AND sr.accepted_expert_id IS NOT NULL THEN 'surveyor' WHEN sr.accepted_quotation_id IS NOT NULL THEN 'confirm' ELSE 'overview' END) AS current_stage,
        (SELECT ii.status FROM inspection_invoices ii WHERE ii.workflow_id=iw.id) AS invoice_status,
        COALESCE(iw.updated_at,sr.updated_at) AS updated_at
@@ -113,7 +116,23 @@ export const getInspectionWorkflow = async (requestIdValue, queryable = pool) =>
   const quoteResult = await queryable.query(
     `SELECT q.*,e.full_name AS expert_name,e.rating AS expert_rating,e.base_location AS expert_location
        FROM quotations q LEFT JOIN experts e ON e.id=q.expert_id WHERE q.service_request_id=$1 ORDER BY q.created_at DESC`, [requestId]);
-  const quotations = quoteResult.rows.map(mapQuote);
+  const history = await queryable.query(`SELECT r.*,d.id AS decision_id,d.decision,d.decision_at,d.reason,d.consultant_message,
+    d.suggested_max_amount,d.suggested_max_currency,d.internal_admin_note
+    FROM quotation_revisions r LEFT JOIN quotation_revision_decisions d ON d.revision_id=r.id
+    JOIN quotations q ON q.id=r.quotation_id WHERE q.service_request_id=$1 ORDER BY r.quotation_id,r.revision_number`,[requestId]);
+  const byQuote = new Map();
+  for (const r of history.rows) {
+    const items=byQuote.get(Number(r.quotation_id)) || [];
+    items.push({id:r.id,revisionNumber:r.revision_number,submittedAt:r.submitted_at,currency:r.currency,
+      baseFee:Number(r.base_fee),attendanceDays:r.attendance_days,travelCost:Number(r.travel_cost),
+      accommodationCost:Number(r.accommodation_cost),reportFee:Number(r.report_fee),urgencySurcharge:Number(r.urgency_surcharge),
+      consultantTotal:Number(r.consultant_total),coverLetter:r.cover_letter,
+      decision:r.decision?{id:r.decision_id,type:r.decision,decidedAt:r.decision_at,reason:r.reason,
+        consultantMessage:r.consultant_message,suggestedMaxAmount:r.suggested_max_amount,
+        suggestedMaxCurrency:r.suggested_max_currency,internalAdminNote:r.internal_admin_note}:null});
+    byQuote.set(Number(r.quotation_id),items);
+  }
+  const quotations = quoteResult.rows.map(row=>mapQuote({...row,revisions:byQuote.get(Number(row.id)) || []}));
   const acceptedQuotation = quotations.find((q) => Number(q.id) === Number(request.accepted_quotation_id)) || quotations.find((q) => q.status === "accepted") || null;
   const selectedQuotation = quotations.find((q) => Number(q.id) === Number(workflow?.selected_quotation_id)) || null;
   let surveyor = null;
@@ -140,7 +159,7 @@ export const getInspectionWorkflow = async (requestIdValue, queryable = pool) =>
     request: { id:request.id,reference:request.title||`Request #${request.id}`,title:request.title,inspectionMethodId:request.inspection_method_id==null?null:Number(request.inspection_method_id),inspectionVertical:request.service_category,serviceType:request.service_type,serviceCategory:request.service_category,serviceTypeOther:request.service_type_other,service:request.service_label,scope:request.scope_of_work,urgency:request.urgency,requiredBy:request.required_by,status:request.status,moderationStatus:request.moderation_status,approvedBudgetUsd:request.approved_budget_usd==null?null:Number(request.approved_budget_usd),vessel:{name:request.vessel_name,imoNumber:request.imo_number,type:request.vessel_type,flag:request.flag_state},terminalName:request.terminal_name||null,agentDetails:{companyName:request.agent_company_name||null,contactName:request.agent_contact_name||null,email:request.agent_email||null,phone:request.agent_phone||null},port:{name:request.port_name,country:request.country,eta:request.eta,locationSummary:request.location_summary} },
     client: { id:request.requester_user_id,name:companyName||request.requester_name||request.client_user_name,companyVerified:Boolean(companyName),email:request.client_email,phone:request.client_phone },
     quotations,selectedQuotation,acceptedQuotation,surveyor,proposal,proposals,
-    counts:{ quotationsAwaitingReview:quotations.filter((q)=>AWAITING_QUOTATION_STATUSES.includes(String(q.status).toLowerCase())).length },
+    counts:{ quotationsAwaitingReview:quotations.filter((q)=>AWAITING_QUOTATION_STATUSES.includes(String(q.status).toLowerCase()) && q.internalStatus==="awaiting_review").length },
     operationalError: operationalExpertId && !surveyor ? "The accepted or assigned Consultant profile could not be loaded." : null,
     ...phaseTwo,
     ...closeout,
@@ -167,7 +186,7 @@ export const advanceOverviewToQuote = async ({requestId:value,actorUserId}) => {
 
 export const selectWorkflowQuotation = async ({requestId:value,quotationId:quoteValue,actorUserId}) => {
   const requestId=positiveId(value,"requestId"),quotationId=positiveId(quoteValue,"quotationId"); const client=await pool.connect();
-  try{await client.query("BEGIN"); const wf=await client.query("SELECT * FROM inspection_workflows WHERE service_request_id=$1 FOR UPDATE",[requestId]); if(!wf.rows.length)throw workflowError(404,"WORKFLOW_NOT_FOUND","Initialize the workflow first"); if(!["quote","confirm"].includes(wf.rows[0].current_stage))throw workflowError(409,"INVALID_TRANSITION","Quotation selection is only available during Quote or Confirm"); const quote=await client.query("SELECT id,status FROM quotations WHERE id=$1 AND service_request_id=$2",[quotationId,requestId]); if(!quote.rows.length)throw workflowError(409,"QUOTATION_REQUEST_MISMATCH","Quotation does not belong to this request"); if(!AWAITING_QUOTATION_STATUSES.includes(String(quote.rows[0].status).toLowerCase()))throw workflowError(409,"QUOTATION_NOT_ELIGIBLE","Quotation is no longer eligible for selection"); await client.query("UPDATE inspection_workflows SET selected_quotation_id=$1,current_stage='confirm',updated_at=CURRENT_TIMESTAMP WHERE id=$2",[quotationId,wf.rows[0].id]); await writeAdminAudit(client,{actorUserId,action:"inspection_workflow.quotation_selected",targetType:"inspection_workflow",targetId:wf.rows[0].id,summary:`Selected quotation ${quotationId} for request ${requestId}`}); await client.query("COMMIT"); return getInspectionWorkflow(requestId);}catch(error){try{await client.query("ROLLBACK");}catch{}throw error;}finally{client.release();}
+  try{await client.query("BEGIN"); const wf=await client.query("SELECT * FROM inspection_workflows WHERE service_request_id=$1 FOR UPDATE",[requestId]); if(!wf.rows.length)throw workflowError(404,"WORKFLOW_NOT_FOUND","Initialize the workflow first"); if(!["quote","confirm"].includes(wf.rows[0].current_stage))throw workflowError(409,"INVALID_TRANSITION","Quotation selection is only available during Quote or Confirm"); const quote=await client.query("SELECT id,status,internal_review_status,latest_revision_id,approved_revision_id FROM quotations WHERE id=$1 AND service_request_id=$2 FOR UPDATE",[quotationId,requestId]); if(!quote.rows.length)throw workflowError(409,"QUOTATION_REQUEST_MISMATCH","Quotation does not belong to this request"); if(!AWAITING_QUOTATION_STATUSES.includes(String(quote.rows[0].status).toLowerCase()) || quote.rows[0].internal_review_status!=="approved" || Number(quote.rows[0].latest_revision_id)!==Number(quote.rows[0].approved_revision_id))throw workflowError(409,"QUOTATION_NOT_ELIGIBLE","Latest Consultant quotation revision requires internal approval"); await client.query("UPDATE inspection_workflows SET selected_quotation_id=$1,current_stage='confirm',updated_at=CURRENT_TIMESTAMP WHERE id=$2",[quotationId,wf.rows[0].id]); await writeAdminAudit(client,{actorUserId,action:"inspection_workflow.quotation_selected",targetType:"inspection_workflow",targetId:wf.rows[0].id,summary:`Selected quotation ${quotationId} for request ${requestId}`}); await client.query("COMMIT"); return getInspectionWorkflow(requestId);}catch(error){try{await client.query("ROLLBACK");}catch{}throw error;}finally{client.release();}
 };
 
 export const confirmWorkflowQuotation = async ({requestId:value,adminMarkupUsd,actorUserId}) => {

@@ -26,11 +26,11 @@ const router = express.Router();
 
 router.post("/generate-scope", requireAuth, requireApprovedClient, allowRoles(1, 3), generateRequestScope);
 
-router.get("/", requireAuth, requireApprovedClient, getServiceRequests);
-router.get("/:id", requireAuth, requireApprovedClient, getServiceRequestById);
+router.get("/", requireAuth, requireApprovedClient, allowRoles(1, 2, 3), getServiceRequests);
+router.get("/:id", requireAuth, requireApprovedClient, allowRoles(1, 2, 3), getServiceRequestById);
 
 // Commercial proposals
-router.get("/:id/proposal", requireAuth, requireApprovedClient, getActiveProposal);
+router.get("/:id/proposal", requireAuth, requireApprovedClient, allowRoles(1, 3), getActiveProposal);
 router.get("/:id/proposals", requireAuth, allowRoles(1), listProposals);
 router.post("/:id/proposal/draft", requireAuth, allowRoles(1), saveDraft);
 router.post("/:id/proposal/send", requireAuth, allowRoles(1), sendProposal);
