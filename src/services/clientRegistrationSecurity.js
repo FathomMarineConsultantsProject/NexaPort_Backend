@@ -11,11 +11,25 @@ const registrationSecret = () => {
   return process.env.CLIENT_REGISTRATION_TOKEN_SECRET;
 };
 
+// Missing configuration uses one hour; explicit values must be 1 minute–24 hours.
+// Bare integers are seconds (including environment strings), never JWT milliseconds.
+export const parseRegistrationTokenLifetime = (value) => {
+  if (value === undefined || value === null || value === "") return 3600;
+  const match = /^(\d+)\s*(s|m|h|d)?$/i.exec(String(value).trim());
+  const seconds = match ? Number(match[1]) * ({ s: 1, m: 60, h: 3600, d: 86400 }[match[2]?.toLowerCase() || "s"]) : NaN;
+  if (!Number.isSafeInteger(seconds) || seconds < 60 || seconds > 86400) {
+    throw Object.assign(new Error("Registration token lifetime must be between 60 and 86400 seconds, optionally using s, m, h or d"), { code: "REGISTRATION_TOKEN_TTL_INVALID" });
+  }
+  return seconds;
+};
+
+export const getRegistrationTokenLifetime = () => parseRegistrationTokenLifetime(process.env.CLIENT_REGISTRATION_TOKEN_TTL);
+
 export const createRegistrationDraftToken = ({ email, draftId, expiresIn } = {}) =>
   jwt.sign(
     { email: normalizeEmail(email), draftId, purpose: "client-registration-draft" },
     registrationSecret(),
-    { expiresIn: expiresIn || process.env.CLIENT_REGISTRATION_TOKEN_TTL || "60m" }
+    { expiresIn: parseRegistrationTokenLifetime(expiresIn ?? process.env.CLIENT_REGISTRATION_TOKEN_TTL) }
   );
 
 export const verifyRegistrationDraftToken = (token) => {

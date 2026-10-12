@@ -1,5 +1,6 @@
 import { pool } from "../config/db.js";
 import { writeAdminAudit } from "./adminAuditService.js";
+import { getAuthorizedQuotationRevision } from "./quotationAuthorizationService.js";
 import {
   createProposalApprovedNotification,
   createProposalRejectedNotification,
@@ -229,10 +230,7 @@ export const createOrUpdateDraftProposal = async ({
     throw proposalError(409, "QUOTATION_EXPERT_MISSING", "Quotation is missing an associated consultant profile.");
   }
 
-  const approvedRevision = (await queryable.query(`
-    SELECT r.* FROM quotation_revisions r
-    JOIN quotation_revision_decisions d ON d.revision_id=r.id AND d.decision='approved'
-    WHERE r.id=$1 AND r.quotation_id=$2`, [quote.approved_revision_id, quotationId])).rows[0];
+  const approvedRevision = await getAuthorizedQuotationRevision(queryable, quotationId, quote.approved_revision_id);
   if (quote.internal_review_status !== "approved" || !approvedRevision ||
       Number(quote.latest_revision_id) !== Number(approvedRevision.id) ||
       Number(quote.expert_id) <= 0) {
@@ -445,8 +443,10 @@ export const sendProposalToClient = async ({
   const quoteGate=(await queryable.query(`SELECT q.id,q.expert_id,q.latest_revision_id,q.approved_revision_id,q.internal_review_status,
     r.id AS revision_id FROM quotations q
     JOIN quotation_revisions r ON r.id=q.approved_revision_id
-    JOIN quotation_revision_decisions d ON d.revision_id=r.id AND d.decision='approved'
-    WHERE q.id=$1 FOR UPDATE OF q`,[proposal.quotation_id])).rows[0];
+    LEFT JOIN quotation_revision_decisions d ON d.revision_id=r.id AND d.decision='approved'
+    LEFT JOIN quotation_legacy_authorizations legacy ON legacy.revision_id=r.id
+    WHERE q.id=$1 AND q.service_request_id=$2
+      AND (d.id IS NOT NULL OR legacy.revision_id IS NOT NULL) FOR UPDATE OF q`,[proposal.quotation_id,requestId])).rows[0];
   if (!quoteGate || quoteGate.internal_review_status!=="approved" ||
       Number(quoteGate.expert_id)!==Number(proposal.expert_id) ||
       Number(quoteGate.latest_revision_id)!==Number(proposal.approved_quotation_revision_id) ||

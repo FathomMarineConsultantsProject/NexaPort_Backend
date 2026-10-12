@@ -66,14 +66,15 @@ test("profile updates persist registration fields and validated media keys", asy
 });
 
 test("expert identity mapping remains user-owned while quotations remain expert-keyed", async () => {
-  const [expert, quotation] = await Promise.all([
+  const [expert, quotation, negotiation] = await Promise.all([
     source("src/controllers/expertController.js"),
     source("src/controllers/quotationController.js"),
+    source("src/services/quotationNegotiationService.js"),
   ]);
 
   assert.match(expert, /WHERE e\.user_id = \$1/);
   assert.match(expert, /Number\(expert\.user_id\) === Number\(user\.id\)/);
-  assert.match(quotation, /WHERE user_id = \$1/);
+  assert.match(negotiation, /SELECT id,user_id FROM experts WHERE user_id\s*=\s*\$1/);
   assert.match(quotation, /q\.expert_id = \$\$\{values\.length\}/);
   assert.match(quotation, /q\.expert_user_id = \$\$\{values\.length\}/);
   assert.match(quotation, /Number\(row\.expert_user_id\) === Number\(user\.id\)/);

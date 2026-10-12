@@ -5,6 +5,7 @@ import { createToken } from "./authController.js";
 import { createRegistrationNotifications } from "../services/adminNotificationService.js";
 import {
   createRegistrationDraftToken,
+  getRegistrationTokenLifetime,
   getRegistrationBearer,
   normalizeEmail,
   registrationDraftMatchesEmail,
@@ -93,9 +94,9 @@ export const createClientRegistrationDraft = async (req, res) => {
     }
     const draftId = crypto.randomUUID();
     const registrationDraftToken = createRegistrationDraftToken({ email, draftId });
-    return res.json({ success: true, registrationDraftToken, expiresIn: process.env.CLIENT_REGISTRATION_TOKEN_TTL || "60m" });
+    return res.json({ success: true, registrationDraftToken, expiresIn: getRegistrationTokenLifetime() });
   } catch (error) {
-    if (error?.code === "REGISTRATION_TOKEN_NOT_CONFIGURED") {
+    if (["REGISTRATION_TOKEN_NOT_CONFIGURED", "REGISTRATION_TOKEN_TTL_INVALID"].includes(error?.code)) {
       return res.status(503).json({ success: false, code: "REGISTRATION_SERVICE_NOT_CONFIGURED", message: "Client registration is not configured." });
     }
     return res.status(500).json({ success: false, message: "Unable to start client registration." });

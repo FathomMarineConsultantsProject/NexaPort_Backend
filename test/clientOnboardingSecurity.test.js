@@ -28,7 +28,9 @@ import {
 import { setPrivateObjectClientForTests } from "../src/services/privateObjectService.js";
 
 process.env.CLIENT_REGISTRATION_TOKEN_SECRET = "test-only-registration-secret";
+process.env.CLIENT_REGISTRATION_TOKEN_TTL = "60m";
 process.env.JWT_SECRET = "test-only-jwt-secret";
+process.env.JWT_EXPIRES_IN = "7d";
 process.env.AWS_REGION = "ap-south-1";
 process.env.AWS_S3_BUCKET = "nexaport-client-test";
 process.env.AWS_ACCESS_KEY_ID = "test-access-key";
@@ -159,7 +161,7 @@ test("registration draft endpoint returns a signed token for an available normal
   }
   assert.equal(res.statusCode, 200);
   assert.equal(typeof res.body.registrationDraftToken, "string");
-  assert.equal(res.body.expiresIn, "60m");
+  assert.equal(res.body.expiresIn, 3600);
   const identity = verifyRegistrationDraftToken(res.body.registrationDraftToken);
   assert.equal(identity.email, "new.client@example.com");
   assert.match(identity.draftId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
@@ -175,7 +177,7 @@ test("draft tokens bind normalized email, draft ID, and purpose", () => {
 });
 
 test("expired and wrong-purpose tokens are rejected", async () => {
-  const expired = createRegistrationDraftToken({ email: "user@example.com", draftId: "draft-id", expiresIn: "1ms" });
+  const expired = jwt.sign({ email: "user@example.com", draftId: "draft-id", purpose: "client-registration-draft" }, process.env.CLIENT_REGISTRATION_TOKEN_SECRET, { expiresIn: -1 });
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.throws(() => verifyRegistrationDraftToken(expired), /expired/i);
 
@@ -199,7 +201,7 @@ test("invalid and expired draft tokens cannot obtain upload URLs", async () => {
   await presignClientRegistrationDocument({ headers: { authorization: "Bearer invalid" }, body: {}, ip: "invalid-upload-test" }, invalidResponse);
   assert.equal(invalidResponse.statusCode, 401);
 
-  const expired = createRegistrationDraftToken({ email: "user@example.com", draftId: "expired-draft", expiresIn: "1ms" });
+  const expired = jwt.sign({ email: "user@example.com", draftId: "expired-draft", purpose: "client-registration-draft" }, process.env.CLIENT_REGISTRATION_TOKEN_SECRET, { expiresIn: -1 });
   await new Promise((resolve) => setTimeout(resolve, 10));
   const expiredResponse = mockResponse();
   await presignClientRegistrationDocument({ headers: { authorization: `Bearer ${expired}` }, body: {}, ip: "expired-upload-test" }, expiredResponse);

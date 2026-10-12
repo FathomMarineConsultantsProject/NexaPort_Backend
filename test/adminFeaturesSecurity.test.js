@@ -148,27 +148,22 @@ test("personal notifications and administration APIs are authenticated and role-
   assert.match(administration, /deactivate-anonymize/);
 });
 
-test("request/admin migrations are rerun-safe, non-destructive, and keep operational status separate", async () => {
-  const [moderation, backfill, audit] = await Promise.all([
-    source("../Request_User_Admin_Migration/001_request_moderation_and_admin.sql"),
-    source("../Request_User_Admin_Migration/002_existing_requests_backfill.sql"),
-    source("../Request_User_Admin_Migration/003_administrative_audit.sql"),
-  ]);
-  assert.match(moderation, /ADD COLUMN IF NOT EXISTS moderation_status TEXT NOT NULL DEFAULT 'pending'/);
-  assert.match(moderation, /CHECK \(moderation_status IN \('pending', 'approved'\)\)/);
-  assert.match(moderation, /ON DELETE SET NULL/);
+test("available request moderation migration preserves existing budget and operational status", async () => {
+  const moderation = await source("sql/service_request_moderation_001.sql");
+  assert.match(moderation, /ADD COLUMN IF NOT EXISTS client_budget_usd/);
+  assert.match(moderation, /WHERE client_budget_usd IS NULL/);
+  assert.match(moderation, /approved_budget_usd = budget_usd/);
   assert.doesNotMatch(moderation, /DROP TABLE|DROP COLUMN/);
-  assert.match(backfill, /moderation_status = 'approved'/);
-  assert.match(backfill, /approved_at = COALESCE\(approved_at, created_at\)/);
-  assert.match(audit, /CREATE TABLE IF NOT EXISTS public\.admin_audit_logs/);
-  assert.match(audit, /CREATE TABLE IF NOT EXISTS public\.s3_cleanup_jobs/);
+  assert.doesNotMatch(moderation, /SET\s+status\s*=/i);
 });
 
 test("authenticated requests revalidate active account and database role", async () => {
   const middleware = await source("src/middlewares/authMiddleware.js");
   assert.match(middleware, /SELECT id, full_name, email, username, role_id, is_active FROM users/);
   assert.match(middleware, /ACCOUNT_INACTIVE/);
-  assert.match(middleware, /req\.user = user/);
+  assert.match(middleware, /req\.user = decoded\.active_role === undefined \? user/);
+  assert.match(middleware, /activateRole\(user, user\.roles/);
+  assert.match(middleware, /Active role is no longer assigned/);
 });
 
 test("Client request updates cannot change operational or moderation fields", async () => {
@@ -178,10 +173,10 @@ test("Client request updates cannot change operational or moderation fields", as
   assert.doesNotMatch(updateBlock, /moderationStatus|approvedAt|approvedByUserId|requesterUserId|acceptedQuotationId/);
 });
 
-test("notification migration has recipient indexes and duplicate protection", async () => {
-  const migration = await source("../Client_Onboarding_Migration/004_admin_notifications.sql");
-  assert.match(migration, /CREATE TABLE IF NOT EXISTS public\.admin_notifications/);
-  assert.match(migration, /recipient_user_id INTEGER NOT NULL REFERENCES public\.users\(id\) ON DELETE CASCADE/);
-  assert.match(migration, /WHERE read_at IS NULL/);
-  assert.match(migration, /recipient_user_id, type, entity_type, entity_id/);
+test("notification implementation targets recipients and requires database duplicate protection", async () => {
+  const notifications = await source("src/services/adminNotificationService.js");
+  assert.match(notifications, /INSERT INTO public\.admin_notifications/);
+  assert.match(notifications, /recipient_user_id/);
+  assert.match(notifications, /ON CONFLICT \(recipient_user_id, type, entity_type, entity_id\)/);
+  assert.match(notifications, /DO NOTHING/);
 });

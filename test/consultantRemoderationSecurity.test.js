@@ -12,6 +12,7 @@ const response = () => ({
 
 test("pending re-moderation state removes Consultant list/detail/quotation access until re-approved", async () => {
   const originalQuery = pool.query;
+  const originalConnect = pool.connect;
   const sql = [];
   try {
     pool.query = async (text) => { sql.push(text); return { rows: [] }; };
@@ -25,15 +26,21 @@ test("pending re-moderation state removes Consultant list/detail/quotation acces
     assert.equal(detailRes.statusCode, 404);
     assert.match(sql.at(-1), /sr\.moderation_status = 'approved'/);
 
-    pool.query = async () => ({ rows: [{ id: 7, status: "open", moderation_status: "pending" }] });
+    pool.connect = async () => ({
+      query: async (text) => { sql.push(text); return { rows: text.includes("FROM service_requests") ? [{ id: 7, status: "open", moderation_status: "pending" }] : [] }; },
+      release() {},
+    });
     const quoteRes = response();
     await createQuotation({ body: { serviceRequestId: 7, totalQuoteUsd: 1000 }, user: { id: 2, role_id: 2 } }, quoteRes);
-    assert.equal(quoteRes.statusCode, 404);
-    assert.equal(quoteRes.body.code, "REQUEST_NOT_APPROVED");
+    assert.equal(quoteRes.statusCode, 409);
+    assert.equal(quoteRes.body.code, "REQUEST_NOT_AVAILABLE");
+    assert.equal(sql.at(-1), "ROLLBACK");
+    assert.ok(!sql.some((text) => text.includes("INSERT INTO quotations")));
 
     // The same list/detail/quotation gates use moderation_status='approved', so Admin re-approval restores visibility.
     assert.match(sql[0], /moderation_status = 'approved'/);
   } finally {
     pool.query = originalQuery;
+    pool.connect = originalConnect;
   }
 });

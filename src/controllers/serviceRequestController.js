@@ -1,4 +1,5 @@
 import { pool } from "../config/db.js";
+import { confirmAcceptedExpertAssignment } from "../services/confirmedAssignmentService.js";
 import { findOrCreatePort } from "../utils/findOrCreatePort.js";
 import { deleteServiceRequestById } from "../services/serviceRequestService.js";
 import { createServiceRequestApprovedNotifications } from "../services/adminNotificationService.js";
@@ -1102,53 +1103,13 @@ export const deleteServiceRequest = async (req, res) => {
 
 export const assignExpertsToRequest = async (req, res) => {
   try {
-    const { id } = req.params;
-    const { expertIds = [] } = req.body;
-
-    if (!Array.isArray(expertIds) || expertIds.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "expertIds array is required",
-      });
-    }
-
-    const requestCheck = await pool.query(
-      `SELECT id FROM service_requests WHERE id = $1`,
-      [id]
-    );
-
-    if (!requestCheck.rows.length) {
-      return res.status(404).json({
-        success: false,
-        message: "Service request not found",
-      });
-    }
-
-    for (const expertId of expertIds) {
-      await pool.query(
-        `
-        INSERT INTO request_expert_assignments (
-          service_request_id,
-          expert_id,
-          assigned_by_user_id
-        )
-        VALUES ($1, $2, $3)
-        ON CONFLICT (service_request_id, expert_id)
-        DO UPDATE SET updated_at = CURRENT_TIMESTAMP
-        `,
-        [id, expertId, req.user.id]
-      );
-    }
-
-    res.json({
-      success: true,
-      message: "Experts assigned successfully",
-    });
+    const data = await confirmAcceptedExpertAssignment({ requestId: req.params.id, expertIds: req.body?.expertIds, actor: req.user });
+    res.json({ success: true, message: "Client-approved Expert assignment confirmed", data });
   } catch (error) {
-    res.status(500).json({
+    res.status(error.status || 500).json({
       success: false,
-      message: "Failed to assign experts",
-      error: error.message,
+      code: error.code || "ASSIGNMENT_FAILED",
+      message: error.status ? error.message : "Failed to confirm Expert assignment",
     });
   }
 };
