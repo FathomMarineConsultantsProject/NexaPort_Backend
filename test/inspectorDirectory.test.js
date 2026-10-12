@@ -20,8 +20,23 @@ test("country/location and flag state use separate predicates and parameters", (
 test("type validation and pagination are bounded", () => {
   assert.throws(() => normalizeInspectorSearch({ type: "private_documents" }), /Unsupported inspector type/);
   assert.deepEqual(normalizeInspectorSearch({ type: "flag_inspector", page: 3, limit: 500 }), {
-    q: "", country: "", type: "flag_inspector", discipline: "", flagState: "", page: 3, limit: 100,
+    q: "", country: "", port: "", type: "flag_inspector", category: "", discipline: "", specialization: "",
+    inspectionType: "", flagState: "", accreditation: "", capability: "", humanOnly: false, page: 3, limit: 100,
   });
+});
+
+test("Surveyor filters preserve source coverage and exact Nexaport ID search", () => {
+  const { sql, values } = buildInspectorSearchQuery({ q: "2026007", category: "Marine Surveyors", country: "India", port: "Mumbai", humanOnly: true });
+  assert.equal(values[1], "2026007");
+  assert.equal(values[8], "%Mumbai%");
+  assert.equal(values[9], "Marine Surveyors");
+  assert.equal(values[14], true);
+  assert.match(sql, /nexaport_id=\$2/);
+  assert.match(sql, /\$10=ANY\(categories\)/);
+  assert.match(sql, /\$15::boolean=FALSE OR is_person/);
+  for (const source of ["experts e", "flag_inspectors fi", "accredited_inspectors ai", "appointed_ship_surveyors aps"]) assert.ok(sql.includes(source));
+  assert.doesNotMatch(sql, /FROM\s+(owners_managers|service_providers|ship_agents|suppliers|shipyards|tug_boats)\b/i);
+  assert.throws(() => normalizeInspectorSearch({ category: "Company" }), /Unsupported Surveyor category/);
 });
 
 test("combined result preserves source/type labels and pagination", async () => {

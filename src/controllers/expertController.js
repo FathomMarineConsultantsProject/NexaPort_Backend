@@ -739,6 +739,9 @@ export const createExpert = async (req, res) => {
   const client = await pool.connect();
 
   try {
+    if (req.body?.nexaport_id !== undefined || req.body?.nexaportId !== undefined) {
+      return res.status(400).json({ success: false, message: "Nexaport ID is assigned automatically" });
+    }
     const {
       full_name,
       biography,
@@ -814,6 +817,9 @@ export const createExpert = async (req, res) => {
     );
 
     const expert = expertResult.rows[0];
+    if (expertUserId && !expert.nexaport_id) {
+      throw Object.assign(new Error("Nexaport ID migration is required before registered Expert creation"), { statusCode: 503, code: "NEXAPORT_ID_MIGRATION_REQUIRED" });
+    }
 
     for (const specialtyId of specialty_ids) {
       await client.query(
@@ -868,10 +874,10 @@ export const createExpert = async (req, res) => {
   } catch (error) {
     await client.query("ROLLBACK");
 
-    res.status(500).json({
+    res.status(error.statusCode || (error.code === "23505" && error.constraint === "experts_registered_user_unique" ? 409 : 500)).json({
       success: false,
-      message: "Failed to create expert",
-      error: error.message,
+      message: error.statusCode ? error.message : error.code === "23505" && error.constraint === "experts_registered_user_unique" ? "A Consultant profile already exists for this account" : "Failed to create expert",
+      code: error.statusCode ? error.code : undefined,
     });
   } finally {
     client.release();
@@ -882,6 +888,9 @@ export const updateExpert = async (req, res) => {
   const client = await pool.connect();
 
   try {
+    if (req.body?.nexaport_id !== undefined || req.body?.nexaportId !== undefined) {
+      return res.status(400).json({ success: false, message: "Nexaport ID cannot be changed" });
+    }
     const { id } = req.params;
 
     const existing = await client.query(`SELECT * FROM experts WHERE id = $1`, [

@@ -417,6 +417,9 @@ export const presignConsultantUpload = async (req, res) => {
 };
 
 export const registerConsultant = async (req, res) => {
+  if (req.body?.nexaport_id !== undefined || req.body?.nexaportId !== undefined) {
+    return res.status(400).json({ success: false, message: "Nexaport ID is assigned automatically" });
+  }
   const { data, errors } = validateRegistrationPayload(req.body || {});
   if (errors.length) {
     return res.status(400).json({ success: false, message: errors[0], errors });
@@ -509,6 +512,9 @@ export const registerConsultant = async (req, res) => {
     );
 
     const expert = expertResult.rows[0];
+    if (!expert.nexaport_id) {
+      throw Object.assign(new Error("Nexaport ID migration is required before Consultant registration"), { status: 503, code: "NEXAPORT_ID_MIGRATION_REQUIRED" });
+    }
 
     const coveragePorts = await resolveCoveragePorts(client, data.ports);
     await validateActiveFlags(client, data.flagServices);
@@ -660,15 +666,17 @@ export const registerConsultant = async (req, res) => {
       },
       expert: {
         id: expert.id,
+        nexaport_id: expert.nexaport_id,
         user_id: expert.user_id,
         full_name: expert.full_name,
       },
     });
   } catch (error) {
     await client.query("ROLLBACK");
-    return res.status(500).json({
+    return res.status(error.status || 500).json({
       success: false,
-      message: "Consultant registration failed",
+      code: error.code,
+      message: error.status ? error.message : "Consultant registration failed",
     });
   } finally {
     client.release();
