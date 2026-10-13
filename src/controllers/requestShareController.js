@@ -7,11 +7,11 @@ const validId = (value) => /^[1-9]\d*$/.test(String(value || ""));
 const validLocator = (value) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 const unavailable = (res) => res.status(404).json({ success: false, code: "LINK_UNAVAILABLE", message: "This link is no longer available." });
 const denied = (res) => res.status(403).json({ success: false, code: "ACCESS_DENIED", message: "You don't have permission to view this inspection request." });
-const failed = (res, error) => {
-  const schemaMismatch = ["42P01", "42703", "42804"].includes(error?.code);
-  return res.status(schemaMismatch ? 500 : 503).json({
+const failed = (res, error, connectionFailed = false) => {
+  const unavailable = connectionFailed || ["08000", "08001", "08003", "08004", "08006", "08007", "08P01", "ENOTFOUND", "ECONNREFUSED", "ETIMEDOUT"].includes(error?.code);
+  return res.status(unavailable ? 503 : 500).json({
     success: false,
-    code: schemaMismatch ? "SHARING_SCHEMA_MISMATCH" : "SHARING_UNAVAILABLE",
+    code: unavailable ? "SHARING_UNAVAILABLE" : "SHARING_DATABASE_ERROR",
     message: "Sharing is temporarily unavailable.",
   });
 };
@@ -31,12 +31,19 @@ export const limitShareResolution = (req, res, next) => {
 const canManage = (request, user) => Number(user.role_id) === 1 ||
   (Number(user.role_id) === 3 && Number(request.requester_user_id) === Number(user.id));
 const writeShareAuditIfAvailable = async (db, actorUserId, action, requestId) => {
-  const schema = await db.query("SELECT to_regclass('public.admin_audit_logs') AS audit_table");
-  if (!schema.rows[0]?.audit_table) {
-    console.warn("Share admin audit table is unavailable", { code: "ADMIN_AUDIT_TABLE_MISSING" });
-    return;
+  // A failed optional audit write must not abort the share transaction in PostgreSQL.
+  await db.query("SAVEPOINT share_audit");
+  try {
+    const schema = await db.query("SELECT to_regclass('public.admin_audit_logs') AS audit_table");
+    if (schema.rows[0]?.audit_table) {
+      await writeAdminAudit(db, { actorUserId, action, targetType: "service_request", targetId: requestId });
+    }
+    await db.query("RELEASE SAVEPOINT share_audit");
+  } catch (error) {
+    await db.query("ROLLBACK TO SAVEPOINT share_audit");
+    await db.query("RELEASE SAVEPOINT share_audit");
+    console.warn("Share audit write skipped", { code: error.code || "UNKNOWN" });
   }
-  await writeAdminAudit(db, { actorUserId, action, targetType: "service_request", targetId: requestId });
 };
 
 export const copyRequestLink = async (req, res) => {
@@ -45,7 +52,7 @@ export const copyRequestLink = async (req, res) => {
   try { db = await pool.connect(); }
   catch (error) {
     console.error("Share connection failed", { code: error.code || "UNKNOWN" });
-    return failed(res, error);
+    return failed(res, error, true);
   }
   try {
     await db.query("BEGIN");
@@ -96,7 +103,7 @@ export const revokeRequestLink = async (req, res) => {
   try { db = await pool.connect(); }
   catch (error) {
     console.error("Share connection failed", { code: error.code || "UNKNOWN" });
-    return failed(res, error);
+    return failed(res, error, true);
   }
   try {
     await db.query("BEGIN");

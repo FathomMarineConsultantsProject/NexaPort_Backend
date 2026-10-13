@@ -65,7 +65,7 @@ test("copy reuses a valid locator, revoke blocks reuse, and next copy rotates", 
   const db = {
     release() {},
     async query(sql, params = []) {
-      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [], rowCount: 0 };
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK" || sql.includes("SAVEPOINT share_audit")) return { rows: [], rowCount: 0 };
       if (sql.includes("FROM service_requests WHERE id=$1 FOR UPDATE")) return { rows: [{ id: 4, requester_user_id: 10 }], rowCount: 1 };
       if (sql.includes("FROM service_request_shares WHERE service_request_id=$1 FOR UPDATE")) return { rows: share ? [share] : [], rowCount: share ? 1 : 0 };
       if (sql.includes("INSERT INTO service_request_shares")) {
@@ -111,7 +111,7 @@ test("concurrent copies serialize on the request and return one locator", async 
     return {
       release() {},
       async query(sql, params = []) {
-        if (sql === "BEGIN") return { rows: [] };
+        if (sql === "BEGIN" || sql.includes("SAVEPOINT share_audit")) return { rows: [] };
         if (sql.includes("FROM service_requests WHERE id=$1 FOR UPDATE")) {
           const prior = tail;
           tail = new Promise((resolve) => { unlock = resolve; });
@@ -140,7 +140,7 @@ test("concurrent copies serialize on the request and return one locator", async 
 });
 
 test("Admin and owner can share requests at any status; another Client cannot", async (t) => {
-  const statuses = ["pending", "approved", "completed", "rejected"];
+  const statuses = ["pending", "approved", "rejected", "active", "completed"];
   let currentStatus = statuses[0];
   t.mock.method(pool, "connect", async () => ({
     release() {},
@@ -161,7 +161,7 @@ test("Admin and owner can share requests at any status; another Client cannot", 
   assert.equal(stranger.statusCode, 403);
 });
 
-test("missing share schema is diagnosed separately from a connection outage", async (t) => {
+test("share schema errors are diagnosed separately from a connection outage", async (t) => {
   const originalError = console.error;
   console.error = () => {};
   t.after(() => { console.error = originalError; });
@@ -177,11 +177,38 @@ test("missing share schema is diagnosed separately from a connection outage", as
   const schema = response();
   await copyRequestLink(req, schema);
   assert.equal(schema.statusCode, 500);
-  assert.equal(schema.body.code, "SHARING_SCHEMA_MISMATCH");
+  assert.equal(schema.body.code, "SHARING_DATABASE_ERROR");
   assert.doesNotMatch(JSON.stringify(schema.body), /private schema detail/);
   pool.connect = async () => { throw Object.assign(new Error("private hostname"), { code: "ENOTFOUND" }); };
   const outage = response();
   await copyRequestLink(req, outage);
   assert.equal(outage.statusCode, 503);
   assert.equal(outage.body.code, "SHARING_UNAVAILABLE");
+});
+
+test("optional audit write failure does not roll back a new share", async (t) => {
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  t.after(() => { console.warn = originalWarn; });
+  let rolledBackToSavepoint = false;
+  let committed = false;
+  t.mock.method(pool, "connect", async () => ({
+    release() {},
+    async query(sql, params = []) {
+      if (sql.includes("FROM service_requests WHERE")) return { rows: [{ id: 4, requester_user_id: 10 }] };
+      if (sql.includes("FROM service_request_shares WHERE")) return { rows: [] };
+      if (sql.includes("INSERT INTO service_request_shares")) return { rows: [{ locator: params[1] }] };
+      if (sql.includes("to_regclass('public.admin_audit_logs')")) return { rows: [{ audit_table: "admin_audit_logs" }] };
+      if (sql.includes("INSERT INTO public.admin_audit_logs")) throw Object.assign(new Error("bad audit schema"), { code: "42703" });
+      if (sql === "ROLLBACK TO SAVEPOINT share_audit") rolledBackToSavepoint = true;
+      if (sql === "COMMIT") committed = true;
+      return { rows: [] };
+    },
+  }));
+  const res = response();
+  await copyRequestLink({ params: { id: "4" }, user: { id: 10, role_id: 3 } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.match(res.body.data.locator, /^[0-9a-f]{64}$/);
+  assert.equal(rolledBackToSavepoint, true);
+  assert.equal(committed, true);
 });
