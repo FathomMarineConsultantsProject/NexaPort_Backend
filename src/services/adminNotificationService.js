@@ -90,13 +90,14 @@ export const createServiceRequestApprovedNotifications = async (
 
 export const createProposalSentNotification = async (
   queryable,
-  { requestId, proposalId, recipientUserId, revisionNumber, clientTotalUsd, vesselName, serviceName }
+  { requestId, proposalId, recipientUserId, revisionNumber, clientTotalUsd, vesselName, serviceName, amendsProposalId = null }
 ) => {
-  const title = "Commercial proposal ready for review";
-  const message = `A commercial proposal (Revision #${revisionNumber}) for ${serviceName || "inspection"} on ${vesselName || "vessel"} ($${Number(clientTotalUsd || 0).toLocaleString()}) is ready for your review.`;
+  const title = amendsProposalId ? "Commercial amendment ready for review" : "Commercial proposal ready for review";
+  const message = `A commercial ${amendsProposalId ? "amendment" : "proposal"} (Revision #${revisionNumber}) for ${serviceName || "inspection"} on ${vesselName || "vessel"} ($${Number(clientTotalUsd || 0).toLocaleString()}) is ready for your review.`;
   const payload = JSON.stringify({
     request_id: requestId,
     revision_number: revisionNumber,
+    amends_proposal_id: amendsProposalId,
     proposal_id: proposalId,
     client_total_usd: clientTotalUsd,
   });

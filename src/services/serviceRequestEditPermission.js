@@ -27,6 +27,9 @@ export const getServiceRequestEditPermission = ({ request, roleId, userId }) => 
     return denied(409, "REQUEST_EDIT_WORKFLOW_LOCKED", "This request is already in the inspection workflow. Core request details are locked to protect the accepted quotation and inspection record.");
   }
 
+  if (request.has_sent_proposal || requestStatus === "pending_client_approval")
+    return denied(409, "REQUEST_EDIT_PROPOSAL_LOCKED", "Core inspection terms are locked while an offer is with the Client. Recall the offer before changing request scope, vessel, port or dates.");
+
   const moderationStatus = String(request.moderation_status || "pending").toLowerCase();
   if (!EDITABLE_MODERATION_STATUSES.has(moderationStatus)) {
     return denied(409, "REQUEST_EDIT_STATUS_LOCKED", "This request is not in an editable moderation state.");

@@ -8,6 +8,7 @@ const database = (authorized) => {
   const proposal = { id: 102, service_request_id: 7, quotation_id: 50, expert_id: 12,
     approved_quotation_revision_id: 201, revision_number: 2, status: "draft", client_total_usd: 1250 };
   return { writes, async query(sql, values) {
+    if (sql.includes("sr.active_proposal_id=cp.id")) return {rows:[]};
     if (sql.includes("FROM service_requests WHERE")) return { rows: [{ id: 7, status: "open", moderation_status: "approved", requester_user_id: 30 }] };
     if (sql.includes("FROM quotations q")) return { rows: [{ id: 50, expert_id: 12, latest_revision_id: 201, approved_revision_id: 201,
       moderation_status: "approved", request_status: "open", internal_review_status: "approved", ...(authorized ? { revision_id: 201 } : {}) }].filter(() => !sql.includes("r.id AS revision_id") || authorized) };

@@ -92,6 +92,7 @@ test("createOrUpdateDraftProposal creates draft with calculated financials and r
     async query(sql, values) {
       executed.push({ sql, values });
       const s = sql.toUpperCase();
+      if (s.includes("SR.ACTIVE_PROPOSAL_ID=CP.ID")) return {rows:[]};
       if (s.includes("FROM QUOTATIONS")) {
         return {
           rows: [
@@ -189,6 +190,7 @@ test("sendProposalToClient transitions proposal to sent, sets pending_client_app
     async query(sql, values) {
       executed.push({ sql, values });
       const s = sql.toUpperCase();
+      if (s.includes("SR.ACTIVE_PROPOSAL_ID=CP.ID")) return {rows:[]};
       if (s.includes("FROM SERVICE_REQUESTS") && s.includes("FOR UPDATE")) {
         return {
           rows: [
@@ -275,6 +277,7 @@ test("rejectProposalByClient records reason, reverts status to open and notifies
     async query(sql, values) {
       executed.push({ sql, values });
       const s = sql.toUpperCase();
+      if (s.includes("SR.ACTIVE_PROPOSAL_ID=CP.ID")) return {rows:[]};
       if (s.includes("FOR UPDATE OF CP, SR")) {
         return {
           rows: [
@@ -339,6 +342,8 @@ test("approveProposalByClient executes full transaction: accepts quote, assigns 
     async query(sql, values) {
       executed.push({ sql, values });
       const s = sql.toUpperCase();
+      if (s.includes("FROM QUOTATION_REVISIONS R")) return {rows:[{id:201}]};
+      if (s.includes("SR.ACTIVE_PROPOSAL_ID=CP.ID")) return {rows:[]};
       if (s.includes("FOR UPDATE OF CP, SR, Q")) {
         return {
           rows: [
@@ -352,6 +357,7 @@ test("approveProposalByClient executes full transaction: accepts quote, assigns 
               admin_markup_usd: 500,
               client_total_usd: 4000,
               status: "sent",
+              approved_quotation_revision_id: 201,
               requester_user_id: 30,
               moderation_status: "approved",
               vessel_name: "MV Atlantic",
@@ -421,6 +427,7 @@ test("confirmWorkflowQuotation blocks advancement to surveyor stage if proposal 
   pool.connect = async () => ({
     async query(sql) {
       const s = sql.toUpperCase();
+      if (s.includes("SR.ACTIVE_PROPOSAL_ID=CP.ID")) return {rows:[]};
       if (s.includes("FROM INSPECTION_WORKFLOWS WHERE SERVICE_REQUEST_ID")) {
         return { rows: [{ id: 1, service_request_id: 7, current_stage: "confirm", selected_quotation_id: 50 }] };
       }

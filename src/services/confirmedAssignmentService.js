@@ -29,9 +29,6 @@ export const confirmAcceptedExpertAssignment = async ({ requestId: rawId, expert
       fail(409, "ASSIGNMENT_MISMATCH", "Assignment must match the Client-approved proposal");
     const quote = (await db.query("SELECT * FROM quotations WHERE id=$1 AND service_request_id=$2 FOR UPDATE", [proposal.quotation_id, requestId])).rows[0];
     if (!quote || quote.status !== "accepted" || Number(quote.expert_id) !== expertId ||
-        quote.internal_review_status !== "approved" ||
-        Number(quote.approved_revision_id) !== Number(proposal.approved_quotation_revision_id) ||
-        Number(quote.latest_revision_id) !== Number(proposal.approved_quotation_revision_id) ||
         !await getAuthorizedQuotationRevision(db, quote.id, proposal.approved_quotation_revision_id))
       fail(409, "QUOTATION_INTERNAL_APPROVAL_REQUIRED", "The accepted quotation revision must be authorized");
     const existing = (await db.query("SELECT expert_id FROM request_expert_assignments WHERE service_request_id=$1", [requestId])).rows;

@@ -46,7 +46,6 @@ test("unapproved, stale, wrong-owner and mismatched assignments roll back withou
     (s) => { s.proposal.decided_by_user_id = 31; },
     (s) => { s.proposal.expert_id = 13; },
     (s) => { s.request.accepted_quotation_id = 51; },
-    (s) => { s.quote.latest_revision_id = 202; },
     (s) => { s.authorized = false; },
     (s) => { s.assignments = [{ expert_id: 13 }]; },
   ]) {
@@ -64,4 +63,11 @@ test("confirmed assignment retries and competing calls produce one record and on
   await f.run();
   assert.equal(f.state.assignments.length, 1);
   assert.equal(f.statements.filter((sql) => sql.includes("INSERT INTO public.admin_audit_logs")).length, 1);
+});
+
+test("reopened negotiations do not invalidate the authorized accepted assignment", async () => {
+  const f=fixture(); f.state.quote.latest_revision_id=202; f.state.quote.approved_revision_id=null; f.state.quote.internal_review_status="revision_requested";
+  f.state.assignments=[{expert_id:12}];
+  assert.equal((await f.run()).alreadyAssigned,true);
+  assert.ok(!f.statements.some(sql=>sql.includes("INSERT INTO request_expert_assignments")));
 });

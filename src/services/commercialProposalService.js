@@ -1,3 +1,4 @@
+import { getAcceptedAgreement, requireAmendmentParent } from "./commercialAmendmentService.js";
 import { pool } from "../config/db.js";
 import { writeAdminAudit } from "./adminAuditService.js";
 import { getAuthorizedQuotationRevision } from "./quotationAuthorizationService.js";
@@ -70,6 +71,7 @@ export const mapProposalRow = (row, user = {}) => {
     clientNotes: row.client_notes || null,
     estimatedAttendanceDays: row.estimated_attendance_days != null ? Number(row.estimated_attendance_days) : null,
     status: row.status,
+    amendsProposalId: row.amends_proposal_id == null ? null : Number(row.amends_proposal_id),
     sentAt: row.sent_at || null,
     decidedAt: row.decided_at || null,
     clientRejectionReason: row.client_rejection_reason || null,
@@ -195,6 +197,7 @@ export const createOrUpdateDraftProposal = async ({
   internalAdminNotes = null,
   estimatedAttendanceDays = null,
   actorUserId,
+  amendsProposalId = null,
   queryable = pool,
 }) => {
   const requestId = positiveId(rawRequestId, "requestId");
@@ -222,8 +225,12 @@ export const createOrUpdateDraftProposal = async ({
     throw proposalError(409, "REQUEST_NOT_APPROVED", "Service request must be approved by admin before preparing proposals.");
   }
 
-  if (["assigned", "active", "completed"].includes(String(quote.request_status || "").toLowerCase())) {
-    throw proposalError(409, "REQUEST_ALREADY_ASSIGNED", "Cannot prepare a new proposal for an already assigned request.");
+  const accepted = await getAcceptedAgreement(queryable, requestId);
+  if (accepted || ["assigned", "active", "completed"].includes(String(quote.request_status || "").toLowerCase())) {
+    if (!amendsProposalId) throw proposalError(409, "CREATE_AMENDMENT_REQUIRED", "Client approval is already recorded. Use Create Amendment to propose new terms.");
+    await requireAmendmentParent(queryable, requestId, positiveId(amendsProposalId, "amendsProposalId"), quotationId, quote.expert_id);
+  } else if (amendsProposalId) {
+    throw proposalError(409, "CLIENT_APPROVAL_REQUIRED", "An amendment requires an accepted agreement.");
   }
 
   if (!quote.expert_id) {
@@ -256,7 +263,7 @@ export const createOrUpdateDraftProposal = async ({
   let proposal;
   if (existingDraft.rows.length) {
     const draftId = existingDraft.rows[0].id;
-    const unchanged = Number(savedDraft.quotation_id) === quotationId &&
+    const unchanged = Number(savedDraft.amends_proposal_id || 0) === Number(amendsProposalId || 0) && Number(savedDraft.quotation_id) === quotationId &&
       Number(savedDraft.approved_quotation_revision_id) === Number(approvedRevision.id) &&
       Number(savedDraft.admin_markup_usd) === financials.adminMarkupUsd &&
       Number(savedDraft.client_total_usd) === financials.clientTotalUsd &&
@@ -282,6 +289,7 @@ export const createOrUpdateDraftProposal = async ({
              approved_quotation_revision_id = $12,
              fee_mode = $13,
              fee_percentage = $14,
+             amends_proposal_id = $15,
              updated_at = CURRENT_TIMESTAMP
        WHERE id = $11
        RETURNING *
@@ -301,6 +309,7 @@ export const createOrUpdateDraftProposal = async ({
         approvedRevision.id,
         financials.feeMode,
         financials.feePercentage,
+        amendsProposalId,
       ]
     );
     proposal = updated.rows[0];
@@ -337,9 +346,10 @@ export const createOrUpdateDraftProposal = async ({
         approved_quotation_revision_id,
         fee_mode,
         fee_percentage,
+        amends_proposal_id,
         status,
         created_by_user_id
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$14,$15,$16,'draft',$13)
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$14,$15,$16,$17,'draft',$13)
       RETURNING *
       `,
       [
@@ -359,6 +369,7 @@ export const createOrUpdateDraftProposal = async ({
         approvedRevision.id,
         financials.feeMode,
         financials.feePercentage,
+        amendsProposalId,
       ]
     );
     proposal = created.rows[0];
@@ -372,8 +383,8 @@ export const createOrUpdateDraftProposal = async ({
     });
   }
 
-  // Update inspection workflow selected quotation if workflow exists
-  await queryable.query(
+  // Amendments leave operational selection and progression unchanged.
+  if (!amendsProposalId) await queryable.query(
     `
     UPDATE inspection_workflows
        SET selected_quotation_id = $1,
@@ -409,9 +420,6 @@ export const sendProposalToClient = async ({
   if (request.moderation_status !== "approved") {
     throw proposalError(409, "REQUEST_NOT_APPROVED", "Service request must finish admin moderation before sending proposals.");
   }
-  if (["assigned", "active", "completed"].includes(String(request.status || "").toLowerCase())) {
-    throw proposalError(409, "REQUEST_ALREADY_ASSIGNED", "This service request is already assigned to a surveyor.");
-  }
 
   let targetProposalQuery;
   if (proposalId) {
@@ -438,6 +446,13 @@ export const sendProposalToClient = async ({
 
   if (proposal.status !== "draft") {
     throw proposalError(409, "PROPOSAL_NOT_DRAFT", `Only draft proposals can be sent. Current status: ${proposal.status}`);
+  }
+
+  const accepted = await getAcceptedAgreement(queryable, requestId);
+  if (proposal.amends_proposal_id) {
+    await requireAmendmentParent(queryable, requestId, proposal.amends_proposal_id, proposal.quotation_id, proposal.expert_id);
+  } else if (accepted || ["assigned", "active", "completed"].includes(String(request.status || "").toLowerCase())) {
+    throw proposalError(409, "CREATE_AMENDMENT_REQUIRED", "The Client accepted while this draft was prepared. Create an explicit amendment; the accepted agreement is preserved.");
   }
 
   const quoteGate=(await queryable.query(`SELECT q.id,q.expert_id,q.latest_revision_id,q.approved_revision_id,q.internal_review_status,
@@ -480,8 +495,8 @@ export const sendProposalToClient = async ({
     [actorUserId, proposal.id]
   );
 
-  // Update service request active proposal and status to pending_client_approval
-  await queryable.query(
+  // Pending amendments do not replace the authoritative approved agreement.
+  if (!proposal.amends_proposal_id) await queryable.query(
     `
     UPDATE service_requests
        SET active_proposal_id = $1,
@@ -499,6 +514,7 @@ export const sendProposalToClient = async ({
       proposalId: proposal.id,
       recipientUserId: request.requester_user_id,
       revisionNumber: proposal.revision_number,
+      amendsProposalId: proposal.amends_proposal_id || null,
       clientTotalUsd: proposal.client_total_usd,
       vesselName: request.vessel_name,
       serviceName: request.service_category || request.service_type,
@@ -525,6 +541,8 @@ export const supersedeProposal = async ({
 }) => {
   const requestId = positiveId(rawRequestId, "requestId");
   const proposalId = positiveId(rawProposalId, "proposalId");
+
+  await queryable.query("SELECT id FROM service_requests WHERE id=(SELECT service_request_id FROM commercial_proposals WHERE id=$1) FOR UPDATE", [proposalId]);
 
   const proposalResult = await queryable.query(
     `SELECT * FROM commercial_proposals WHERE id = $1 AND service_request_id = $2 FOR UPDATE`,
@@ -586,6 +604,8 @@ export const rejectProposalByClient = async ({
     throw proposalError(400, "REJECTION_REASON_TOO_LONG", "Rejection reason must be 1000 characters or fewer.");
   }
 
+  await queryable.query("SELECT id FROM service_requests WHERE id=(SELECT service_request_id FROM commercial_proposals WHERE id=$1) FOR UPDATE", [proposalId]);
+
   const proposalResult = await queryable.query(
     `
     SELECT cp.*, sr.requester_user_id, sr.active_proposal_id, sr.vessel_name, sr.status AS request_status
@@ -618,7 +638,7 @@ export const rejectProposalByClient = async ({
   if (proposal.status !== "sent") {
     throw proposalError(409, "PROPOSAL_NOT_DECIDABLE", `This proposal is not available for a decision (Status: ${proposal.status}).`);
   }
-  if (proposal.active_proposal_id != null && Number(proposal.active_proposal_id)!==Number(proposal.id)) {
+  if (proposal.active_proposal_id != null && Number(proposal.active_proposal_id)!==Number(proposal.amends_proposal_id || proposal.id)) {
     throw proposalError(409,"STALE_PROPOSAL","This is not the active Client proposal.");
   }
 
@@ -637,8 +657,8 @@ export const rejectProposalByClient = async ({
     [rejectionReason, actorUserId, proposalId]
   );
 
-  // Return request status to open while preserving active proposal reference
-  await queryable.query(
+  // Declining an amendment preserves the approved agreement and operational status.
+  if (!proposal.amends_proposal_id) await queryable.query(
     `
     UPDATE service_requests
        SET status = 'open',
@@ -678,6 +698,8 @@ export const approveProposalByClient = async ({
   const proposalId = positiveId(rawProposalId, "proposalId");
 
   // Lock proposal, service_request, and quotation in a single transaction
+  await queryable.query("SELECT id FROM service_requests WHERE id=(SELECT service_request_id FROM commercial_proposals WHERE id=$1) FOR UPDATE", [proposalId]);
+
   const proposalResult = await queryable.query(
     `
     SELECT cp.*,
@@ -727,9 +749,16 @@ export const approveProposalByClient = async ({
   if (proposal.moderation_status !== "approved") {
     throw proposalError(409, "REQUEST_NOT_APPROVED", "Service request must be approved.");
   }
-  if (proposal.active_proposal_id != null && Number(proposal.active_proposal_id) !== Number(proposal.id)) {
+  if (proposal.active_proposal_id != null && Number(proposal.active_proposal_id) !== Number(proposal.amends_proposal_id || proposal.id)) {
     throw proposalError(409,"STALE_PROPOSAL","This is not the active Client proposal.");
   }
+
+  if (proposal.amends_proposal_id) {
+    await requireAmendmentParent(queryable, proposal.service_request_id, proposal.amends_proposal_id, proposal.quotation_id, proposal.expert_id);
+  }
+  // The sent snapshot remains authorized even if a later negotiation was reopened.
+  if (!await getAuthorizedQuotationRevision(queryable, proposal.quotation_id, proposal.approved_quotation_revision_id))
+    throw proposalError(409, "QUOTATION_INTERNAL_APPROVAL_REQUIRED", "The offered quotation revision is not authorized.");
 
   // 1. Mark proposal as approved
   const approvedProposal = await queryable.query(
@@ -744,6 +773,19 @@ export const approveProposalByClient = async ({
     `,
     [actorUserId, proposalId]
   );
+
+  if (proposal.amends_proposal_id) {
+    await queryable.query(`UPDATE service_requests SET active_proposal_id=$1,budget_usd=$2,updated_at=CURRENT_TIMESTAMP WHERE id=$3`, [proposal.id,proposal.client_total_usd,proposal.service_request_id]);
+    // Adopt the accepted immutable supplier snapshot, retaining original acceptance timestamps.
+    await queryable.query(`UPDATE quotations SET total_quote_usd=r.base_fee,attendance_days=r.attendance_days,
+      travel_cost=r.travel_cost,accommodation_cost=r.accommodation_cost,report_fee=r.report_fee,
+      urgency_surcharge=r.urgency_surcharge,admin_markup_usd=$1,client_total_usd=$2,updated_at=CURRENT_TIMESTAMP
+      FROM quotation_revisions r WHERE quotations.id=$3 AND r.id=$4 AND r.quotation_id=quotations.id`,
+      [proposal.admin_markup_usd,proposal.client_total_usd,proposal.quotation_id,proposal.approved_quotation_revision_id]);
+    await writeAdminAudit(queryable, {actorUserId,action:"commercial_proposal.amendment_approved",targetType:"commercial_proposal",targetId:proposal.id,summary:`Client approved amendment ${proposal.id} to proposal ${proposal.amends_proposal_id}`});
+    await createProposalApprovedNotification(queryable, {requestId:proposal.service_request_id,proposalId:proposal.id,clientTotalUsd:proposal.client_total_usd,consultantUserId:proposal.expert_user_id,vesselName:proposal.vessel_name});
+    return {proposal:await getProposalById(proposal.id,queryable),serviceRequestId:proposal.service_request_id,expertId:proposal.expert_id,alreadyApproved:false};
+  }
 
   // 2. Reject competing quotations for this request
   await queryable.query(
@@ -776,6 +818,10 @@ export const approveProposalByClient = async ({
       proposal.quotation_id,
     ]
   );
+
+  await queryable.query(`UPDATE quotations SET total_quote_usd=r.base_fee,attendance_days=r.attendance_days,
+    travel_cost=r.travel_cost,accommodation_cost=r.accommodation_cost,report_fee=r.report_fee,urgency_surcharge=r.urgency_surcharge
+    FROM quotation_revisions r WHERE quotations.id=$1 AND r.id=$2 AND r.quotation_id=quotations.id`, [proposal.quotation_id,proposal.approved_quotation_revision_id]);
 
   // 4. Update service_requests with accepted quotation, accepted expert, and status = assigned
   await queryable.query(

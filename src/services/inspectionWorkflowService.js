@@ -32,8 +32,7 @@ const serviceLabelSql = `CASE WHEN sr.service_type='Other' THEN COALESCE(NULLIF(
 
 const mapQuote = (row) => {
   if (!row) return null;
-  const approved = row.internal_review_status === "approved"
-    ? row.revisions?.find((revision) => Number(revision.id) === Number(row.approved_revision_id)) : null;
+  const approved = row.revisions?.find((revision) => Number(revision.id) === Number(row.latest_revision_id));
   const financialSource = approved ? {
     total_quote_usd: approved.baseFee, travel_cost: approved.travelCost,
     accommodation_cost: approved.accommodationCost, report_fee: approved.reportFee,
@@ -43,7 +42,7 @@ const mapQuote = (row) => {
   return {
     id: row.id, serviceRequestId: row.service_request_id, expertId: row.expert_id,
     consultantName: row.expert_name, consultantRating: row.expert_rating == null ? null : Number(row.expert_rating),
-    consultantLocation: row.expert_location, status: row.status, attendanceDays: row.attendance_days,
+    consultantLocation: row.expert_location, status: row.status, attendanceDays: approved?.attendanceDays ?? row.attendance_days,
     internalStatus: row.internal_review_status, latestRevisionId: row.latest_revision_id,
     approvedRevisionId: row.approved_revision_id,
     revisions: row.revisions || [],
@@ -52,7 +51,7 @@ const mapQuote = (row) => {
     accommodationCostUsd: Number(financialSource.accommodation_cost || 0), reportFeeUsd: Number(financialSource.report_fee || 0),
     urgencySurchargeUsd: Number(financialSource.urgency_surcharge || 0), consultantTotalUsd: approved ? approved.consultantTotal : totals.consultantTotalUsd,
     adminMarkupUsd: Number(row.admin_markup_usd || 0), clientTotalUsd: Number(row.client_total_usd || totals.clientTotalUsd),
-    coverLetter: row.cover_letter, createdAt: row.created_at, updatedAt: row.updated_at,
+    coverLetter: approved?.coverLetter ?? row.cover_letter, createdAt: row.created_at, updatedAt: row.updated_at,
   };
 };
 
@@ -94,7 +93,7 @@ export const listInspectionWorkflows = async ({ search, stage, status } = {}) =>
      LEFT JOIN quotations accepted_q ON accepted_q.id=sr.accepted_quotation_id
      LEFT JOIN LATERAL (
        SELECT COUNT(*)::int AS total,
-         COUNT(*) FILTER (WHERE q.status IN ('pending','submitted')
+         COUNT(*) FILTER (WHERE q.status IN ('pending','submitted','accepted')
            AND q.internal_review_status='awaiting_review')::int AS awaiting_review
        FROM quotations q WHERE q.service_request_id=sr.id
      ) quotation_counts ON TRUE
@@ -149,7 +148,7 @@ export const getInspectionWorkflow = async (requestIdValue, queryable = pool) =>
     byQuote.set(Number(r.quotation_id),items);
   }
   const quotations = quoteResult.rows.map(row=>mapQuote({...row,revisions:byQuote.get(Number(row.id)) || []}));
-  const acceptedQuotation = quotations.find((q) => Number(q.id) === Number(request.accepted_quotation_id)) || quotations.find((q) => q.status === "accepted") || null;
+  let acceptedQuotation = quotations.find((q) => Number(q.id) === Number(request.accepted_quotation_id)) || quotations.find((q) => q.status === "accepted") || null;
   const selectedQuotation = quotations.find((q) => Number(q.id) === Number(workflow?.selected_quotation_id)) || null;
   let surveyor = null;
   const operationalExpertId = request.accepted_expert_id || request.assigned_expert_id;
@@ -167,6 +166,15 @@ export const getInspectionWorkflow = async (requestIdValue, queryable = pool) =>
   const allProposalsRows = await getProposalsForRequest(requestId, queryable);
   const proposal = activeProposalRow ? mapProposalRow(activeProposalRow, { role_id: 1 }) : null;
   const proposals = allProposalsRows.map((r) => mapProposalRow(r, { role_id: 1 }));
+  const acceptedProposal = proposals.find(p=>p.status==="approved" && Number(p.id)===Number(request.active_proposal_id)) || null;
+  if (acceptedQuotation && acceptedProposal) {
+    const revision=acceptedQuotation.revisions.find(r=>Number(r.id)===Number(acceptedProposal.approvedQuotationRevisionId));
+    if (revision) acceptedQuotation={...acceptedQuotation,baseFeeUsd:revision.baseFee,travelCostUsd:revision.travelCost,
+      accommodationCostUsd:revision.accommodationCost,reportFeeUsd:revision.reportFee,urgencySurchargeUsd:revision.urgencySurcharge,
+      consultantTotalUsd:revision.consultantTotal,clientTotalUsd:acceptedProposal.clientTotalUsd,adminMarkupUsd:acceptedProposal.adminMarkupUsd};
+  }
+  const reopeningRows=(await queryable.query(`SELECT rr.* FROM quotation_reopen_requests rr JOIN quotation_revisions r ON r.id=rr.revision_id JOIN quotations q ON q.id=r.quotation_id WHERE q.service_request_id=$1 ORDER BY rr.id`,[requestId])).rows;
+  for (const quote of quotations) quote.reopenRequests=reopeningRows.filter(rr=>quote.revisions.some(r=>Number(r.id)===Number(rr.revision_id))).map(rr=>({id:rr.id,revisionId:rr.revision_id,decidedAt:rr.decision_at,consultantMessage:rr.consultant_message,reason:rr.reason,suggestedMaxAmount:rr.suggested_max_amount,suggestedMaxCurrency:rr.suggested_max_currency,internalAdminNote:rr.internal_admin_note}));
   const phaseTwo=workflow?await getPhaseTwoWorkflowState(requestId,queryable):{preparation:{data:{},completed:false,locked:false},templates:[],checklist:null,report:null};
   const closeout=workflow?await getInvoiceWorkflowState(requestId,queryable):{inspectionCompletion:{completed:false,completedAt:null},invoice:null};
   const companyName = await resolveRequestCompany(queryable, request.requester_user_id);
@@ -174,8 +182,8 @@ export const getInspectionWorkflow = async (requestIdValue, queryable = pool) =>
     workflow: workflow ? { id:workflow.id,currentStage:workflow.current_stage,selectedQuotationId:workflow.selected_quotation_id,startedAt:workflow.started_at,completedAt:workflow.completed_at,createdAt:workflow.created_at,updatedAt:workflow.updated_at } : null,
     request: { id:request.id,reference:request.title||`Request #${request.id}`,title:request.title,inspectionMethodId:request.inspection_method_id==null?null:Number(request.inspection_method_id),inspectionVertical:request.service_category,serviceType:request.service_type,serviceCategory:request.service_category,serviceTypeOther:request.service_type_other,service:request.service_label,scope:request.scope_of_work,urgency:request.urgency,requiredBy:request.required_by,status:request.status,moderationStatus:request.moderation_status,approvedBudgetUsd:request.approved_budget_usd==null?null:Number(request.approved_budget_usd),vessel:{name:request.vessel_name,imoNumber:request.imo_number,type:request.vessel_type,flag:request.flag_state},terminalName:request.terminal_name||null,ports:requestPortCollection(request),agentDetails:{companyName:request.agent_company_name||null,contactName:request.agent_contact_name||null,email:request.agent_email||null,phone:request.agent_phone||null},port:{name:request.port_name,country:request.country,eta:request.eta,locationSummary:request.location_summary} },
     client: { id:request.requester_user_id,name:companyName||request.requester_name||request.client_user_name,companyVerified:Boolean(companyName),email:request.client_email,phone:request.client_phone },
-    quotations,selectedQuotation,acceptedQuotation,surveyor,proposal,proposals,
-    counts:{ quotationsAwaitingReview:quotations.filter((q)=>AWAITING_QUOTATION_STATUSES.includes(String(q.status).toLowerCase()) && q.internalStatus==="awaiting_review").length },
+    quotations,selectedQuotation,acceptedQuotation,surveyor,proposal,proposals,acceptedProposal,
+    counts:{ quotationsAwaitingReview:quotations.filter((q)=>[...AWAITING_QUOTATION_STATUSES,"accepted"].includes(String(q.status).toLowerCase()) && q.internalStatus==="awaiting_review").length },
     operationalError: operationalExpertId && !surveyor ? "The accepted or assigned Consultant profile could not be loaded." : null,
     ...phaseTwo,
     ...closeout,

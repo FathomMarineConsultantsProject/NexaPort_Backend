@@ -44,6 +44,7 @@ test("queue totals count quotation threads across review, revision, approval and
     { name: "several revisions of one thread", quotes: [{ status: "submitted", internal: "awaiting_review", revisions: 5 }], total: 1, review: 1 },
     { name: "internally approved quotation", quotes: [{ status: "pending", internal: "approved" }], total: 1, review: 0 },
     { name: "Client-accepted quotation", quotes: [{ status: "accepted", internal: "approved" }], total: 1, review: 0 },
+    { name: "accepted quotation revised for an amendment", quotes: [{ status: "accepted", internal: "awaiting_review" }], total: 1, review: 1 },
     { name: "historical rejected quotations", quotes: [{ status: "rejected", internal: "rejected" }, { status: "rejected", internal: "approved" }], total: 2, review: 0 },
     { name: "Confirm with selected approved quotation and rejected alternative", stage: "confirm", quotes: [{ status: "pending", internal: "approved" }, { status: "rejected", internal: "rejected" }], total: 2, review: 0 },
   ];
@@ -54,11 +55,11 @@ test("queue totals count quotation threads across review, revision, approval and
         queries++;
         const aggregate = sql.slice(sql.indexOf("SELECT COUNT(*)::int AS total"), sql.indexOf(") quotation_counts ON TRUE"));
         assert.match(aggregate, /^SELECT COUNT\(\*\)::int AS total,/);
-        assert.match(aggregate, /COUNT\(\*\) FILTER \(WHERE q.status IN \('pending','submitted'\)/);
+        assert.match(aggregate, /COUNT\(\*\) FILTER \(WHERE q.status IN \('pending','submitted','accepted'\)/);
         assert.match(aggregate, /FROM quotations q WHERE q.service_request_id=sr.id\s*$/);
         assert.doesNotMatch(aggregate, /JOIN|quotation_revisions|commercial_proposals/);
         return { rows: [{ request_id: 34, current_stage: scenario.stage || "quote", quotations_total: scenario.quotes.length,
-          quotations_awaiting_review: scenario.quotes.filter((q) => ["pending", "submitted"].includes(q.status) && q.internal === "awaiting_review").length,
+          quotations_awaiting_review: scenario.quotes.filter((q) => ["pending", "submitted", "accepted"].includes(q.status) && q.internal === "awaiting_review").length,
         }] };
       };
       const [row] = await listInspectionWorkflows();

@@ -74,6 +74,7 @@ export const saveDraft = async (req, res) => {
     const requestId = req.params.id || req.params.requestId;
     const {
       quotationId,
+      amendsProposalId,
       adminMarkupUsd,
       feeMode,
       feePercentage,
@@ -85,6 +86,7 @@ export const saveDraft = async (req, res) => {
     const proposal = await createOrUpdateDraftProposal({
       requestId,
       quotationId,
+      amendsProposalId,
       adminMarkupUsd,
       feeMode,
       feePercentage,

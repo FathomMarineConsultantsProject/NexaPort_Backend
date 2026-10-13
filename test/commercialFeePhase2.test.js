@@ -37,7 +37,8 @@ test("unchanged saved draft retains its historical fixed fee without rewrite or 
   const saved={id:101,service_request_id:7,quotation_id:50,expert_id:12,revision_number:1,
     approved_quotation_revision_id:201,consultant_total_usd:2250,admin_markup_usd:500,client_total_usd:2750,
     fee_mode:"custom",fee_percentage:null,client_notes:null,internal_admin_notes:null,estimated_attendance_days:2,status:"draft"};
-  const queryable={async query(sql){statements.push(sql);
+  const queryable={async query(sql){
+    if(sql.includes("sr.active_proposal_id=cp.id")) return {rows:[]};statements.push(sql);
     if(sql.includes("FROM quotations q")) return {rows:[{id:50,expert_id:12,moderation_status:"approved",request_status:"open",internal_review_status:"approved",latest_revision_id:201,approved_revision_id:201}]};
     if(sql.includes("FROM quotation_revisions r")) return {rows:[{id:201,base_fee:"2000.00",travel_cost:"0",accommodation_cost:"150",report_fee:"100",urgency_surcharge:"0",consultant_total:"2250.00",attendance_days:2}]};
     if(sql.includes("status = 'draft' FOR UPDATE")) return {rows:[saved]};
@@ -55,6 +56,7 @@ test("new draft defaults to 25 percent on immutable approved revision, not mutab
   const created={id:202,service_request_id:7,quotation_id:50,expert_id:12,revision_number:1,
     consultant_total_usd:2250,admin_markup_usd:562.5,client_total_usd:2812.5,fee_mode:"percentage",fee_percentage:25,status:"draft"};
   const queryable={async query(sql,values){
+    if(sql.includes("sr.active_proposal_id=cp.id")) return {rows:[]};
     if(sql.includes("FROM quotations q")) return {rows:[{id:50,expert_id:12,total_quote_usd:"9000",moderation_status:"approved",request_status:"open",internal_review_status:"approved",latest_revision_id:201,approved_revision_id:201}]};
     if(sql.includes("FROM quotation_revisions r")) return {rows:[{id:201,base_fee:"2000",travel_cost:"0",accommodation_cost:"150",report_fee:"100",urgency_surcharge:"0",consultant_total:"2250",attendance_days:2}]};
     if(sql.includes("status = 'draft' FOR UPDATE")) return {rows:[]};
@@ -75,7 +77,8 @@ test("new draft defaults to 25 percent on immutable approved revision, not mutab
 test("sent retry and failed approval gate do not emit another Client notification", async () => {
   for(const status of ["sent","draft"]){
     const statements=[];
-    const queryable={async query(sql){statements.push(sql);
+    const queryable={async query(sql){
+    if(sql.includes("sr.active_proposal_id=cp.id")) return {rows:[]};statements.push(sql);
       if(sql.includes("FROM service_requests WHERE")) return {rows:[{id:7,requester_user_id:30,moderation_status:"approved",status:"open"}]};
       if(sql.includes("FROM commercial_proposals WHERE")) return {rows:[{id:101,service_request_id:7,quotation_id:50,expert_id:12,status,approved_quotation_revision_id:201}]};
       if(sql.includes("FROM commercial_proposals cp")) return {rows:[{id:101,status}]};

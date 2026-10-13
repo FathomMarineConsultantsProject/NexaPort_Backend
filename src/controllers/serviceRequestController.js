@@ -678,6 +678,7 @@ export const updateServiceRequest = async (req, res) => {
       `SELECT sr.*, ${requestPortsSql("sr")} AS selected_ports,
         (SELECT cc.legal_name FROM client_profiles cp JOIN client_companies cc ON cc.client_profile_id=cp.id WHERE cp.user_id=sr.requester_user_id LIMIT 1) AS linked_company_name,
               (SELECT COUNT(*)::int FROM quotations q WHERE q.service_request_id=sr.id) AS quotation_count,
+              EXISTS(SELECT 1 FROM commercial_proposals offer WHERE offer.service_request_id=sr.id AND offer.status='sent') AS has_sent_proposal,
               EXISTS(SELECT 1 FROM quotations q WHERE q.service_request_id=sr.id AND LOWER(q.status)='accepted') AS has_accepted_quotation,
               EXISTS(SELECT 1 FROM request_expert_assignments rea WHERE rea.service_request_id=sr.id) AS has_assignment,
               (SELECT iw.current_stage FROM inspection_workflows iw WHERE iw.service_request_id=sr.id LIMIT 1) AS workflow_stage
