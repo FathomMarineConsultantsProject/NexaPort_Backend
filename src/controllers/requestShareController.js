@@ -78,18 +78,18 @@ export const copyRequestLink = async (req, res) => {
     const request = (await db.query("SELECT id,requester_user_id FROM service_requests WHERE id=$1 FOR UPDATE", [req.params.id])).rows[0];
     if (!request || !canManage(request, req.user)) { await db.query("ROLLBACK"); return denied(res); }
     operation = "lookup_share";
-    let share = (await db.query("SELECT * FROM service_request_shares WHERE service_request_id=$1 FOR UPDATE", [request.id])).rows[0];
+    let share = (await db.query("SELECT * FROM public.service_request_shares WHERE service_request_id=$1 FOR UPDATE", [request.id])).rows[0];
     const reusable = share && !share.revoked_at && (!share.expires_at || new Date(share.expires_at) > new Date());
     if (!reusable) {
       const locator = randomBytes(32).toString("hex");
       if (share) {
         operation = "rotate_share";
-        share = (await db.query(`UPDATE service_request_shares SET locator=$2,revoked_at=NULL,revoked_by_user_id=NULL,
+        share = (await db.query(`UPDATE public.service_request_shares SET locator=$2,revoked_at=NULL,revoked_by_user_id=NULL,
           expires_at=NULL,rotated_at=now(),updated_at=now(),created_by_user_id=$3 WHERE id=$1 RETURNING *`,
           [share.id, locator, req.user.id])).rows[0];
       } else {
         operation = "insert_share";
-        share = (await db.query(`INSERT INTO service_request_shares(service_request_id,locator,created_by_user_id)
+        share = (await db.query(`INSERT INTO public.service_request_shares(service_request_id,locator,created_by_user_id)
           VALUES($1,$2,$3) RETURNING *`, [request.id, locator, req.user.id])).rows[0];
       }
       operation = "optional_audit";
@@ -109,7 +109,7 @@ export const resolveRequestLink = async (req, res) => {
   const requestCorrelationId = correlationId(req, res);
   if (!validLocator(req.body?.locator)) return unavailable(res);
   try {
-    const result = await pool.query(`SELECT sr.* FROM service_request_shares s
+    const result = await pool.query(`SELECT sr.* FROM public.service_request_shares s
       JOIN service_requests sr ON sr.id=s.service_request_id
       WHERE s.locator=$1 AND s.revoked_at IS NULL AND (s.expires_at IS NULL OR s.expires_at>now())`, [req.body.locator]);
     const request = result.rows[0];
@@ -135,7 +135,7 @@ export const revokeRequestLink = async (req, res) => {
     await db.query("BEGIN");
     const request = (await db.query("SELECT id,requester_user_id FROM service_requests WHERE id=$1 FOR UPDATE", [req.params.id])).rows[0];
     if (!request || !canManage(request, req.user)) { await db.query("ROLLBACK"); return denied(res); }
-    const changed = await db.query(`UPDATE service_request_shares SET revoked_at=now(),revoked_by_user_id=$2,updated_at=now()
+    const changed = await db.query(`UPDATE public.service_request_shares SET revoked_at=now(),revoked_by_user_id=$2,updated_at=now()
       WHERE service_request_id=$1 AND revoked_at IS NULL RETURNING id`, [request.id, req.user.id]);
     if (changed.rowCount) await writeShareAuditIfAvailable(db, req.user.id, "service_request.share_revoked", request.id, requestCorrelationId);
     await db.query("COMMIT");

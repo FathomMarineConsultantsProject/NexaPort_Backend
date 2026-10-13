@@ -67,16 +67,16 @@ test("copy reuses a valid locator, revoke blocks reuse, and next copy rotates", 
     async query(sql, params = []) {
       if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK" || sql.includes("SAVEPOINT share_audit")) return { rows: [], rowCount: 0 };
       if (sql.includes("FROM service_requests WHERE id=$1 FOR UPDATE")) return { rows: [{ id: 4, requester_user_id: 10 }], rowCount: 1 };
-      if (sql.includes("FROM service_request_shares WHERE service_request_id=$1 FOR UPDATE")) return { rows: share ? [share] : [], rowCount: share ? 1 : 0 };
-      if (sql.includes("INSERT INTO service_request_shares")) {
+      if (sql.includes("FROM public.service_request_shares WHERE service_request_id=$1 FOR UPDATE")) return { rows: share ? [share] : [], rowCount: share ? 1 : 0 };
+      if (sql.includes("INSERT INTO public.service_request_shares")) {
         share = { id: 1, service_request_id: 4, locator: params[1], revoked_at: null, expires_at: null };
         return { rows: [share], rowCount: 1 };
       }
-      if (sql.includes("UPDATE service_request_shares SET locator=")) {
+      if (sql.includes("UPDATE public.service_request_shares SET locator=")) {
         share = { ...share, locator: params[1], revoked_at: null };
         return { rows: [share], rowCount: 1 };
       }
-      if (sql.includes("UPDATE service_request_shares SET revoked_at=")) {
+      if (sql.includes("UPDATE public.service_request_shares SET revoked_at=")) {
         share = { ...share, revoked_at: new Date() };
         return { rows: [{ id: 1 }], rowCount: 1 };
       }
@@ -118,8 +118,8 @@ test("concurrent copies serialize on the request and return one locator", async 
           await prior;
           return { rows: [{ id: 4, requester_user_id: 10 }] };
         }
-        if (sql.includes("FROM service_request_shares WHERE service_request_id=$1 FOR UPDATE")) return { rows: share ? [share] : [] };
-        if (sql.includes("INSERT INTO service_request_shares")) {
+        if (sql.includes("FROM public.service_request_shares WHERE service_request_id=$1 FOR UPDATE")) return { rows: share ? [share] : [] };
+        if (sql.includes("INSERT INTO public.service_request_shares")) {
           insertCount++;
           share = { id: 1, locator: params[1], revoked_at: null, expires_at: null };
           return { rows: [share] };
@@ -146,7 +146,7 @@ test("Admin and owner can share requests at any status; another Client cannot", 
     release() {},
     async query(sql) {
       if (sql.includes("FROM service_requests WHERE id=$1 FOR UPDATE")) return { rows: [{ id: 4, requester_user_id: 10, status: currentStatus }] };
-      if (sql.includes("FROM service_request_shares WHERE")) return { rows: [{ locator, revoked_at: null, expires_at: null }] };
+      if (sql.includes("FROM public.service_request_shares WHERE")) return { rows: [{ locator, revoked_at: null, expires_at: null }] };
       return { rows: [] };
     },
   }));
@@ -169,7 +169,7 @@ test("share schema errors are diagnosed separately from a connection outage", as
     release() {},
     async query(sql) {
       if (sql.includes("FROM service_requests WHERE")) return { rows: [{ id: 4, requester_user_id: 10 }] };
-      if (sql.includes("FROM service_request_shares WHERE")) throw Object.assign(new Error("private schema detail"), { code: "42P01" });
+      if (sql.includes("FROM public.service_request_shares WHERE")) throw Object.assign(new Error("private schema detail"), { code: "42P01" });
       return { rows: [] };
     },
   }));
@@ -197,8 +197,8 @@ test("optional audit write failure does not roll back a new share", async (t) =>
     release() {},
     async query(sql, params = []) {
       if (sql.includes("FROM service_requests WHERE")) return { rows: [{ id: 4, requester_user_id: 10 }] };
-      if (sql.includes("FROM service_request_shares WHERE")) return { rows: [] };
-      if (sql.includes("INSERT INTO service_request_shares")) return { rows: [{ locator: params[1] }] };
+      if (sql.includes("FROM public.service_request_shares WHERE")) return { rows: [] };
+      if (sql.includes("INSERT INTO public.service_request_shares")) return { rows: [{ locator: params[1] }] };
       if (sql.includes("to_regclass('public.admin_audit_logs')")) return { rows: [{ audit_table: "admin_audit_logs" }] };
       if (sql.includes("INSERT INTO public.admin_audit_logs")) throw Object.assign(new Error("bad audit schema"), { code: "42703" });
       if (sql === "ROLLBACK TO SAVEPOINT share_audit") rolledBackToSavepoint = true;
@@ -223,8 +223,8 @@ test("pending request 35 creates a share without moderation or quotation checks"
     release() { released = true; },
     async query(sql, params = []) {
       if (sql.includes("FROM service_requests WHERE")) return { rows: [{ id: 35, requester_user_id: 10, moderation_status: "pending", status: "pending" }] };
-      if (sql.includes("FROM service_request_shares WHERE")) return { rows: [] };
-      if (sql.includes("INSERT INTO service_request_shares")) return { rows: [{ locator: params[1] }] };
+      if (sql.includes("FROM public.service_request_shares WHERE")) return { rows: [] };
+      if (sql.includes("INSERT INTO public.service_request_shares")) return { rows: [{ locator: params[1] }] };
       if (sql.includes("to_regclass('public.admin_audit_logs')")) return { rows: [{ audit_table: null }] };
       return { rows: [] };
     },
@@ -253,11 +253,11 @@ for (const scenario of [
       async query(sql) {
         if (sql === "ROLLBACK") { rolledBack = true; return { rows: [] }; }
         if (sql.includes("FROM service_requests WHERE")) return { rows: [{ id: 35, requester_user_id: 10 }] };
-        if (sql.includes("FROM service_request_shares WHERE")) {
+        if (sql.includes("FROM public.service_request_shares WHERE")) {
           if (scenario.operation === "lookup_share") throw Object.assign(new Error("secret detail"), scenario);
           return { rows: [] };
         }
-        if (sql.includes("INSERT INTO service_request_shares")) throw Object.assign(new Error("secret detail"), scenario);
+        if (sql.includes("INSERT INTO public.service_request_shares")) throw Object.assign(new Error("secret detail"), scenario);
         return { rows: [] };
       },
     }));
