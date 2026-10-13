@@ -8,6 +8,7 @@ import { createServiceRequestApprovedNotifications } from "../services/adminNoti
 import { writeAdminAudit } from "../services/adminAuditService.js";
 import { getServiceRequestEditPermission } from "../services/serviceRequestEditPermission.js";
 import { getActiveProposalForRequest, mapProposalRow } from "../services/commercialProposalService.js";
+import { userMayViewRequest } from "../services/requestVisibilityService.js";
 import { findInspectionMethod } from "../services/inspectionCatalogueService.js";
 
 import { normalizeRequestParticulars, resolveRequestCompany, resolveRequestPort, REQUEST_PARTICULAR_FIELDS } from "../services/requestParticularsService.js";
@@ -181,23 +182,7 @@ const serializeServiceRequestForClient = (row) => {
   return Object.fromEntries(fields.map((field) => [field, mapped[field]]));
 };
 
-const canAccessRequest = async (user, request) => {
-  const roleId = Number(user.role_id);
-
-  if (roleId === 1) return true;
-
-  if (roleId === 3) {
-    return Number(request.requester_user_id) === Number(user.id);
-  }
-
-  if (roleId === 2) {
-    return ["open", "pending", "active"].includes(
-      String(request.status || "").toLowerCase()
-    );
-  }
-
-  return false;
-};
+const canAccessRequest = (user, request) => userMayViewRequest(pool, request, user);
 
 export const createServiceRequest = async (req, res) => {
   const client = await pool.connect();
@@ -359,9 +344,13 @@ export const getServiceRequests = async (req, res) => {
     if (Number(req.user.role_id) === 2) {
       const conditions = [
         `sr.moderation_status = 'approved'`,
-        `LOWER(sr.status) IN ('open', 'pending', 'active')`,
+        `(LOWER(sr.status) IN ('open', 'pending', 'active') OR (LOWER(sr.status) IN ('assigned', 'completed') AND EXISTS (
+          SELECT 1 FROM experts own_expert WHERE own_expert.user_id=$1 AND
+          (own_expert.id=sr.accepted_expert_id OR EXISTS (
+            SELECT 1 FROM request_expert_assignments own_assignment
+            WHERE own_assignment.service_request_id=sr.id AND own_assignment.expert_id=own_expert.id)))))`,
       ];
-      const values = [];
+      const values = [req.user.id];
 
       if (search) {
         values.push(`%${search}%`);
@@ -508,7 +497,8 @@ export const getServiceRequestById = async (req, res) => {
           sr.vessel_type,
           sr.required_by AS inspection_date,
           sr.terminal_name,
-          sr.port_name AS port_of_inspection, sr.port_id, sr.country, ${requestPortsSql("sr")} AS selected_ports
+          sr.port_name AS port_of_inspection, sr.port_id, sr.country, sr.status, sr.moderation_status,
+          sr.accepted_expert_id, ${requestPortsSql("sr")} AS selected_ports
         FROM service_requests sr
         WHERE sr.id = $1
           AND sr.moderation_status = 'approved'
@@ -517,6 +507,10 @@ export const getServiceRequestById = async (req, res) => {
       );
       if (!safeResult.rows.length) {
         return res.status(404).json({ success: false, message: "Service request not found" });
+      }
+
+      if (!(await canAccessRequest(req.user, safeResult.rows[0]))) {
+        return res.status(403).json({ success: false, message: "Access denied for this service request" });
       }
 
       return res.json({

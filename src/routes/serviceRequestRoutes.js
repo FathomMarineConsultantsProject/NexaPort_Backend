@@ -21,13 +21,18 @@ import {
 } from "../controllers/commercialProposalController.js";
 import { allowRoles, requireAuth } from "../middlewares/authMiddleware.js";
 import { requireApprovedClient } from "../middlewares/clientApprovalMiddleware.js";
+import { copyRequestLink, limitShareResolution, resolveRequestLink, revokeRequestLink, shareNoStore } from "../controllers/requestShareController.js";
 
 const router = express.Router();
 
+router.post("/share/resolve", shareNoStore, limitShareResolution, requireAuth, requireApprovedClient, allowRoles(1, 2, 3), resolveRequestLink);
+router.post("/:id/share", shareNoStore, requireAuth, requireApprovedClient, allowRoles(1, 3), copyRequestLink);
+router.delete("/:id/share", shareNoStore, requireAuth, requireApprovedClient, allowRoles(1, 3), revokeRequestLink);
+
 router.post("/generate-scope", requireAuth, requireApprovedClient, allowRoles(1, 3), generateRequestScope);
 
-router.get("/", requireAuth, requireApprovedClient, allowRoles(1, 2, 3), getServiceRequests);
-router.get("/:id", requireAuth, requireApprovedClient, allowRoles(1, 2, 3), getServiceRequestById);
+router.get("/", shareNoStore, requireAuth, requireApprovedClient, allowRoles(1, 2, 3), getServiceRequests);
+router.get("/:id", shareNoStore, requireAuth, requireApprovedClient, allowRoles(1, 2, 3), getServiceRequestById);
 
 // Commercial proposals
 router.get("/:id/proposal", requireAuth, requireApprovedClient, allowRoles(1, 3), getActiveProposal);
