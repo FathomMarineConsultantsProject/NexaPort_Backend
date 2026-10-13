@@ -188,7 +188,8 @@ test("share schema errors are diagnosed separately from a connection outage", as
 
 test("optional audit write failure does not roll back a new share", async (t) => {
   const originalWarn = console.warn;
-  console.warn = () => {};
+  const warnings = [];
+  console.warn = (...args) => warnings.push(args);
   t.after(() => { console.warn = originalWarn; });
   let rolledBackToSavepoint = false;
   let committed = false;
@@ -211,4 +212,64 @@ test("optional audit write failure does not roll back a new share", async (t) =>
   assert.match(res.body.data.locator, /^[0-9a-f]{64}$/);
   assert.equal(rolledBackToSavepoint, true);
   assert.equal(committed, true);
+  assert.equal(warnings[0][1].operation, "optional_audit");
+  assert.equal(warnings[0][1].code, "42703");
+  assert.doesNotMatch(JSON.stringify(warnings), /bad audit schema|[0-9a-f]{64}/);
 });
+
+test("pending request 35 creates a share without moderation or quotation checks", async (t) => {
+  let released = false;
+  t.mock.method(pool, "connect", async () => ({
+    release() { released = true; },
+    async query(sql, params = []) {
+      if (sql.includes("FROM service_requests WHERE")) return { rows: [{ id: 35, requester_user_id: 10, moderation_status: "pending", status: "pending" }] };
+      if (sql.includes("FROM service_request_shares WHERE")) return { rows: [] };
+      if (sql.includes("INSERT INTO service_request_shares")) return { rows: [{ locator: params[1] }] };
+      if (sql.includes("to_regclass('public.admin_audit_logs')")) return { rows: [{ audit_table: null }] };
+      return { rows: [] };
+    },
+  }));
+  const res = response();
+  await copyRequestLink({ params: { id: "35" }, user: { id: 10, role_id: 3 } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.match(res.body.data.locator, /^[0-9a-f]{64}$/);
+  assert.equal(released, true);
+});
+
+for (const scenario of [
+  { name: "missing share table", operation: "lookup_share", code: "42P01" },
+  { name: "missing share SELECT privilege", operation: "lookup_share", code: "42501" },
+  { name: "missing share INSERT privilege", operation: "insert_share", code: "42501" },
+  { name: "missing identity sequence privilege", operation: "insert_share", code: "42501", table: "service_request_shares_id_seq" },
+  { name: "foreign key violation", operation: "insert_share", code: "23503", constraint: "service_request_shares_created_by_user_id_fkey" },
+]) {
+  test(`${scenario.name} logs the failing operation and rolls back`, async (t) => {
+    let rolledBack = false;
+    let released = false;
+    const logs = [];
+    t.mock.method(console, "error", (...args) => logs.push(args));
+    t.mock.method(pool, "connect", async () => ({
+      release() { released = true; },
+      async query(sql) {
+        if (sql === "ROLLBACK") { rolledBack = true; return { rows: [] }; }
+        if (sql.includes("FROM service_requests WHERE")) return { rows: [{ id: 35, requester_user_id: 10 }] };
+        if (sql.includes("FROM service_request_shares WHERE")) {
+          if (scenario.operation === "lookup_share") throw Object.assign(new Error("secret detail"), scenario);
+          return { rows: [] };
+        }
+        if (sql.includes("INSERT INTO service_request_shares")) throw Object.assign(new Error("secret detail"), scenario);
+        return { rows: [] };
+      },
+    }));
+    const res = response();
+    await copyRequestLink({ params: { id: "35" }, user: { id: 10, role_id: 3 } }, res);
+    assert.equal(res.statusCode, 500);
+    assert.equal(res.body.code, "SHARING_DATABASE_ERROR");
+    assert.equal(rolledBack, true);
+    assert.equal(released, true);
+    assert.equal(logs[0][1].operation, scenario.operation);
+    assert.equal(logs[0][1].code, scenario.code);
+    assert.match(logs[0][1].requestCorrelationId, /^[0-9a-f-]{36}$/);
+    assert.doesNotMatch(JSON.stringify(logs), /secret detail/);
+  });
+}
