@@ -83,14 +83,20 @@ export const listInspectionWorkflows = async ({ search, stage, status } = {}) =>
        sr.moderation_status,sr.approved_budget_usd,sr.accepted_quotation_id,sr.accepted_expert_id,
        COALESCE(sr.accepted_expert_id,accepted_q.expert_id,assignment.expert_id) AS operational_expert_id,
        operational_expert.full_name AS accepted_expert_name,
-       (SELECT COUNT(*)::int FROM quotations q
-          WHERE q.service_request_id=sr.id AND q.status IN ('pending','submitted') AND q.internal_review_status='awaiting_review') AS quotations_awaiting_review,
+       quotation_counts.total AS quotations_total,
+       quotation_counts.awaiting_review AS quotations_awaiting_review,
        iw.id AS workflow_id,COALESCE(iw.current_stage,CASE WHEN sr.accepted_quotation_id IS NOT NULL AND sr.accepted_expert_id IS NOT NULL THEN 'surveyor' WHEN sr.accepted_quotation_id IS NOT NULL THEN 'confirm' ELSE 'overview' END) AS current_stage,
        (SELECT ii.status FROM inspection_invoices ii WHERE ii.workflow_id=iw.id) AS invoice_status,
        COALESCE(iw.updated_at,sr.updated_at) AS updated_at
      FROM service_requests sr
      LEFT JOIN inspection_workflows iw ON iw.service_request_id=sr.id
      LEFT JOIN quotations accepted_q ON accepted_q.id=sr.accepted_quotation_id
+     LEFT JOIN LATERAL (
+       SELECT COUNT(*)::int AS total,
+         COUNT(*) FILTER (WHERE q.status IN ('pending','submitted')
+           AND q.internal_review_status='awaiting_review')::int AS awaiting_review
+       FROM quotations q WHERE q.service_request_id=sr.id
+     ) quotation_counts ON TRUE
      LEFT JOIN LATERAL (
        SELECT rea.expert_id FROM request_expert_assignments rea
        WHERE rea.service_request_id=sr.id
@@ -105,6 +111,7 @@ export const listInspectionWorkflows = async ({ search, stage, status } = {}) =>
     vesselName: row.vessel_name, service: row.service, portName: row.port_name, requiredBy: row.required_by,
     requestStatus: row.request_status, moderationStatus: row.moderation_status,
     approvedBudgetUsd: row.approved_budget_usd == null ? null : Number(row.approved_budget_usd),
+    quotationsTotal: Number(row.quotations_total || 0),
     quotationsAwaitingReview: Number(row.quotations_awaiting_review || 0), acceptedQuotationId: row.accepted_quotation_id,
     acceptedExpert: row.operational_expert_id ? { id: row.operational_expert_id, name: row.accepted_expert_name } : null,
     workflowId: row.workflow_id, currentStage: row.current_stage, invoiceStatus: row.invoice_status || null, updatedAt: row.updated_at,

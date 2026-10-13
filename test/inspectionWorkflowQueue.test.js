@@ -34,3 +34,38 @@ test("workflow queue returns approved requests with optional relationships absen
     pool.query = originalQuery;
   }
 });
+
+test("queue totals count quotation threads across review, revision, approval and historical states", async (t) => {
+  const originalQuery = pool.query;
+  const cases = [
+    { name: "no quotations", quotes: [], total: 0, review: 0 },
+    { name: "one submitted quotation", quotes: [{ status: "submitted", internal: "awaiting_review" }], total: 1, review: 1 },
+    { name: "internal revision request", quotes: [{ status: "pending", internal: "revision_requested" }], total: 1, review: 0 },
+    { name: "several revisions of one thread", quotes: [{ status: "submitted", internal: "awaiting_review", revisions: 5 }], total: 1, review: 1 },
+    { name: "internally approved quotation", quotes: [{ status: "pending", internal: "approved" }], total: 1, review: 0 },
+    { name: "Client-accepted quotation", quotes: [{ status: "accepted", internal: "approved" }], total: 1, review: 0 },
+    { name: "historical rejected quotations", quotes: [{ status: "rejected", internal: "rejected" }, { status: "rejected", internal: "approved" }], total: 2, review: 0 },
+    { name: "Confirm with selected approved quotation and rejected alternative", stage: "confirm", quotes: [{ status: "pending", internal: "approved" }, { status: "rejected", internal: "rejected" }], total: 2, review: 0 },
+  ];
+  try {
+    for (const scenario of cases) await t.test(scenario.name, async () => {
+      let queries = 0;
+      pool.query = async (sql) => {
+        queries++;
+        const aggregate = sql.slice(sql.indexOf("SELECT COUNT(*)::int AS total"), sql.indexOf(") quotation_counts ON TRUE"));
+        assert.match(aggregate, /^SELECT COUNT\(\*\)::int AS total,/);
+        assert.match(aggregate, /COUNT\(\*\) FILTER \(WHERE q.status IN \('pending','submitted'\)/);
+        assert.match(aggregate, /FROM quotations q WHERE q.service_request_id=sr.id\s*$/);
+        assert.doesNotMatch(aggregate, /JOIN|quotation_revisions|commercial_proposals/);
+        return { rows: [{ request_id: 34, current_stage: scenario.stage || "quote", quotations_total: scenario.quotes.length,
+          quotations_awaiting_review: scenario.quotes.filter((q) => ["pending", "submitted"].includes(q.status) && q.internal === "awaiting_review").length,
+        }] };
+      };
+      const [row] = await listInspectionWorkflows();
+      assert.equal(row.quotationsTotal, scenario.total);
+      assert.equal(row.quotationsAwaitingReview, scenario.review);
+      assert.equal(row.currentStage, scenario.stage || "quote");
+      assert.equal(queries, 1, "Listing must use one database query");
+    });
+  } finally { pool.query = originalQuery; }
+});
