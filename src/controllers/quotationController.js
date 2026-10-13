@@ -1,3 +1,4 @@
+import { clientQuotationPrice, authorizedClientPriceSql } from "../services/clientQuotationPrice.js";
 import { pool } from "../config/db.js";
 import { calculateQuotationTotals } from "../services/quotationAcceptanceService.js";
 import { createQuotationThread, decideQuotationRevision, getNegotiation, submitQuotationRevision } from "../services/quotationNegotiationService.js";
@@ -50,7 +51,7 @@ const mapQuotationRow = (row, user) => {
   }
 
   if (roleId === 3) {
-  const finalAmount = Number(row.client_total_usd || row.total_quote_usd || 0);
+  const finalAmount = clientQuotationPrice(row);
 
   return {
     ...base,
@@ -118,7 +119,7 @@ export const getQuotations = async (req, res) => {
     const result = await pool.query(
       `
       SELECT
-        q.*,
+        q.*, ${authorizedClientPriceSql("q")} AS authorized_client_total_usd,
         sr.requester_user_id,
         e.full_name AS expert_name,
         e.rating AS expert_rating,
@@ -153,7 +154,7 @@ export const getQuotationById = async (req, res) => {
     const result = await pool.query(
       `
       SELECT
-        q.*,
+        q.*, ${authorizedClientPriceSql("q")} AS authorized_client_total_usd,
         sr.requester_user_id,
         e.full_name AS expert_name,
         e.rating AS expert_rating,

@@ -1,4 +1,5 @@
 import { resolveRequestCompany } from "./requestParticularsService.js";
+import { requestPortsSql, requestPortCollection } from "./requestPortsService.js";
 import { pool } from "../config/db.js";
 import { writeAdminAudit } from "./adminAuditService.js";
 import { calculateQuotationTotals } from "./quotationAcceptanceService.js";
@@ -78,7 +79,7 @@ export const listInspectionWorkflows = async ({ search, stage, status } = {}) =>
   if (stage && stage !== "all") { if (!WORKFLOW_STAGES.includes(stage)) throw workflowError(400,"INVALID_STAGE","Unknown workflow stage"); values.push(stage); conditions.push(`COALESCE(iw.current_stage,CASE WHEN sr.accepted_quotation_id IS NOT NULL AND sr.accepted_expert_id IS NOT NULL THEN 'surveyor' WHEN sr.accepted_quotation_id IS NOT NULL THEN 'confirm' ELSE 'overview' END)=$${values.length}`); }
   if (status && status !== "all") { values.push(status); conditions.push(`LOWER(sr.status)=LOWER($${values.length})`); }
   const result = await pool.query(
-    `SELECT sr.id AS request_id,sr.title,sr.requester_name AS client_name,sr.vessel_name,
+    `SELECT sr.id AS request_id,${requestPortsSql("sr")} AS selected_ports,sr.port_id,sr.country,sr.title,sr.requester_name AS client_name,sr.vessel_name,
        ${serviceLabelSql} AS service,sr.port_name,sr.required_by,sr.status AS request_status,
        sr.moderation_status,sr.approved_budget_usd,sr.accepted_quotation_id,sr.accepted_expert_id,
        COALESCE(sr.accepted_expert_id,accepted_q.expert_id,assignment.expert_id) AS operational_expert_id,
@@ -108,7 +109,7 @@ export const listInspectionWorkflows = async ({ search, stage, status } = {}) =>
      ORDER BY COALESCE(iw.updated_at,sr.updated_at) DESC,sr.id DESC`, values);
   return result.rows.map((row) => ({
     requestId: row.request_id, reference: row.title || `Request #${row.request_id}`, clientName: row.client_name,
-    vesselName: row.vessel_name, service: row.service, portName: row.port_name, requiredBy: row.required_by,
+    vesselName: row.vessel_name, service: row.service, portName: row.port_name, ports: requestPortCollection(row), requiredBy: row.required_by,
     requestStatus: row.request_status, moderationStatus: row.moderation_status,
     approvedBudgetUsd: row.approved_budget_usd == null ? null : Number(row.approved_budget_usd),
     quotationsTotal: Number(row.quotations_total || 0),
@@ -121,7 +122,7 @@ export const listInspectionWorkflows = async ({ search, stage, status } = {}) =>
 export const getInspectionWorkflow = async (requestIdValue, queryable = pool) => {
   const requestId = positiveId(requestIdValue, "requestId");
   const requestResult = await queryable.query(
-    `SELECT sr.*,${serviceLabelSql} AS service_label,u.full_name AS client_user_name,u.email AS client_email,u.phone AS client_phone,
+    `SELECT sr.*,${requestPortsSql("sr")} AS selected_ports,${serviceLabelSql} AS service_label,u.full_name AS client_user_name,u.email AS client_email,u.phone AS client_phone,
             (SELECT rea.expert_id FROM request_expert_assignments rea WHERE rea.service_request_id=sr.id ORDER BY rea.updated_at DESC,rea.id DESC LIMIT 1) AS assigned_expert_id
        FROM service_requests sr LEFT JOIN users u ON u.id=sr.requester_user_id WHERE sr.id=$1`, [requestId]);
   if (!requestResult.rows.length) throw workflowError(404,"REQUEST_NOT_FOUND","Service request not found");
@@ -171,7 +172,7 @@ export const getInspectionWorkflow = async (requestIdValue, queryable = pool) =>
   const companyName = await resolveRequestCompany(queryable, request.requester_user_id);
   return {
     workflow: workflow ? { id:workflow.id,currentStage:workflow.current_stage,selectedQuotationId:workflow.selected_quotation_id,startedAt:workflow.started_at,completedAt:workflow.completed_at,createdAt:workflow.created_at,updatedAt:workflow.updated_at } : null,
-    request: { id:request.id,reference:request.title||`Request #${request.id}`,title:request.title,inspectionMethodId:request.inspection_method_id==null?null:Number(request.inspection_method_id),inspectionVertical:request.service_category,serviceType:request.service_type,serviceCategory:request.service_category,serviceTypeOther:request.service_type_other,service:request.service_label,scope:request.scope_of_work,urgency:request.urgency,requiredBy:request.required_by,status:request.status,moderationStatus:request.moderation_status,approvedBudgetUsd:request.approved_budget_usd==null?null:Number(request.approved_budget_usd),vessel:{name:request.vessel_name,imoNumber:request.imo_number,type:request.vessel_type,flag:request.flag_state},terminalName:request.terminal_name||null,agentDetails:{companyName:request.agent_company_name||null,contactName:request.agent_contact_name||null,email:request.agent_email||null,phone:request.agent_phone||null},port:{name:request.port_name,country:request.country,eta:request.eta,locationSummary:request.location_summary} },
+    request: { id:request.id,reference:request.title||`Request #${request.id}`,title:request.title,inspectionMethodId:request.inspection_method_id==null?null:Number(request.inspection_method_id),inspectionVertical:request.service_category,serviceType:request.service_type,serviceCategory:request.service_category,serviceTypeOther:request.service_type_other,service:request.service_label,scope:request.scope_of_work,urgency:request.urgency,requiredBy:request.required_by,status:request.status,moderationStatus:request.moderation_status,approvedBudgetUsd:request.approved_budget_usd==null?null:Number(request.approved_budget_usd),vessel:{name:request.vessel_name,imoNumber:request.imo_number,type:request.vessel_type,flag:request.flag_state},terminalName:request.terminal_name||null,ports:requestPortCollection(request),agentDetails:{companyName:request.agent_company_name||null,contactName:request.agent_contact_name||null,email:request.agent_email||null,phone:request.agent_phone||null},port:{name:request.port_name,country:request.country,eta:request.eta,locationSummary:request.location_summary} },
     client: { id:request.requester_user_id,name:companyName||request.requester_name||request.client_user_name,companyVerified:Boolean(companyName),email:request.client_email,phone:request.client_phone },
     quotations,selectedQuotation,acceptedQuotation,surveyor,proposal,proposals,
     counts:{ quotationsAwaitingReview:quotations.filter((q)=>AWAITING_QUOTATION_STATUSES.includes(String(q.status).toLowerCase()) && q.internalStatus==="awaiting_review").length },

@@ -1,4 +1,5 @@
 import { findInspectionMethod } from "./inspectionCatalogueService.js";
+import { resolveSelectedRequestPorts } from "./requestPortsService.js";
 import { resolveRequestPort } from "./requestParticularsService.js";
 import { generateOpenRouterScope, scopeError } from "./openRouterScopeService.js";
 
@@ -27,6 +28,10 @@ export async function resolveScopeInput(body, queryable) {
       if (error.status === 400) throw fail(400, "INVALID_SCOPE_INPUT", error.message);
       throw error;
     }
+  }
+  if (Object.hasOwn(body, "portIds")) {
+    const selected = await resolveSelectedRequestPorts(queryable, body);
+    context.ports = selected.ports.map(({ port_name, country, isPrimary }) => ({ name: port_name, country, isPrimary }));
   }
   return context;
 }

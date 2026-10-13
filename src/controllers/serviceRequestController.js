@@ -1,4 +1,6 @@
 import { pool } from "../config/db.js";
+import { requestPortsSql, requestPortCollection, resolveSelectedRequestPorts, persistSelectedRequestPorts, guardPrimaryPortScheduleChange } from "../services/requestPortsService.js";
+import { clientQuotationPrice, authorizedClientPriceSql } from "../services/clientQuotationPrice.js";
 import { confirmAcceptedExpertAssignment } from "../services/confirmedAssignmentService.js";
 import { findOrCreatePort } from "../utils/findOrCreatePort.js";
 import { deleteServiceRequestById } from "../services/serviceRequestService.js";
@@ -119,6 +121,7 @@ const mapRequestRow = (row) => ({
   companyName: row.linked_company_name || null,
   companyVerified: Boolean(row.linked_company_name),
   terminalName: row.terminal_name || null,
+  ports: requestPortCollection(row),
   agentDetails: { companyName: row.agent_company_name || null, contactName: row.agent_contact_name || null, email: row.agent_email || null, phone: row.agent_phone || null },
   requesterUserId: row.requester_user_id,
   status: row.status,
@@ -164,16 +167,18 @@ const serializeApprovedServiceRequestForConsultant = (row) => ({
   inspectionDate: row.inspection_date,
   portOfInspection: row.port_of_inspection,
   terminalName: row.terminal_name || null,
+  ports: requestPortCollection(row),
 });
 
 const serializeServiceRequestForAdmin = mapRequestRow;
 const serializeServiceRequestForClient = (row) => {
   const mapped = mapRequestRow(row);
-  // Client should not see internal admin adjustment details
-  delete mapped.adminBudgetAdjustmentType;
-  delete mapped.adminBudgetAdjustmentMode;
-  delete mapped.adminBudgetAdjustmentValue;
-  return mapped;
+  const fields = ["id", "inspectionMethodId", "inspectionVertical", "inspectionType", "serviceType", "serviceCategory", "serviceTypeOther",
+    "title", "scopeOfWork", "urgency", "budgetUsd", "clientBudgetUsd", "approvedBudgetUsd", "requiredBy", "requesterName",
+    "companyName", "companyVerified", "terminalName", "ports", "agentDetails", "requesterUserId", "status", "moderationStatus",
+    "rejectionReason", "approvedAt", "quotationCount", "acceptedQuotationId", "acceptedExpertId", "activeProposalId", "workflowStage",
+    "hasAssignment", "vessel", "port", "requiredCertification", "createdAt", "updatedAt"];
+  return Object.fromEntries(fields.map((field) => [field, mapped[field]]));
 };
 
 const canAccessRequest = async (user, request) => {
@@ -235,14 +240,21 @@ export const createServiceRequest = async (req, res) => {
     let portId = null;
     let resolvedPortName = portName || null;
     let resolvedCountry = country || null;
-    if (req.body.portId != null && req.body.portId !== "") {
+    let selectedPorts = null;
+    if (Object.hasOwn(req.body, "portIds")) {
+      const selected = await resolveSelectedRequestPorts(client, req.body);
+      selectedPorts = selected.ports;
+      portId = selected.primary?.id || null;
+      resolvedPortName = selected.primary?.port_name || null;
+      resolvedCountry = selected.primary?.country || null;
+    } else if (req.body.portId != null && req.body.portId !== "") {
       const port = await resolveRequestPort(client, req.body.portId);
       portId = port.id;
       resolvedPortName = port.port_name;
       resolvedCountry = port.country;
     }
 
-    if (!portId && portName && country) {
+    if (!Object.hasOwn(req.body, "portIds") && !portId && portName && country) {
       const port = await findOrCreatePort({
         port_name: portName,
         country,
@@ -317,12 +329,14 @@ export const createServiceRequest = async (req, res) => {
       ]
     );
 
+    if (selectedPorts !== null || portId) await persistSelectedRequestPorts(client, result.rows[0].id,
+      selectedPorts || [{ id: portId, isPrimary: true }]);
     await client.query("COMMIT");
 
     res.status(201).json({
       success: true,
       message: "Service request created successfully",
-      data: mapRequestRow({ ...result.rows[0], linked_company_name: companyName }),
+      data: (Number(req.user.role_id) === 3 ? serializeServiceRequestForClient : mapRequestRow)({ ...result.rows[0], selected_ports: selectedPorts, linked_company_name: companyName }),
     });
   } catch (error) {
     await client.query("ROLLBACK");
@@ -379,7 +393,7 @@ export const getServiceRequests = async (req, res) => {
           sr.vessel_type,
           sr.required_by AS inspection_date,
           sr.terminal_name,
-          sr.port_name AS port_of_inspection
+          sr.port_name AS port_of_inspection, sr.port_id, sr.country, ${requestPortsSql("sr")} AS selected_ports
         FROM service_requests sr
         WHERE ${conditions.join(" AND ")}
         ORDER BY sr.required_by ASC NULLS LAST, sr.id DESC
@@ -439,7 +453,7 @@ export const getServiceRequests = async (req, res) => {
     const result = await pool.query(
       `
       SELECT 
-        sr.*,
+        sr.*, ${requestPortsSql("sr")} AS selected_ports,
         (SELECT cc.legal_name FROM client_profiles cp JOIN client_companies cc ON cc.client_profile_id=cp.id WHERE cp.user_id=sr.requester_user_id LIMIT 1) AS linked_company_name,
         COUNT(q.id) AS quotation_count,
         EXISTS(SELECT 1 FROM request_expert_assignments rea WHERE rea.service_request_id=sr.id) AS has_assignment,
@@ -494,7 +508,7 @@ export const getServiceRequestById = async (req, res) => {
           sr.vessel_type,
           sr.required_by AS inspection_date,
           sr.terminal_name,
-          sr.port_name AS port_of_inspection
+          sr.port_name AS port_of_inspection, sr.port_id, sr.country, ${requestPortsSql("sr")} AS selected_ports
         FROM service_requests sr
         WHERE sr.id = $1
           AND sr.moderation_status = 'approved'
@@ -514,7 +528,7 @@ export const getServiceRequestById = async (req, res) => {
     const requestResult = await pool.query(
       `
       SELECT 
-        sr.*,
+        sr.*, ${requestPortsSql("sr")} AS selected_ports,
         (SELECT cc.legal_name FROM client_profiles cp JOIN client_companies cc ON cc.client_profile_id=cp.id WHERE cp.user_id=sr.requester_user_id LIMIT 1) AS linked_company_name,
         COUNT(q.id) AS quotation_count,
         EXISTS(SELECT 1 FROM request_expert_assignments rea WHERE rea.service_request_id=sr.id) AS has_assignment,
@@ -548,7 +562,7 @@ export const getServiceRequestById = async (req, res) => {
     if (Number(req.user.role_id) === 1) {
       quotationResult = await pool.query(
         `
-    SELECT q.*, e.full_name AS expert_name, e.rating AS expert_rating, e.base_location AS expert_location
+    SELECT q.*, ${authorizedClientPriceSql("q")} AS authorized_client_total_usd, e.full_name AS expert_name, e.rating AS expert_rating, e.base_location AS expert_location
     FROM quotations q
     LEFT JOIN experts e ON e.id = q.expert_id
     WHERE q.service_request_id = $1
@@ -561,7 +575,7 @@ export const getServiceRequestById = async (req, res) => {
     if (Number(req.user.role_id) === 2) {
       quotationResult = await pool.query(
         `
-    SELECT q.*, e.full_name AS expert_name, e.rating AS expert_rating, e.base_location AS expert_location
+    SELECT q.*, ${authorizedClientPriceSql("q")} AS authorized_client_total_usd, e.full_name AS expert_name, e.rating AS expert_rating, e.base_location AS expert_location
     FROM quotations q
     LEFT JOIN experts e ON e.id = q.expert_id
     WHERE q.service_request_id = $1
@@ -575,7 +589,7 @@ export const getServiceRequestById = async (req, res) => {
     if (Number(req.user.role_id) === 3 && requestRow.accepted_quotation_id) {
       quotationResult = await pool.query(
         `
-    SELECT q.*, e.full_name AS expert_name, e.rating AS expert_rating, e.base_location AS expert_location
+    SELECT q.*, ${authorizedClientPriceSql("q")} AS authorized_client_total_usd, e.full_name AS expert_name, e.rating AS expert_rating, e.base_location AS expert_location
     FROM quotations q
     LEFT JOIN experts e ON e.id = q.expert_id
     WHERE q.id = $1
@@ -585,7 +599,7 @@ export const getServiceRequestById = async (req, res) => {
       );
     }
 
-    const requestData = mapRequestRow(requestRow);
+    const requestData = Number(req.user.role_id) === 3 ? serializeServiceRequestForClient(requestRow) : mapRequestRow(requestRow);
 
     if (Number(req.user.role_id) === 2) {
       requestData.requesterName = null;
@@ -607,8 +621,8 @@ export const getServiceRequestById = async (req, res) => {
           expertName: row.expert_name,
           expertRating: Number(row.expert_rating || 0),
           expertLocation: row.expert_location,
-          finalTotalUsd: Number(row.client_total_usd || row.total_quote_usd || 0),
-          totalQuoteUsd: Number(row.client_total_usd || row.total_quote_usd || 0),
+          finalTotalUsd: clientQuotationPrice(row),
+          totalQuoteUsd: clientQuotationPrice(row),
           status: row.status,
           createdAt: row.created_at,
         };
@@ -661,7 +675,7 @@ export const updateServiceRequest = async (req, res) => {
     const roleId = Number(req.user.role_id);
     await client.query("BEGIN");
     const existing = await client.query(
-      `SELECT sr.*,
+      `SELECT sr.*, ${requestPortsSql("sr")} AS selected_ports,
         (SELECT cc.legal_name FROM client_profiles cp JOIN client_companies cc ON cc.client_profile_id=cp.id WHERE cp.user_id=sr.requester_user_id LIMIT 1) AS linked_company_name,
               (SELECT COUNT(*)::int FROM quotations q WHERE q.service_request_id=sr.id) AS quotation_count,
               EXISTS(SELECT 1 FROM quotations q WHERE q.service_request_id=sr.id AND LOWER(q.status)='accepted') AS has_accepted_quotation,
@@ -687,9 +701,31 @@ export const updateServiceRequest = async (req, res) => {
       return sendValidationError(res, particulars.fieldErrors);
     }
     const normalizedBody = { ...req.body, ...particulars.values };
-    if (Object.hasOwn(req.body, "portId") && req.body.portId != null && req.body.portId !== "") {
+    let selectedPorts = null;
+    if (Object.hasOwn(req.body, "portIds")) {
+      const selected = await resolveSelectedRequestPorts(client, req.body, requestPortCollection(request).map((p) => Number(p.id)));
+      selectedPorts = selected.ports;
+      guardPrimaryPortScheduleChange(request, selected.primary?.id, req.body);
+      Object.assign(normalizedBody, { portId: selected.primary?.id || null, portName: selected.primary?.port_name || null, country: selected.primary?.country || null });
+      if (Number(request.port_id || 0) !== Number(normalizedBody.portId || 0)) {
+        normalizedBody.terminalName = Object.hasOwn(req.body, "terminalName") ? normalizedBody.terminalName : null;
+        normalizedBody.eta = Object.hasOwn(req.body, "eta") ? normalizedBody.eta : null;
+      }
+    } else if (Object.hasOwn(req.body, "portId") && req.body.portId != null && req.body.portId !== "") {
       const port = await resolveRequestPort(client, req.body.portId);
       Object.assign(normalizedBody, { portId: port.id, portName: port.port_name, country: port.country });
+      if (Number(request.port_id || 0) !== Number(port.id)) {
+        guardPrimaryPortScheduleChange(request, port.id, req.body);
+        selectedPorts = [{ ...port, isPrimary: true }];
+        normalizedBody.terminalName = req.body.terminalName ?? null;
+        normalizedBody.eta = req.body.eta ?? null;
+      }
+    } else if ((Object.hasOwn(req.body, "portId") && req.body.portId == null) ||
+        (Object.hasOwn(req.body, "portName") && req.body.portName !== request.port_name)) {
+      guardPrimaryPortScheduleChange(request, null, req.body);
+      selectedPorts = [];
+      normalizedBody.portId = null;
+      if (request.port_id) { normalizedBody.terminalName = req.body.terminalName ?? null; normalizedBody.eta = req.body.eta ?? null; }
     }
     const fieldMap = {
       ...Object.fromEntries(Object.entries(REQUEST_PARTICULAR_FIELDS).map(([key, [column]]) => [key, column])),
@@ -869,11 +905,12 @@ export const updateServiceRequest = async (req, res) => {
         summary: request.moderation_status === "rejected" ? "Client corrected and resubmitted rejected request" : "Client edited request; Admin review remains required",
       });
     }
+    if (selectedPorts !== null) await persistSelectedRequestPorts(client, id, selectedPorts);
     await client.query("COMMIT");
     const message = roleId === 3
       ? (request.moderation_status === "rejected" ? "Request resubmitted for review" : "Request updated and submitted for review")
       : "Service request updated successfully";
-    return res.json({ success: true, message, data: mapRequestRow({ ...result.rows[0], linked_company_name: request.linked_company_name }) });
+    return res.json({ success: true, message, data: (roleId === 3 ? serializeServiceRequestForClient : mapRequestRow)({ ...result.rows[0], selected_ports: selectedPorts ?? request.selected_ports, linked_company_name: request.linked_company_name }) });
   } catch (error) {
     await client.query("ROLLBACK");
     if (error.status === 400) return sendValidationError(res, { portId: error.message });
@@ -943,7 +980,7 @@ export const approveServiceRequest = async (req, res) => {
           budget_usd = COALESCE(approved_budget_usd, client_budget_usd, budget_usd),
           updated_at = CURRENT_TIMESTAMP
       WHERE id = $2
-      RETURNING *
+      RETURNING *, ${requestPortsSql("service_requests")} AS selected_ports
       `,
       [req.user.id, id]
     );
@@ -1010,7 +1047,7 @@ export const rejectServiceRequest = async (req, res) => {
       UPDATE service_requests
       SET moderation_status = 'rejected', rejection_reason = $1, updated_at = CURRENT_TIMESTAMP
       WHERE id = $2
-      RETURNING *
+      RETURNING *, ${requestPortsSql("service_requests")} AS selected_ports
       `,
       [reason, id]
     );

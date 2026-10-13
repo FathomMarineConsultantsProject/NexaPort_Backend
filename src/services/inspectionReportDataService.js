@@ -1,11 +1,12 @@
 import { pool } from "../config/db.js";
+import { requestPortsSql, requestPortCollection } from "./requestPortsService.js";
 import { calculateQuotationTotals } from "./quotationAcceptanceService.js";
 
 const numberOrNull = (value) => value == null ? null : Number(value);
 
 export const assembleInspectionReportDataset = async (requestId, queryable = pool) => {
   const result = await queryable.query(
-    `SELECT sr.*,iw.id AS workflow_id,iw.current_stage,iw.preparation_data,iw.preparation_updated_at,iw.report_id,
+    `SELECT sr.*,${requestPortsSql("sr")} AS selected_ports,iw.id AS workflow_id,iw.current_stage,iw.preparation_data,iw.preparation_updated_at,iw.report_id,
             u.full_name AS client_user_name,u.email AS client_email,u.phone AS client_phone,
             q.id AS quote_id,q.total_quote_usd,q.travel_cost,q.accommodation_cost,q.report_fee,q.urgency_surcharge,q.admin_markup_usd,q.client_total_usd,q.status AS quote_status,
             e.id AS surveyor_id,e.full_name AS surveyor_name,e.biography AS surveyor_biography,e.base_location AS surveyor_location,e.country AS surveyor_country,e.years_experience,e.rating AS surveyor_rating,
@@ -26,7 +27,7 @@ export const assembleInspectionReportDataset = async (requestId, queryable = poo
   const evidenceResult=row.report_id ? await queryable.query("SELECT id,field_key,photo_s3_key,caption,sort_order,uploaded_at FROM inspection_report_photos WHERE report_id=$1 ORDER BY field_key,sort_order,id",[row.report_id]) : {rows:[]};
   const quote=row.quote_id ? calculateQuotationTotals(row,row.admin_markup_usd) : null;
   return {
-    request:{id:row.id,reference:row.title,title:row.title,serviceType:row.service_type,serviceCategory:row.service_category,serviceTypeOther:row.service_type_other,scope:row.scope_of_work,urgency:row.urgency,requiredBy:row.required_by,status:row.status,moderationStatus:row.moderation_status,approvedBudgetUsd:numberOrNull(row.approved_budget_usd),terminalName:row.terminal_name||null,agentDetails:{companyName:row.agent_company_name||null,contactName:row.agent_contact_name||null,email:row.agent_email||null,phone:row.agent_phone||null},port:{name:row.port_name,country:row.country,eta:row.eta,locationSummary:row.location_summary}},
+    request:{id:row.id,reference:row.title,title:row.title,serviceType:row.service_type,serviceCategory:row.service_category,serviceTypeOther:row.service_type_other,scope:row.scope_of_work,urgency:row.urgency,requiredBy:row.required_by,status:row.status,moderationStatus:row.moderation_status,approvedBudgetUsd:numberOrNull(row.approved_budget_usd),terminalName:row.terminal_name||null,ports:requestPortCollection(row),agentDetails:{companyName:row.agent_company_name||null,contactName:row.agent_contact_name||null,email:row.agent_email||null,phone:row.agent_phone||null},port:{name:row.port_name,country:row.country,eta:row.eta,locationSummary:row.location_summary}},
     client:{id:row.requester_user_id,name:row.requester_name||row.client_user_name,email:row.client_email,phone:row.client_phone},
     vessel:{name:row.vessel_name,imoNumber:row.imo_number,type:row.vessel_type,flag:row.flag_state},
     surveyor:row.surveyor_id?{id:row.surveyor_id,name:row.surveyor_name,biography:row.surveyor_biography,location:[row.surveyor_location,row.surveyor_country].filter(Boolean).join(", "),yearsExperience:row.years_experience,rating:numberOrNull(row.surveyor_rating)}:null,
