@@ -1,6 +1,7 @@
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import { pool } from "../config/db.js";
+import { isDatabaseUnavailable, logDatabaseError } from "../config/databaseErrors.js";
 import { loadUserRoles, activateRole } from "../services/userRoleService.js";
 import { sendPasswordResetOtp } from "../services/emailService.js";
 import {
@@ -10,6 +11,9 @@ import {
 } from "../services/passwordResetService.js";
 
 export const createToken = (user) => {
+  if (!process.env.JWT_SECRET) {
+    throw Object.assign(new Error("JWT configuration missing"), { code: "JWT_SECRET_MISSING" });
+  }
   return jwt.sign(
     {
       id: user.id,
@@ -138,7 +142,7 @@ export const login = async (req, res) => {
   try {
     const { identifier, password } = req.body;
 
-    if (!identifier || !password) {
+    if (typeof identifier !== "string" || !identifier.trim() || typeof password !== "string" || !password) {
       return res.status(400).json({
         success: false,
         message: "identifier and password are required",
@@ -199,10 +203,10 @@ export const login = async (req, res) => {
       user,
     });
   } catch (error) {
-    res.status(500).json({
+    logDatabaseError("Login failed", error);
+    res.status(isDatabaseUnavailable(error) ? 503 : 500).json({
       success: false,
-      message: "Login failed",
-      error: error.message,
+      message: isDatabaseUnavailable(error) ? "Authentication temporarily unavailable" : "Login failed",
     });
   }
 };

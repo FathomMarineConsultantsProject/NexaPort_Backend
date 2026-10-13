@@ -80,7 +80,8 @@ test("copy reuses a valid locator, revoke blocks reuse, and next copy rotates", 
         share = { ...share, revoked_at: new Date() };
         return { rows: [{ id: 1 }], rowCount: 1 };
       }
-      if (sql.includes("INSERT INTO public.admin_audit_logs")) return { rows: [], rowCount: 1 };
+      if (sql.includes("to_regclass('public.admin_audit_logs')")) return { rows: [{ audit_table: null }] };
+      if (sql.includes("INSERT INTO public.admin_audit_logs")) throw new Error("Share must not depend on the separate audit table");
       throw new Error(`Unexpected query: ${sql}`);
     },
   };
@@ -123,7 +124,8 @@ test("concurrent copies serialize on the request and return one locator", async 
           share = { id: 1, locator: params[1], revoked_at: null, expires_at: null };
           return { rows: [share] };
         }
-        if (sql.includes("INSERT INTO public.admin_audit_logs")) return { rows: [] };
+        if (sql.includes("to_regclass('public.admin_audit_logs')")) return { rows: [{ audit_table: null }] };
+        if (sql.includes("INSERT INTO public.admin_audit_logs")) throw new Error("Share must not depend on the separate audit table");
         if (sql === "COMMIT" || sql === "ROLLBACK") { unlock?.(); return { rows: [] }; }
         throw new Error(`Unexpected query: ${sql}`);
       },
@@ -135,4 +137,51 @@ test("concurrent copies serialize on the request and return one locator", async 
     assert.equal(a.body.data.locator, b.body.data.locator);
     assert.equal(insertCount, 1);
   } finally { pool.connect = originalConnect; }
+});
+
+test("Admin and owner can share requests at any status; another Client cannot", async (t) => {
+  const statuses = ["pending", "approved", "completed", "rejected"];
+  let currentStatus = statuses[0];
+  t.mock.method(pool, "connect", async () => ({
+    release() {},
+    async query(sql) {
+      if (sql.includes("FROM service_requests WHERE id=$1 FOR UPDATE")) return { rows: [{ id: 4, requester_user_id: 10, status: currentStatus }] };
+      if (sql.includes("FROM service_request_shares WHERE")) return { rows: [{ locator, revoked_at: null, expires_at: null }] };
+      return { rows: [] };
+    },
+  }));
+  for (const role of [1, 3]) for (const status of statuses) {
+    currentStatus = status;
+    const res = response();
+    await copyRequestLink({ params: { id: "4" }, user: { id: role === 1 ? 20 : 10, role_id: role } }, res);
+    assert.equal(res.statusCode, 200, `${role} ${status}`);
+  }
+  const stranger = response();
+  await copyRequestLink({ params: { id: "4" }, user: { id: 11, role_id: 3 } }, stranger);
+  assert.equal(stranger.statusCode, 403);
+});
+
+test("missing share schema is diagnosed separately from a connection outage", async (t) => {
+  const originalError = console.error;
+  console.error = () => {};
+  t.after(() => { console.error = originalError; });
+  t.mock.method(pool, "connect", async () => ({
+    release() {},
+    async query(sql) {
+      if (sql.includes("FROM service_requests WHERE")) return { rows: [{ id: 4, requester_user_id: 10 }] };
+      if (sql.includes("FROM service_request_shares WHERE")) throw Object.assign(new Error("private schema detail"), { code: "42P01" });
+      return { rows: [] };
+    },
+  }));
+  const req = { params: { id: "4" }, user: { id: 10, role_id: 3 } };
+  const schema = response();
+  await copyRequestLink(req, schema);
+  assert.equal(schema.statusCode, 500);
+  assert.equal(schema.body.code, "SHARING_SCHEMA_MISMATCH");
+  assert.doesNotMatch(JSON.stringify(schema.body), /private schema detail/);
+  pool.connect = async () => { throw Object.assign(new Error("private hostname"), { code: "ENOTFOUND" }); };
+  const outage = response();
+  await copyRequestLink(req, outage);
+  assert.equal(outage.statusCode, 503);
+  assert.equal(outage.body.code, "SHARING_UNAVAILABLE");
 });

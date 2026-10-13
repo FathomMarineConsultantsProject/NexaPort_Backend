@@ -1,4 +1,5 @@
 import { pool } from "../config/db.js";
+import { isDatabaseUnavailable, logDatabaseError } from "../config/databaseErrors.js";
 
 export const getPlatformStats = async (_req, res) => {
   try {
@@ -96,15 +97,9 @@ export const getPlatformStats = async (_req, res) => {
       },
     });
   } catch (error) {
-    console.error(
-      "Failed to load public platform statistics",
-      {
-        message: error.message,
-        stack: error.stack,
-      }
-    );
+    logDatabaseError("Failed to load public platform statistics", error);
 
-    return res.status(500).json({
+    return res.status(isDatabaseUnavailable(error) ? 503 : 500).json({
       success: false,
       message:
         "Platform statistics are temporarily unavailable.",

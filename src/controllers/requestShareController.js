@@ -7,7 +7,14 @@ const validId = (value) => /^[1-9]\d*$/.test(String(value || ""));
 const validLocator = (value) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 const unavailable = (res) => res.status(404).json({ success: false, code: "LINK_UNAVAILABLE", message: "This link is no longer available." });
 const denied = (res) => res.status(403).json({ success: false, code: "ACCESS_DENIED", message: "You don't have permission to view this inspection request." });
-const failed = (res) => res.status(503).json({ success: false, message: "Sharing is temporarily unavailable." });
+const failed = (res, error) => {
+  const schemaMismatch = ["42P01", "42703", "42804"].includes(error?.code);
+  return res.status(schemaMismatch ? 500 : 503).json({
+    success: false,
+    code: schemaMismatch ? "SHARING_SCHEMA_MISMATCH" : "SHARING_UNAVAILABLE",
+    message: "Sharing is temporarily unavailable.",
+  });
+};
 export const shareNoStore = (_req, res, next) => { res.set("Cache-Control", "no-store"); res.set("Referrer-Policy", "no-referrer"); next(); };
 const resolutionAttempts = new Map();
 export const limitShareResolution = (req, res, next) => {
@@ -23,11 +30,23 @@ export const limitShareResolution = (req, res, next) => {
 };
 const canManage = (request, user) => Number(user.role_id) === 1 ||
   (Number(user.role_id) === 3 && Number(request.requester_user_id) === Number(user.id));
+const writeShareAuditIfAvailable = async (db, actorUserId, action, requestId) => {
+  const schema = await db.query("SELECT to_regclass('public.admin_audit_logs') AS audit_table");
+  if (!schema.rows[0]?.audit_table) {
+    console.warn("Share admin audit table is unavailable", { code: "ADMIN_AUDIT_TABLE_MISSING" });
+    return;
+  }
+  await writeAdminAudit(db, { actorUserId, action, targetType: "service_request", targetId: requestId });
+};
 
 export const copyRequestLink = async (req, res) => {
   if (!validId(req.params.id)) return denied(res);
-  const db = await pool.connect().catch(() => null);
-  if (!db) return failed(res);
+  let db;
+  try { db = await pool.connect(); }
+  catch (error) {
+    console.error("Share connection failed", { code: error.code || "UNKNOWN" });
+    return failed(res, error);
+  }
   try {
     await db.query("BEGIN");
     const request = (await db.query("SELECT id,requester_user_id FROM service_requests WHERE id=$1 FOR UPDATE", [req.params.id])).rows[0];
@@ -44,14 +63,14 @@ export const copyRequestLink = async (req, res) => {
         share = (await db.query(`INSERT INTO service_request_shares(service_request_id,locator,created_by_user_id)
           VALUES($1,$2,$3) RETURNING *`, [request.id, locator, req.user.id])).rows[0];
       }
-      await writeAdminAudit(db, { actorUserId: req.user.id, action: "service_request.share_created", targetType: "service_request", targetId: request.id });
+      await writeShareAuditIfAvailable(db, req.user.id, "service_request.share_created", request.id);
     }
     await db.query("COMMIT");
     return res.json({ success: true, data: { locator: share.locator } });
   } catch (error) {
     await db.query("ROLLBACK").catch(() => {});
     console.error("Share creation failed", { code: error.code || "UNKNOWN" });
-    return failed(res);
+    return failed(res, error);
   } finally { db.release(); }
 };
 
@@ -67,26 +86,30 @@ export const resolveRequestLink = async (req, res) => {
     return res.json({ success: true, data: { requestId: request.id } });
   } catch (error) {
     console.error("Share resolution failed", { code: error.code || "UNKNOWN" });
-    return failed(res);
+    return failed(res, error);
   }
 };
 
 export const revokeRequestLink = async (req, res) => {
   if (!validId(req.params.id)) return denied(res);
-  const db = await pool.connect().catch(() => null);
-  if (!db) return failed(res);
+  let db;
+  try { db = await pool.connect(); }
+  catch (error) {
+    console.error("Share connection failed", { code: error.code || "UNKNOWN" });
+    return failed(res, error);
+  }
   try {
     await db.query("BEGIN");
     const request = (await db.query("SELECT id,requester_user_id FROM service_requests WHERE id=$1 FOR UPDATE", [req.params.id])).rows[0];
     if (!request || !canManage(request, req.user)) { await db.query("ROLLBACK"); return denied(res); }
     const changed = await db.query(`UPDATE service_request_shares SET revoked_at=now(),revoked_by_user_id=$2,updated_at=now()
       WHERE service_request_id=$1 AND revoked_at IS NULL RETURNING id`, [request.id, req.user.id]);
-    if (changed.rowCount) await writeAdminAudit(db, { actorUserId: req.user.id, action: "service_request.share_revoked", targetType: "service_request", targetId: request.id });
+    if (changed.rowCount) await writeShareAuditIfAvailable(db, req.user.id, "service_request.share_revoked", request.id);
     await db.query("COMMIT");
     return res.json({ success: true });
   } catch (error) {
     await db.query("ROLLBACK").catch(() => {});
     console.error("Share revocation failed", { code: error.code || "UNKNOWN" });
-    return failed(res);
+    return failed(res, error);
   } finally { db.release(); }
 };

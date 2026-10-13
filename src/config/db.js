@@ -1,5 +1,6 @@
 import pg from "pg";
 import dotenv from "dotenv";
+import { logDatabaseError } from "./databaseErrors.js";
 
 dotenv.config();
 
@@ -19,3 +20,6 @@ export const pool = new Pool({
   },
   connectionTimeoutMillis: 15000,
 });
+
+// Idle-client failures are emitted by pg.Pool outside an active request.
+pool.on("error", (error) => logDatabaseError("PostgreSQL idle client error", error));
