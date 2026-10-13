@@ -53,7 +53,7 @@ export const corsOptions = {
   origin(origin, callback) { callback(null, !origin || allowedCorsOrigins.has(normalizeCorsOrigin(origin))); },
   credentials: true,
   methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Authorization", "Content-Type"],
+  allowedHeaders: ["Authorization", "Content-Type", "x-registration-draft-token"],
   optionsSuccessStatus: 204,
 };
 
