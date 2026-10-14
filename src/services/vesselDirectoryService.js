@@ -36,6 +36,12 @@ export async function listVesselDirectory(input, db = pool) {
   return { vessels: rows.rows, pagination: { page: f.page, limit: f.limit, total, totalPages: Math.ceil(total / f.limit) } };
 }
 
+export async function listVesselDirectoryFlags(db = pool) {
+  const result = await db.query(`SELECT DISTINCT flag FROM magicport_vessel_directory
+    WHERE flag IS NOT NULL AND flag <> '' ORDER BY flag LIMIT 500`);
+  return result.rows.map((row) => row.flag);
+}
+
 export async function getVesselDirectoryDetail(id, db = pool) {
   if (!/^\d+$/.test(String(id))) throw Object.assign(new Error("Invalid vessel ID"), { status: 400 });
   const result = await db.query(`SELECT ${publicFields}, s.payload->'faq' AS faq, s.payload->'additionalAttributes' AS additional_attributes, s.payload_hash FROM magicport_vessel_directory d JOIN magicport_vessel_sources s ON s.source_key=d.source_key WHERE d.id=$1`, [id]);

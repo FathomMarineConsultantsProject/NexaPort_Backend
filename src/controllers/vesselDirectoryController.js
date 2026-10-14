@@ -1,4 +1,9 @@
-import { getVesselDirectoryDetail, listVesselDirectory } from "../services/vesselDirectoryService.js";
+import { getVesselDirectoryDetail, listVesselDirectory, listVesselDirectoryFlags } from "../services/vesselDirectoryService.js";
+
+export const listDirectoryFlags = async (_req, res) => {
+  try { return res.json({ success: true, flags: await listVesselDirectoryFlags() }); }
+  catch { return res.status(500).json({ success: false, message: "Vessel flags unavailable" }); }
+};
 
 export const listDirectoryVessels = async (req, res) => {
   try { return res.json({ success: true, ...await listVesselDirectory(req.query) }); }
