@@ -911,6 +911,10 @@ export const updateExpert = async (req, res) => {
       });
     }
 
+    if (Object.hasOwn(req.body || {}, "day_rate_usd") && Number(req.user.role_id) !== 1) {
+      return res.status(403).json({ success: false, message: "Only Super Admin can update the profile day rate" });
+    }
+
     const {
       full_name,
       biography,
