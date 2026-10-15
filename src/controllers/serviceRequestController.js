@@ -605,6 +605,15 @@ export const getServiceRequestById = async (req, res) => {
 
     const requestData = Number(req.user.role_id) === 3 ? serializeServiceRequestForClient(requestRow) : mapRequestRow(requestRow);
 
+    if (Number(req.user.role_id) === 1) {
+      const submitter = requestRow.requester_user_id
+        ? (await pool.query("SELECT id, full_name, email FROM users WHERE id=$1", [requestRow.requester_user_id])).rows[0]
+        : null;
+      requestData.submittedBy = submitter
+        ? { id: submitter.id, fullName: submitter.full_name, email: submitter.email, source: "account" }
+        : { source: "legacy" };
+    }
+
     if (Number(req.user.role_id) === 2) {
       requestData.requesterName = null;
       requestData.requesterUserId = null;

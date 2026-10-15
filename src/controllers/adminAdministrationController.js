@@ -68,6 +68,11 @@ export const updateConsultantAsAdmin = async (req, res) => {
     const target = await client.query(`SELECT e.id, e.user_id FROM experts e JOIN users u ON u.id=e.user_id WHERE e.id=$1 FOR UPDATE OF e, u`, [id]);
     if (!target.rows.length) throw Object.assign(new Error("Consultant not found"), { status: 404 });
     const { user = {}, expert = {}, flag_services: flagServices } = req.body || {};
+    if (Object.hasOwn(expert, "day_rate_usd") && expert.day_rate_usd !== null &&
+        (!Number.isFinite(Number(expert.day_rate_usd)) || Number(expert.day_rate_usd) < 0 || Number(expert.day_rate_usd) > 9999999 ||
+         !/^\d+(?:\.\d{1,2})?$/.test(String(expert.day_rate_usd)))) {
+      throw Object.assign(new Error("Day rate must be a valid USD amount per day"), { status: 400 });
+    }
     if (user.full_name !== undefined && expert.full_name === undefined) expert.full_name = user.full_name;
     if (user.email !== undefined) {
       const email = normalizedEmail(user.email);
