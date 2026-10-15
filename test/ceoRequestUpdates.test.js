@@ -22,7 +22,7 @@ async function create(input, company = "Registered Marine Ltd") {
   await withClient(async (sql, values = []) => {
     calls.push(sql);
     if (/SELECT cc.legal_name/.test(sql)) return { rows: company ? [{ legal_name: company }] : [] };
-    if (/SELECT id, port_name, country FROM ports/.test(sql)) return { rows: [{ id: 5, port_name: "Singapore", country: "Singapore" }] };
+    if (/SELECT id, port_name, country FROM ports|FROM ports|INSERT INTO ports/.test(sql)) return { rows: [{ id: 5, port_name: "Singapore", country: "Singapore" }] };
     if (/INSERT INTO service_requests/.test(sql)) { stored = columns(sql, values); return { rows: [{ id: 9, ...stored }] }; }
     return { rows: [] };
   }, () => createServiceRequest({ body: { ...body, ...input }, user: { id: 3, role_id: 3, full_name: "Personal Name" } }, res));
@@ -48,7 +48,7 @@ test("canonical Port overrides supplied name/country; terminal and agents persis
   assert.equal(stored.port_name, "Singapore");
   assert.equal(stored.country, "Singapore");
   assert.equal(stored.terminal_name, "Terminal A");
-  assert.equal(res.body.data.agentDetails.companyName, "Agent Ltd");
+  assert.equal(res.body.data.agentDetails, undefined);
   assert.equal(stored.agent_contact_name, "Contact");
   assert.equal(stored.agent_email, "agent@example.com");
   assert.equal(stored.agent_phone, "+65 12345678");
@@ -70,10 +70,42 @@ test("legacy country/location/certification payload remains accepted", async () 
 });
 
 test("legacy free-text Port and Country still resolve through existing helper", async () => {
-  const original = pool.query;
-  pool.query = async () => ({ rows: [{ id: 6, port_name: "Legacy Port", country: "Legacy Country" }] });
-  try { const { stored } = await create({ portName: "Legacy Port", country: "Legacy Country" }); assert.equal(stored.port_id, 6); }
-  finally { pool.query = original; }
+  const { stored } = await create({ portName: "Legacy Port", country: "Legacy Country" });
+  assert.equal(stored.port_id, 5);
+});
+
+test("Client request binds an existing IMO vessel and Fleet association in one transaction", async () => {
+  let stored;
+  const calls = [];
+  const res = response();
+  await withClient(async (sql, values = []) => {
+    calls.push(sql);
+    if (/SELECT cc.legal_name/.test(sql)) return { rows: [{ legal_name: "Registered Marine Ltd" }] };
+    if (/FROM magicport_vessel_directory WHERE imo=/.test(sql)) return { rows: [{ id: 4, imo: "9620865", name: "OCEAN", vessel_type: "Tanker", flag: "Panama", master_vessel_id: 5 }] };
+    if (/FROM vessels WHERE regexp_replace/.test(sql)) return { rows: [{ id: 5, vessel_name: "OCEAN", imo_number: "9620865", vessel_type: "Tanker", flag_state: "Panama" }] };
+    if (/INSERT INTO service_requests/.test(sql)) { stored = columns(sql, values); return { rows: [{ id: 9, ...stored }] }; }
+    return { rows: [] };
+  }, () => createServiceRequest({ body: { ...body, vesselName: "Old spelling", imoNumber: "9620865" }, user: { id: 3, role_id: 3 } }, res));
+  assert.equal(res.statusCode, 201);
+  assert.equal(stored.vessel_id, 5);
+  assert.equal(stored.vessel_name, "OCEAN");
+  assert.ok(calls.indexOf("BEGIN") < calls.findIndex((sql) => /INSERT INTO client_vessel_associations/.test(sql)));
+  assert.ok(calls.findIndex((sql) => /INSERT INTO client_vessel_associations/.test(sql)) < calls.findIndex((sql) => /INSERT INTO service_requests/.test(sql)));
+  assert.equal(calls.at(-1), "COMMIT");
+});
+
+test("invalid vessel identity rolls back before creating a request", async () => {
+  const calls = [];
+  const res = response();
+  await withClient(async (sql) => {
+    calls.push(sql);
+    if (/SELECT cc.legal_name/.test(sql)) return { rows: [{ legal_name: "Registered Marine Ltd" }] };
+    return { rows: [] };
+  }, () => createServiceRequest({ body: { ...body, vesselName: "OCEAN", imoNumber: "9378654" }, user: { id: 3, role_id: 3 } }, res));
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.body.field_errors.imoNumber, "Enter a valid seven-digit IMO number.");
+  assert.equal(calls.at(-1), "ROLLBACK");
+  assert.ok(calls.every((sql) => !/INSERT INTO service_requests/.test(sql)));
 });
 
 test("invalid agent contact and length fail field validation", async () => {
@@ -116,7 +148,7 @@ test("PUT canonical Port derives name/country and rejects unavailable IDs", asyn
 });
 
 test("approved Consultant serializer exposes Terminal but no agent or company contacts", async () => {
-  const original = pool.query; pool.query = async () => ({ rows: [{ id: 9, terminal_name: "A", agent_email: "private@example.com", requester_name: "Private" }] });
+  const original = pool.query; pool.query = async () => ({ rows: [{ id: 9, status: "open", moderation_status: "approved", terminal_name: "A", agent_email: "private@example.com", requester_name: "Private" }], rowCount: 0 });
   try {
     const res = response(); await getServiceRequestById({ params: { id: 9 }, user: { id: 2, role_id: 2 } }, res);
     assert.equal(res.body.data.terminalName, "A");

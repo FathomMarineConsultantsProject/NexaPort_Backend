@@ -186,7 +186,7 @@ export const createTemplateAnalysisUpload = async (req, res) => {
   } catch (error) { return sendError(res, error, "Unable to prepare the temporary template upload."); }
 };
 
-export const analyseTemplateObject = async (req, res) => {
+export const createAnalyseTemplateObject = ({ runExtraction = runTemplateExtraction } = {}) => async (req, res) => {
   const controller = new AbortController(); req.once("aborted", () => controller.abort()); let objectKey = "";
   try {
     const sourceType = String(req.body?.sourceType || "").toLowerCase(); objectKey = String(req.body?.objectKey || ""); const size = Number(req.body?.size); const contentType = String(req.body?.contentType || "");
@@ -194,11 +194,12 @@ export const analyseTemplateObject = async (req, res) => {
     if (!ANALYSIS_MIME_TYPES[sourceType] || !objectKey.startsWith(prefix) || !new RegExp(`^[a-z0-9/_-]+\\.${sourceType}$`, "i").test(objectKey) || !Number.isInteger(size) || size < 1 || size > ANALYSIS_MAX_BYTES[sourceType]) throw badRequest("Temporary template upload reference is invalid.");
     const buffer = await readPrivateObject(objectKey, ANALYSIS_MAX_BYTES[sourceType]);
     const file = { buffer, size: buffer.length, originalname: clean(req.body?.fileName, 180) || `document.${sourceType}`, mimetype: contentType || ANALYSIS_MIME_TYPES[sourceType] };
-    const data = await runTemplateExtraction(file, { sourceType, signal: controller.signal });
+    const data = await runExtraction(file, { sourceType, signal: controller.signal });
     return res.json({ success: true, data });
   } catch (error) { return sendError(res, error, "Unable to analyse the temporary template source."); }
   finally { if (objectKey) try { await deletePrivateObject(objectKey); } catch (error) { console.warn("Temporary template source cleanup failed", { keySuffix: objectKey.slice(-48), message: error.message }); } }
 };
+export const analyseTemplateObject = createAnalyseTemplateObject();
 
 export const createTemplate = async (req, res) => {
   const client = await pool.connect();

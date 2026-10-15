@@ -1,15 +1,20 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { after } from "node:test";
 import { GetObjectCommand } from "@aws-sdk/client-s3";
 import { PDFDocument, PDFName } from "pdf-lib";
 import sharp from "sharp";
 import { materializeDailyReportPdf } from "../src/services/dailyReportService.js";
 import { readPrivateObject, setPrivateObjectClientForTests } from "../src/services/privateObjectService.js";
 
-process.env.AWS_REGION ||= "ap-southeast-1";
-process.env.AWS_S3_BUCKET ||= "private-test-bucket";
-process.env.AWS_ACCESS_KEY_ID ||= "test-key";
-process.env.AWS_SECRET_ACCESS_KEY ||= "test-secret";
+const fixtureEnv = { AWS_REGION: "ap-southeast-1", AWS_S3_BUCKET: "private-test-bucket", AWS_ACCESS_KEY_ID: "test-key", AWS_SECRET_ACCESS_KEY: "test-secret" };
+const savedEnv = Object.fromEntries(Object.keys(fixtureEnv).map((key) => [key, process.env[key]]));
+Object.assign(process.env, fixtureEnv);
+after(() => {
+  setPrivateObjectClientForTests(null);
+  for (const [key, value] of Object.entries(savedEnv)) {
+    if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  }
+});
 const body = (bytes) => ({ transformToByteArray: async () => bytes });
 
 test("private objects are loaded as buffers through S3 GetObject with no preview URL", async () => {

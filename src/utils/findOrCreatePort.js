@@ -5,8 +5,9 @@ export const findOrCreatePort = async ({
   country,
   region,
   description = null,
+  queryable = pool,
 }) => {
-  const existingPort = await pool.query(
+  const existingPort = await queryable.query(
     `
     SELECT *
     FROM ports
@@ -22,7 +23,7 @@ export const findOrCreatePort = async ({
     return existingPort.rows[0];
   }
 
-  const newPort = await pool.query(
+  const newPort = await queryable.query(
     `
     INSERT INTO ports (
       port_name, country, region, description, psc_risk_level, experts_available

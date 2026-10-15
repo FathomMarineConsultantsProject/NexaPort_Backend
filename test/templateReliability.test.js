@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { analyseTemplateObject, createTemplateAnalysisUpload } from "../src/controllers/templateController.js";
+import { DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import { createAnalyseTemplateObject, createTemplateAnalysisUpload } from "../src/controllers/templateController.js";
 import { groupTemplateCandidates, runTemplateExtraction } from "../src/services/templateExtractionService.js";
+import { setPrivateObjectClientForTests } from "../src/services/privateObjectService.js";
 
 const response = () => ({ statusCode: 200, body: null, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; } });
 
@@ -23,10 +25,21 @@ test("oversized source uploads use user-scoped temporary S3 objects and delete a
   const names = ["AWS_REGION", "AWS_S3_BUCKET", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]; const saved = Object.fromEntries(names.map((name) => [name, process.env[name]])); Object.assign(process.env, { AWS_REGION: "ap-south-1", AWS_S3_BUCKET: "fixture-bucket", AWS_ACCESS_KEY_ID: "AKIATEST", AWS_SECRET_ACCESS_KEY: "test-secret" });
   const uploadRes = response(); await createTemplateAnalysisUpload({ user: { id: 42 }, body: { sourceType: "xml", contentType: "application/xml", size: 5 * 1024 * 1024 }, once() {} }, uploadRes);
   assert.equal(uploadRes.statusCode, 200); assert.match(uploadRes.body.data.objectKey, /^temporary\/template-analysis\/42\/[a-f0-9-]+\.xml$/); assert.match(uploadRes.body.data.uploadUrl, /^https:\/\/fixture-bucket\.s3\.ap-south-1\.amazonaws\.com\//); assert.doesNotMatch(uploadRes.body.data.uploadUrl, /test-secret/);
-  const originalFetch = globalThis.fetch; const methods = []; const xml = Buffer.from("<root><vessel><vesselName/><inspectionDate/><remarks/></vessel></root>");
-  globalThis.fetch = async (_url, options = {}) => { methods.push(options.method || "GET"); return options.method === "DELETE" ? new Response(null, { status: 204 }) : new Response(xml, { status: 200, headers: { "content-length": String(xml.length) } }); };
+  const methods = []; const xml = Buffer.from("<root><vessel><vesselName/><inspectionDate/><remarks/></vessel></root>");
+  setPrivateObjectClientForTests({ send: async (command) => {
+    if (command instanceof GetObjectCommand) {
+      methods.push("GET");
+      assert.equal(command.input.Bucket, "fixture-bucket");
+      return { ContentLength: xml.length, Body: { transformToByteArray: async () => xml } };
+    }
+    if (command instanceof DeleteObjectCommand) { methods.push("DELETE"); return {}; }
+    throw new Error("Unexpected S3 command");
+  } });
   try {
-    const analysisRes = response(); await analyseTemplateObject({ user: { id: 42 }, body: { sourceType: "xml", objectKey: uploadRes.body.data.objectKey, fileName: "oversized.xml", contentType: "application/xml", size: 5 * 1024 * 1024 }, once() {} }, analysisRes);
+    const analysisRes = response(); await createAnalyseTemplateObject({ runExtraction: async (file) => {
+      assert.deepEqual(file.buffer, xml);
+      return { fields: [{ fieldKey: "vessel_name", label: "Vessel Name" }] };
+    } })({ user: { id: 42 }, body: { sourceType: "xml", objectKey: uploadRes.body.data.objectKey, fileName: "oversized.xml", contentType: "application/xml", size: 5 * 1024 * 1024 }, once() {} }, analysisRes);
     assert.equal(analysisRes.statusCode, 200); assert.ok(analysisRes.body.data.fields.length > 0); assert.deepEqual(methods, ["GET", "DELETE"]);
-  } finally { globalThis.fetch = originalFetch; for (const name of names) if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; }
+  } finally { setPrivateObjectClientForTests(null); for (const name of names) if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; }
 });

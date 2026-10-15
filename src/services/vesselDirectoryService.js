@@ -27,11 +27,13 @@ export function buildVesselDirectoryFilter(input = {}) {
 
 const managementSql = `COALESCE((SELECT jsonb_agg(jsonb_build_object('role',m.role,'name',m.name,'sourceUrl',m.source_url,'entityId',m.entity_id) ORDER BY m.ordinal) FROM magicport_vessel_management m WHERE m.directory_id=d.id),'[]'::jsonb)`;
 const publicFields = `d.id,d.name,d.imo,d.mmsi,d.call_sign,d.vessel_type,d.subtype,d.flag,d.class_label,d.dwt,d.gt,d.year_built,d.keel_year,d.loa,d.navigation_status,d.destination_text,d.destination_port_id,d.speed_knots,d.course_degrees,d.heading_degrees,d.observed_at,d.source_url,d.source_key,${managementSql} AS management`;
+const discoverySql = `SELECT d.id::text AS id,d.name,d.imo,d.mmsi,d.call_sign,d.vessel_type,d.subtype,d.flag,d.class_label,d.dwt,d.gt,d.year_built,d.keel_year,d.loa,d.navigation_status,d.destination_text,d.destination_port_id,d.speed_knots,d.course_degrees,d.heading_degrees,d.observed_at,d.source_url,d.source_key,${managementSql} AS management,'MagicPort'::text AS provenance FROM magicport_vessel_directory d
+  UNION ALL SELECT 'client-'||v.id,v.vessel_name,v.imo_number,NULL,NULL,v.vessel_type,NULL,v.flag_state,NULL,v.dwt,v.gt,v.year_built,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'[]'::jsonb,'Client-submitted · unverified' FROM client_submitted_vessel_directory cd JOIN vessels v ON v.id=cd.vessel_id WHERE v.is_active=TRUE AND NOT EXISTS (SELECT 1 FROM magicport_vessel_directory imported WHERE imported.master_vessel_id=v.id OR (v.imo_number IS NOT NULL AND imported.imo=v.imo_number))`;
 
 export async function listVesselDirectory(input, db = pool) {
   const f = buildVesselDirectoryFilter(input);
-  const rows = await db.query(`SELECT ${publicFields} FROM magicport_vessel_directory d WHERE ${f.where} ORDER BY ${f.order} LIMIT $${f.values.length + 1} OFFSET $${f.values.length + 2}`, [...f.values, f.limit, f.offset]);
-  const count = await db.query(`SELECT COUNT(*)::int AS total FROM magicport_vessel_directory d WHERE ${f.where}`, f.values);
+  const rows = await db.query(`WITH discovery AS (${discoverySql}) SELECT d.* FROM discovery d WHERE ${f.where} ORDER BY ${f.order} LIMIT $${f.values.length + 1} OFFSET $${f.values.length + 2}`, [...f.values, f.limit, f.offset]);
+  const count = await db.query(`WITH discovery AS (${discoverySql}) SELECT COUNT(*)::int AS total FROM discovery d WHERE ${f.where}`, f.values);
   const total = count.rows[0]?.total || 0;
   return { vessels: rows.rows, pagination: { page: f.page, limit: f.limit, total, totalPages: Math.ceil(total / f.limit) } };
 }
@@ -43,6 +45,14 @@ export async function listVesselDirectoryFlags(db = pool) {
 }
 
 export async function getVesselDirectoryDetail(id, db = pool) {
+  if (/^client-\d+$/.test(String(id))) {
+    const result = await db.query(`SELECT 'client-'||v.id AS id,v.vessel_name AS name,v.imo_number AS imo,
+      v.vessel_type,v.flag_state AS flag,v.dwt,v.gt,v.year_built,
+      'Client-submitted · unverified' AS provenance,'[]'::jsonb AS management
+      FROM client_submitted_vessel_directory cd JOIN vessels v ON v.id=cd.vessel_id
+      WHERE v.id=$1 AND v.is_active=TRUE`, [Number(String(id).slice(7))]);
+    return result.rows[0] || null;
+  }
   if (!/^\d+$/.test(String(id))) throw Object.assign(new Error("Invalid vessel ID"), { status: 400 });
   const result = await db.query(`SELECT ${publicFields}, s.payload->'faq' AS faq, s.payload->'additionalAttributes' AS additional_attributes, s.payload_hash FROM magicport_vessel_directory d JOIN magicport_vessel_sources s ON s.source_key=d.source_key WHERE d.id=$1`, [id]);
   return result.rows[0] || null;

@@ -9,7 +9,7 @@ import serviceRequestRoutes from "../src/routes/serviceRequestRoutes.js";
 const values={totalQuoteUsd:"1350.25",travelCost:"0.29",accommodationCost:"10.00",reportFee:"5",urgencySurcharge:"0",attendanceDays:2,coverLetter:"Revised scope"};
 const response=()=>({statusCode:200,status(n){this.statusCode=n;return this;},json(body){this.body=body;return this;}});
 test("request and active proposal routes deny unauthorized roles",()=>{
-  const guard=(path)=>serviceRequestRoutes.stack.find(layer=>layer.route?.path===path && layer.route.methods.get).route.stack[2].handle;
+  const guard=(path)=>serviceRequestRoutes.stack.find(layer=>layer.route?.path===path && layer.route.methods.get).route.stack.at(-2).handle;
   for(const path of ["/","/:id","/:id/proposal"]){
     const res=response();let next=false;
     guard(path)({user:{role_id:4}},res,()=>{next=true;});

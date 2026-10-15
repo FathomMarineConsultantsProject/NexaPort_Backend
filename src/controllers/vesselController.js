@@ -1,4 +1,10 @@
 import { pool } from "../config/db.js";
+import { listRequestVesselSuggestions } from "../services/requestVesselService.js";
+
+export const suggestRequestVessels = async (req, res) => {
+  try { return res.json({ success: true, data: await listRequestVesselSuggestions(req.query.search) }); }
+  catch { return res.status(503).json({ success: false, message: "Vessel suggestions are temporarily unavailable. You can enter details manually." }); }
+};
 
 const canAccessVessel = (user, vessel) => {
   const roleId = Number(user.role_id);
@@ -12,7 +18,18 @@ const canAccessVessel = (user, vessel) => {
   return false;
 };
 
+const fleetResponse = (vessel, user) => {
+  if (Number(user.role_id) !== 3) return vessel;
+  const { created_by_user_id, ...safe } = vessel;
+  if (Number(created_by_user_id) !== Number(user.id)) {
+    safe.trading_area = null;
+    safe.owner_manager = null;
+  }
+  return safe;
+};
+
 export const createVessel = async (req, res) => {
+  let db;
   try {
     const {
       vessel_name,
@@ -34,7 +51,9 @@ export const createVessel = async (req, res) => {
       });
     }
 
-    const result = await pool.query(
+    db = await pool.connect();
+    await db.query("BEGIN");
+    const result = await db.query(
       `
       INSERT INTO vessels (
         vessel_name,
@@ -67,12 +86,17 @@ export const createVessel = async (req, res) => {
       ]
     );
 
+    if (Number(req.user.role_id) === 3) await db.query(`INSERT INTO client_vessel_associations(client_user_id,vessel_id)
+      VALUES($1,$2) ON CONFLICT(client_user_id,vessel_id) DO NOTHING`, [req.user.id, result.rows[0].id]);
+    await db.query("COMMIT");
+
     res.status(201).json({
       success: true,
       message: "Vessel registered successfully",
       data: result.rows[0],
     });
   } catch (error) {
+    if (db) await db.query("ROLLBACK").catch(() => {});
     if (error.code === "23505") {
       return res.status(409).json({
         success: false,
@@ -85,7 +109,7 @@ export const createVessel = async (req, res) => {
       message: "Failed to create vessel",
       error: error.message,
     });
-  }
+  } finally { db?.release(); }
 };
 
 export const getVessels = async (req, res) => {
@@ -107,14 +131,19 @@ export const getVessels = async (req, res) => {
       `);
     }
 
+    let clientParam = null;
     if (Number(req.user.role_id) === 3) {
       values.push(req.user.id);
-      conditions.push(`created_by_user_id = $${values.length}`);
+      clientParam = values.length;
+      conditions.push(`EXISTS (SELECT 1 FROM client_vessel_associations cva
+        WHERE cva.vessel_id=vessels.id AND cva.client_user_id=$${values.length})`);
     }
 
     const result = await pool.query(
       `
-      SELECT *
+      SELECT vessels.*, ${clientParam ? `(created_by_user_id=$${clientParam} AND
+        NOT EXISTS(SELECT 1 FROM magicport_vessel_directory WHERE master_vessel_id=vessels.id) AND
+        (SELECT COUNT(*) FROM client_vessel_associations WHERE vessel_id=vessels.id)=1)` : "TRUE"} AS can_edit
       FROM vessels
       WHERE ${conditions.join(" AND ")}
       ORDER BY created_at DESC
@@ -125,7 +154,7 @@ export const getVessels = async (req, res) => {
     res.json({
       success: true,
       count: result.rows.length,
-      data: result.rows,
+      data: result.rows.map((row) => fleetResponse(row, req.user)),
     });
   } catch (error) {
     res.status(500).json({
@@ -152,7 +181,10 @@ export const getVesselById = async (req, res) => {
       });
     }
 
-    if (!canAccessVessel(req.user, result.rows[0])) {
+    const associated = Number(req.user.role_id) === 3 && (await pool.query(
+      "SELECT 1 FROM client_vessel_associations WHERE client_user_id=$1 AND vessel_id=$2", [req.user.id, id]
+    )).rowCount > 0;
+    if (!canAccessVessel(req.user, result.rows[0]) && !associated) {
       return res.status(403).json({
         success: false,
         message: "Access denied for this vessel",
@@ -162,7 +194,7 @@ export const getVesselById = async (req, res) => {
     res.json({
       success: true,
       message: "Vessel fetched successfully",
-      data: result.rows[0],
+      data: fleetResponse(result.rows[0], req.user),
     });
   } catch (error) {
     res.status(500).json({
@@ -194,6 +226,15 @@ export const updateVessel = async (req, res) => {
         success: false,
         message: "Only owner or admin can update this vessel",
       });
+    }
+
+    if (Number(req.user.role_id) === 3) {
+      const protectedRecord = await pool.query(`SELECT
+        EXISTS(SELECT 1 FROM magicport_vessel_directory WHERE master_vessel_id=$1) AS imported,
+        (SELECT COUNT(*)::int FROM client_vessel_associations WHERE vessel_id=$1) AS associations`, [id]);
+      if (protectedRecord.rows[0]?.imported || Number(protectedRecord.rows[0]?.associations) > 1) {
+        return res.status(403).json({ success: false, message: "This shared or imported vessel record cannot be edited from My Vessels." });
+      }
     }
 
     const {
@@ -279,11 +320,19 @@ export const deleteVessel = async (req, res) => {
       });
     }
 
-    if (!canAccessVessel(req.user, existing.rows[0])) {
+    const associated = Number(req.user.role_id) === 3 && (await pool.query(
+      "SELECT 1 FROM client_vessel_associations WHERE client_user_id=$1 AND vessel_id=$2", [req.user.id, id]
+    )).rowCount > 0;
+    if (!canAccessVessel(req.user, existing.rows[0]) && !associated) {
       return res.status(403).json({
         success: false,
         message: "Only owner or admin can delete this vessel",
       });
+    }
+
+    if (Number(req.user.role_id) === 3) {
+      await pool.query("DELETE FROM client_vessel_associations WHERE client_user_id=$1 AND vessel_id=$2", [req.user.id, id]);
+      return res.json({ success: true, message: "Vessel removed from My Vessels" });
     }
 
     await pool.query(

@@ -10,6 +10,8 @@ import { getServiceRequestEditPermission } from "../services/serviceRequestEditP
 import { getActiveProposalForRequest, mapProposalRow } from "../services/commercialProposalService.js";
 import { userMayViewRequest } from "../services/requestVisibilityService.js";
 import { findInspectionMethod } from "../services/inspectionCatalogueService.js";
+import { agentDetailsForRole, consultantHasConfirmedAgentAccess, clientAgentReplacement } from "../services/agentDisclosureService.js";
+import { resolveRequestVessel } from "../services/requestVesselService.js";
 
 import { normalizeRequestParticulars, resolveRequestCompany, resolveRequestPort, REQUEST_PARTICULAR_FIELDS } from "../services/requestParticularsService.js";
 
@@ -123,7 +125,7 @@ const mapRequestRow = (row) => ({
   companyVerified: Boolean(row.linked_company_name),
   terminalName: row.terminal_name || null,
   ports: requestPortCollection(row),
-  agentDetails: { companyName: row.agent_company_name || null, contactName: row.agent_contact_name || null, email: row.agent_email || null, phone: row.agent_phone || null },
+  agentDetails: agentDetailsForRole(row, 1),
   requesterUserId: row.requester_user_id,
   status: row.status,
   moderationStatus: row.moderation_status,
@@ -176,7 +178,7 @@ const serializeServiceRequestForClient = (row) => {
   const mapped = mapRequestRow(row);
   const fields = ["id", "inspectionMethodId", "inspectionVertical", "inspectionType", "serviceType", "serviceCategory", "serviceTypeOther",
     "title", "scopeOfWork", "urgency", "budgetUsd", "clientBudgetUsd", "approvedBudgetUsd", "requiredBy", "requesterName",
-    "companyName", "companyVerified", "terminalName", "ports", "agentDetails", "requesterUserId", "status", "moderationStatus",
+    "companyName", "companyVerified", "terminalName", "ports", "requesterUserId", "status", "moderationStatus",
     "rejectionReason", "approvedAt", "quotationCount", "acceptedQuotationId", "acceptedExpertId", "activeProposalId", "workflowStage",
     "hasAssignment", "vessel", "port", "requiredCertification", "createdAt", "updatedAt"];
   return Object.fromEntries(fields.map((field) => [field, mapped[field]]));
@@ -222,6 +224,8 @@ export const createServiceRequest = async (req, res) => {
     await client.query("BEGIN");
 
     const companyName = await resolveRequestCompany(client, req.user.id);
+    const resolvedVessel = Number(req.user.role_id) === 3
+      ? await resolveRequestVessel(client, req.body, req.user.id) : null;
     let portId = null;
     let resolvedPortName = portName || null;
     let resolvedCountry = country || null;
@@ -244,6 +248,7 @@ export const createServiceRequest = async (req, res) => {
         port_name: portName,
         country,
         region: locationSummary || null,
+        queryable: client,
       });
 
       portId = port.id;
@@ -276,11 +281,11 @@ export const createServiceRequest = async (req, res) => {
         moderation_status,
         status,
         client_budget_usd,
-        approved_budget_usd, terminal_name, agent_company_name, agent_contact_name, agent_email, agent_phone
+        approved_budget_usd, terminal_name, agent_company_name, agent_contact_name, agent_email, agent_phone, vessel_id
       )
       VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
-        $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30
+        $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31
       )
       RETURNING *
       `,
@@ -295,10 +300,10 @@ export const createServiceRequest = async (req, res) => {
         budgetUsd || null,
         requiredBy || null,
         Number(req.user.role_id) === 3 ? companyName : (companyName || String(requesterName || "").trim() || null),
-        vesselName || null,
-        imoNumber || null,
-        vesselType || null,
-        flagState || null,
+        resolvedVessel?.name || vesselName || null,
+        resolvedVessel?.imo || imoNumber || null,
+        resolvedVessel?.type || vesselType || null,
+        resolvedVessel?.flag || flagState || null,
         portId,
         resolvedPortName,
         resolvedCountry,
@@ -311,6 +316,7 @@ export const createServiceRequest = async (req, res) => {
         budgetUsd || null,
         budgetUsd || null,
         ...Object.keys(REQUEST_PARTICULAR_FIELDS).map((key) => particulars.values[key] ?? null),
+        resolvedVessel?.id || null,
       ]
     );
 
@@ -325,6 +331,8 @@ export const createServiceRequest = async (req, res) => {
     });
   } catch (error) {
     await client.query("ROLLBACK");
+    if (error.fieldErrors) return sendValidationError(res, error.fieldErrors);
+    if (error.status === 409) return res.status(409).json({ success: false, message: error.message });
     if (error.status === 400) return sendValidationError(res, { portId: error.message });
     console.error("Create service request error:", error);
 
@@ -498,7 +506,7 @@ export const getServiceRequestById = async (req, res) => {
           sr.required_by AS inspection_date,
           sr.terminal_name,
           sr.port_name AS port_of_inspection, sr.port_id, sr.country, sr.status, sr.moderation_status,
-          sr.accepted_expert_id, ${requestPortsSql("sr")} AS selected_ports
+          sr.accepted_expert_id, sr.agent_contact_name, ${requestPortsSql("sr")} AS selected_ports
         FROM service_requests sr
         WHERE sr.id = $1
           AND sr.moderation_status = 'approved'
@@ -513,9 +521,11 @@ export const getServiceRequestById = async (req, res) => {
         return res.status(403).json({ success: false, message: "Access denied for this service request" });
       }
 
+      const assigned = await consultantHasConfirmedAgentAccess(pool, safeResult.rows[0].id, req.user.id);
       return res.json({
         success: true,
-        data: serializeApprovedServiceRequestForConsultant(safeResult.rows[0]),
+        data: { ...serializeApprovedServiceRequestForConsultant(safeResult.rows[0]),
+          ...(assigned ? { agentDetails: agentDetailsForRole(safeResult.rows[0], 2, true) } : {}) },
       });
     }
 
@@ -690,12 +700,34 @@ export const updateServiceRequest = async (req, res) => {
       return res.status(permission.status).json({ success: false, code: permission.code, message: permission.message });
     }
 
-    const particulars = normalizeRequestParticulars(req.body);
+    const particulars = normalizeRequestParticulars(roleId === 3 ? clientAgentReplacement(req.body) : req.body);
     if (Object.keys(particulars.fieldErrors).length) {
       await client.query("ROLLBACK");
       return sendValidationError(res, particulars.fieldErrors);
     }
-    const normalizedBody = { ...req.body, ...particulars.values };
+    const normalizedBody = { ...(roleId === 3 ? clientAgentReplacement(req.body) : req.body), ...particulars.values };
+    if (roleId === 3) delete normalizedBody.vesselId;
+    if (roleId === 3 && ["vesselName", "imoNumber", "vesselType", "flagState", "selectedVessel"].some((key) => Object.hasOwn(req.body, key))) {
+      const changed = [
+        ["vesselName", "vessel_name"], ["imoNumber", "imo_number"],
+        ["vesselType", "vessel_type"], ["flagState", "flag_state"],
+      ].some(([key, column]) => Object.hasOwn(req.body, key) && String(req.body[key] ?? "") !== String(request[column] ?? ""));
+      if (changed || req.body.selectedVessel || !request.vessel_id) {
+        const resolved = await resolveRequestVessel(client, { ...req.body,
+          vesselName: req.body.vesselName ?? request.vessel_name,
+          imoNumber: req.body.imoNumber ?? request.imo_number,
+          vesselType: req.body.vesselType ?? request.vessel_type,
+          flagState: req.body.flagState ?? request.flag_state,
+        }, req.user.id);
+        if (resolved) {
+          normalizedBody.vesselId = resolved.id;
+          if (changed || req.body.selectedVessel) Object.assign(normalizedBody, {
+            vesselName: resolved.name, imoNumber: resolved.imo,
+            vesselType: resolved.type, flagState: resolved.flag,
+          });
+        }
+      }
+    }
     let selectedPorts = null;
     if (Object.hasOwn(req.body, "portIds")) {
       const selected = await resolveSelectedRequestPorts(client, req.body, requestPortCollection(request).map((p) => Number(p.id)));
@@ -732,6 +764,7 @@ export const updateServiceRequest = async (req, res) => {
       imoNumber: "imo_number",
       vesselType: "vessel_type",
       flagState: "flag_state",
+      vesselId: "vessel_id",
       portId: "port_id",
       portName: "port_name",
       country: "country",
@@ -745,7 +778,7 @@ export const updateServiceRequest = async (req, res) => {
       "serviceType", "serviceCategory", "title", "scopeOfWork", "urgency",
       "serviceTypeOther",
       "budgetUsd", "requiredBy", "vesselName", "imoNumber", "vesselType",
-      "flagState", "portName", "country", "eta", "locationSummary",
+      "flagState", "vesselId", "portName", "country", "eta", "locationSummary",
       "requiredCertification",
     ]);
     const updates = [];
@@ -908,6 +941,8 @@ export const updateServiceRequest = async (req, res) => {
     return res.json({ success: true, message, data: (roleId === 3 ? serializeServiceRequestForClient : mapRequestRow)({ ...result.rows[0], selected_ports: selectedPorts ?? request.selected_ports, linked_company_name: request.linked_company_name }) });
   } catch (error) {
     await client.query("ROLLBACK");
+    if (error.fieldErrors) return sendValidationError(res, error.fieldErrors);
+    if (error.status === 409) return res.status(409).json({ success: false, message: error.message });
     if (error.status === 400) return sendValidationError(res, { portId: error.message });
     console.error("Update service request error:", error);
     res.status(500).json({

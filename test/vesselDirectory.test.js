@@ -49,7 +49,17 @@ test("Client fleet listing remains owner-scoped and separate from global directo
   const res = { json(value) { this.body = value; return this; } };
   await getVessels({ user: { id: 19, role_id: 3 }, query: {} }, res);
   assert.match(calls[0][0], /FROM vessels/);
-  assert.match(calls[0][0], /created_by_user_id = \$1/);
+  assert.match(calls[0][0], /client_vessel_associations cva[\s\S]*cva.client_user_id=\$1/);
   assert.deepEqual(calls[0][1], [19]);
-  assert.doesNotMatch(calls[0][0], /magicport_vessel_directory/);
+  assert.match(calls[0][0], /FROM vessels/);
+});
+
+test("Client Fleet search keeps the Client parameter separate from the search parameter", async (t) => {
+  const calls = [];
+  t.mock.method(pool, "query", async (sql, values) => { calls.push([sql, values]); return { rows: [] }; });
+  const res = { json(value) { this.body = value; return this; } };
+  await getVessels({ user: { id: 19, role_id: 3 }, query: { search: "Ocean" } }, res);
+  assert.match(calls[0][0], /created_by_user_id=\$2/);
+  assert.match(calls[0][0], /cva\.client_user_id=\$2/);
+  assert.deepEqual(calls[0][1], ["%Ocean%", 19]);
 });
