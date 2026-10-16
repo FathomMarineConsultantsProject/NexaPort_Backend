@@ -34,6 +34,28 @@ test("listing and detail only query global directory tables", async () => {
   await assert.rejects(() => getVesselDirectoryDetail("8 OR 1=1", db), /Invalid vessel ID/);
 });
 
+test("directory union has matching projection widths in list and count SQL", async () => {
+  const statements = [];
+  const db = { query: async (sql) => { statements.push(sql); return { rows: sql.includes("COUNT(*)") ? [{ total: 0 }] : [] }; } };
+  await listVesselDirectory({}, db);
+  const width = (projection) => {
+    let depth = 0;
+    let columns = 1;
+    for (const char of projection) {
+      if (char === "(") depth += 1;
+      else if (char === ")") depth -= 1;
+      else if (char === "," && depth === 0) columns += 1;
+    }
+    return columns;
+  };
+  for (const sql of statements) {
+    const first = sql.split("WITH discovery AS (SELECT ")[1].split(" FROM magicport_vessel_directory d")[0];
+    const second = sql.split("UNION ALL SELECT ")[1].split(" FROM client_submitted_vessel_directory cd")[0];
+    assert.equal(width(first), width(second));
+    assert.match(second, /NULL::text,'\[\]'::jsonb/);
+  }
+});
+
 test("flag suggestions query distinct global values with a fixed bound", async () => {
   let sql = "";
   const db = { query: async (statement) => { sql = statement; return { rows: [{ flag: "India" }, { flag: "Panama" }] }; } };

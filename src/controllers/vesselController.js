@@ -1,8 +1,8 @@
 import { pool } from "../config/db.js";
-import { listRequestVesselSuggestions } from "../services/requestVesselService.js";
+import { listRequestVesselSuggestions, normalizeImo, validImo } from "../services/requestVesselService.js";
 
 export const suggestRequestVessels = async (req, res) => {
-  try { return res.json({ success: true, data: await listRequestVesselSuggestions(req.query.search) }); }
+  try { return res.json({ success: true, data: await listRequestVesselSuggestions(req.query.search, req.user) }); }
   catch { return res.status(503).json({ success: false, message: "Vessel suggestions are temporarily unavailable. You can enter details manually." }); }
 };
 
@@ -50,6 +50,8 @@ export const createVessel = async (req, res) => {
         message: "vessel_name, imo_number, vessel_type and flag_state are required",
       });
     }
+    const normalizedImo = normalizeImo(imo_number);
+    if (!validImo(normalizedImo)) return res.status(400).json({ success: false, message: "Enter a valid seven-digit IMO number." });
 
     db = await pool.connect();
     await db.query("BEGIN");
@@ -73,7 +75,7 @@ export const createVessel = async (req, res) => {
       `,
       [
         vessel_name,
-        imo_number,
+        normalizedImo,
         vessel_type,
         flag_state,
         class_subtype || null,

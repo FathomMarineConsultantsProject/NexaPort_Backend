@@ -11,13 +11,17 @@ test("IMO normalization and checksum reject invalid identities", () => {
 test("suggestions are bounded and never fetch the whole directory", async () => {
   const calls = [];
   const db = { query: async (sql, values) => { calls.push([sql, values]); return { rows: [] }; } };
-  assert.deepEqual(await listRequestVesselSuggestions("a", db), []);
+  const user = { id: 20, role_id: 3 };
+  assert.deepEqual(await listRequestVesselSuggestions("a", user, db), []);
   assert.equal(calls.length, 0);
-  await listRequestVesselSuggestions("Ocean", db);
+  await listRequestVesselSuggestions("Ocean", user, db);
   assert.match(calls[0][0], /LIMIT 12/);
   assert.match(calls[0][0], /magicport_vessel_directory/);
   assert.match(calls[0][0], /client_submitted_vessel_directory/);
-  assert.deepEqual(calls[0][1], ["Ocean"]);
+  assert.match(calls[0][0], /cva.client_user_id=\$2/);
+  assert.match(calls[0][0], /d.mmsi LIKE/);
+  assert.match(calls[0][0], /d.call_sign ILIKE/);
+  assert.deepEqual(calls[0][1], ["Ocean", 20, 3]);
 });
 
 test("existing imported IMO reuses canonical vessel and associates Client", async () => {
@@ -67,17 +71,24 @@ test("new valid IMO creates one unverified vessel identity and association", asy
   assert.ok(sql.some(([statement, values]) => statement.includes("INSERT INTO client_vessel_associations") && values[0] === 20 && values[1] === 81));
 });
 
-test("two Clients with the same IMO reuse one canonical identity and get separate associations", async () => {
+test("a Client cannot claim a different Client's private IMO identity", async () => {
   const calls = [];
   const db = { query: async (statement, values) => {
     calls.push([statement, values]);
     if (statement.includes("FROM vessels WHERE regexp_replace")) return { rows: [{ id: 81, vessel_name: "OCEAN", imo_number: "9620865", vessel_type: "Tanker", flag_state: "Panama" }] };
     return { rows: [] };
   } };
-  await resolveRequestVessel(db, { vesselName: "Ocean One", imoNumber: "9620865" }, 20);
-  await resolveRequestVessel(db, { vesselName: "Ocean Two", imoNumber: "9620865" }, 21);
+  await assert.rejects(resolveRequestVessel(db, { vesselName: "Ocean Two", imoNumber: "9620865" }, 21), { status: 403 });
   assert.ok(calls.every(([statement]) => !statement.includes("INSERT INTO vessels")));
-  assert.deepEqual(calls.filter(([statement]) => statement.includes("INSERT INTO client_vessel_associations")).map(([, values]) => values), [[20, 81], [21, 81]]);
+  assert.ok(calls.every(([statement]) => !statement.includes("INSERT INTO client_vessel_associations")));
+});
+
+test("selected private vessel requires an existing client association", async () => {
+  const calls = [];
+  const db = { query: async (statement, values) => { calls.push([statement, values]); return { rows: [] }; } };
+  await assert.rejects(resolveRequestVessel(db, { selectedVessel: { source: "client_submitted", id: 81 } }, 21), { status: 400 });
+  assert.match(calls[0][0], /client_vessel_associations/);
+  assert.deepEqual(calls[0][1], [81, 21]);
 });
 
 test("conflicting IMO and selected imported vessel are rejected without association", async () => {

@@ -252,6 +252,8 @@ export const createServiceRequest = async (req, res) => {
       });
 
       portId = port.id;
+      resolvedPortName = port.port_name;
+      resolvedCountry = port.country;
     }
 
     const result = await client.query(
@@ -332,6 +334,7 @@ export const createServiceRequest = async (req, res) => {
   } catch (error) {
     await client.query("ROLLBACK");
     if (error.fieldErrors) return sendValidationError(res, error.fieldErrors);
+    if (error.status === 403) return res.status(403).json({ success: false, message: error.message });
     if (error.status === 409) return res.status(409).json({ success: false, message: error.message });
     if (error.status === 400) return sendValidationError(res, { portId: error.message });
     console.error("Create service request error:", error);
@@ -951,6 +954,7 @@ export const updateServiceRequest = async (req, res) => {
   } catch (error) {
     await client.query("ROLLBACK");
     if (error.fieldErrors) return sendValidationError(res, error.fieldErrors);
+    if (error.status === 403) return res.status(403).json({ success: false, message: error.message });
     if (error.status === 409) return res.status(409).json({ success: false, message: error.message });
     if (error.status === 400) return sendValidationError(res, { portId: error.message });
     console.error("Update service request error:", error);
