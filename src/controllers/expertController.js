@@ -185,7 +185,7 @@ const updateRegistrationDetails = async (client, expertId, details = {}) => {
 const getExpertFullData = async (expertId) => {
   const expertResult = await pool.query(
     `
-    SELECT e.*, u.email AS user_email, u.phone AS user_phone,
+    SELECT e.*, COALESCE(e.public_id,e.nexaport_id) AS directory_public_id, u.email AS user_email, u.phone AS user_phone,
       u.is_active AS user_is_active
     FROM experts e
     LEFT JOIN users u ON u.id = e.user_id
@@ -346,6 +346,7 @@ export const getAllExperts = async (req, res) => {
       `
       SELECT 
         e.*,
+        COALESCE(e.public_id,e.nexaport_id) AS directory_public_id,
         u.email AS user_email,
         u.phone AS user_phone,
         u.is_active AS user_is_active,

@@ -5,6 +5,7 @@ const ALLOWED_MLC_VALUES = new Set(["true", "false"]);
 
 const mapSurveyor = (row) => ({
   id: row.id,
+  public_id: row.public_id,
   professional_title: row.professional_title,
   full_name: row.full_name,
   organization_name: row.organization_name,
@@ -56,7 +57,9 @@ export const getAppointedSurveyors = async (req, res) => {
         OR telephone_numbers ILIKE ${placeholder}
         OR email_addresses ILIKE ${placeholder}
         OR country ILIKE ${placeholder}
+        OR public_id = $${values.length + 1}
       )`);
+      values.push(search);
     }
 
     if (country) {
@@ -81,6 +84,7 @@ export const getAppointedSurveyors = async (req, res) => {
         `
         SELECT
           id,
+          public_id,
           professional_title,
           full_name,
           organization_name,

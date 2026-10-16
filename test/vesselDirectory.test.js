@@ -52,8 +52,22 @@ test("directory union has matching projection widths in list and count SQL", asy
     const first = sql.split("WITH discovery AS (SELECT ")[1].split(" FROM magicport_vessel_directory d")[0];
     const second = sql.split("UNION ALL SELECT ")[1].split(" FROM client_submitted_vessel_directory cd")[0];
     assert.equal(width(first), width(second));
+    assert.match(first, /d\.id::text AS id,d\.public_id,d\.name/);
+    assert.match(second, /'client-'\|\|v\.id,v\.public_id,v\.vessel_name/);
     assert.match(second, /NULL::text,'\[\]'::jsonb/);
   }
+});
+
+test("public vessel reference lookup preserves old ID routes", async () => {
+  const calls = [];
+  const db = { query: async (sql, values) => { calls.push([sql, values]); return { rows: [{ public_id: values[0] }] }; } };
+  await getVesselDirectoryDetail(`VSL-${"A".repeat(32)}`, db);
+  await getVesselDirectoryDetail("42", db);
+  await getVesselDirectoryDetail(`MVS-${"B".repeat(32)}`, db);
+  assert.match(calls[0][0], /d\.public_id=\$1/);
+  assert.match(calls[1][0], /d\.id=\$1/);
+  assert.match(calls[2][0], /v\.public_id=\$1/);
+  await assert.rejects(() => getVesselDirectoryDetail("VSL-invalid", db), /Invalid vessel ID/);
 });
 
 test("flag suggestions query distinct global values with a fixed bound", async () => {

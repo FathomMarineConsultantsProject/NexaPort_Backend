@@ -11,13 +11,13 @@ export async function listRequestVesselSuggestions(search, user, db = pool) {
   if (term.length < 2) return [];
   const pattern = term.replace(/^IMO\s*/i, "").replace(/[\\%_]/g, "\\$&");
   const result = await db.query(`
-    SELECT source, id, name, imo, vessel_type, flag, mmsi, call_sign FROM (
-      SELECT 'imported'::text AS source,d.id::text AS id,d.name,d.imo,d.vessel_type,d.flag,d.mmsi,d.call_sign
+    SELECT source, id, public_id, name, imo, vessel_type, flag, mmsi, call_sign FROM (
+      SELECT 'imported'::text AS source,d.id::text AS id,d.public_id,d.name,d.imo,d.vessel_type,d.flag,d.mmsi,d.call_sign
         FROM magicport_vessel_directory d
         WHERE d.name ILIKE $1 || '%' OR d.imo LIKE $1 || '%' OR d.mmsi LIKE $1 || '%' OR d.call_sign ILIKE $1 || '%'
       UNION ALL
       SELECT CASE WHEN cd.vessel_id IS NULL THEN 'managed' ELSE 'client_submitted' END::text,
-        v.id::text,v.vessel_name,v.imo_number,v.vessel_type,v.flag_state,NULL::text,NULL::text
+        v.id::text,v.public_id,v.vessel_name,v.imo_number,v.vessel_type,v.flag_state,NULL::text,NULL::text
         FROM vessels v LEFT JOIN client_submitted_vessel_directory cd ON cd.vessel_id=v.id
         WHERE v.is_active=TRUE AND NOT EXISTS (SELECT 1 FROM magicport_vessel_directory d WHERE d.master_vessel_id=v.id OR (v.imo_number IS NOT NULL AND d.imo=v.imo_number))
           AND ($3=1 OR EXISTS (SELECT 1 FROM client_vessel_associations cva WHERE cva.vessel_id=v.id AND cva.client_user_id=$2))

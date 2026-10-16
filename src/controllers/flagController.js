@@ -12,6 +12,7 @@ const toSlug = (name = "") =>
 
 const mapFlag = (row) => ({
   id: row.id,
+  public_id: row.public_id,
   name: row.name,
   slug: row.slug || toSlug(row.name),
 });
@@ -19,7 +20,7 @@ const mapFlag = (row) => ({
 const getFlagBySlug = async (slug) => {
   const result = await pool.query(
     `
-    SELECT id, name, ${flagSlugSql} AS slug
+    SELECT id, public_id, name, ${flagSlugSql} AS slug
     FROM master_flag_states
     WHERE ${flagSlugSql} = $1
     LIMIT 1
@@ -44,7 +45,7 @@ export const getFlags = async (_req, res) => {
   try {
     const result = await pool.query(
       `
-      SELECT id, name, ${flagSlugSql} AS slug
+      SELECT id, public_id, name, ${flagSlugSql} AS slug
       FROM master_flag_states
       ORDER BY name ASC
       `
@@ -95,8 +96,10 @@ export const getFlagDirectory = async (req, res) => {
           OR fi.region ILIKE $${externalValues.length}
           OR fi.location ILIKE $${externalValues.length}
           OR fi.areas_covered_text ILIKE $${externalValues.length}
+          OR fi.public_id = $${externalValues.length + 1}
         )
       `;
+      externalValues.push(search);
 
       expertValues.push(`%${search}%`);
       expertSearchSql = `
@@ -117,6 +120,7 @@ export const getFlagDirectory = async (req, res) => {
         `
         SELECT
           fi.id,
+          fi.public_id,
           fi.full_name,
           fi.organization_name,
           fi.country,
@@ -137,6 +141,7 @@ export const getFlagDirectory = async (req, res) => {
         `
         SELECT
           e.id AS expert_id,
+          COALESCE(e.public_id,e.nexaport_id) AS nexaport_id,
           e.full_name,
           e.country,
           e.base_location,
@@ -170,6 +175,7 @@ export const getFlagDirectory = async (req, res) => {
 
     const externalRecords = externalResult.rows.map((row) => ({
       id: row.id,
+      public_id: row.public_id,
       record_type: "external",
       full_name: row.full_name,
       organization_name: row.organization_name,
@@ -183,6 +189,7 @@ export const getFlagDirectory = async (req, res) => {
 
     const expertRecords = expertResult.rows.map((row) => ({
       expert_id: row.expert_id,
+      public_id: row.nexaport_id,
       record_type: "nexaport",
       full_name: row.full_name,
       country: row.country,
@@ -220,6 +227,7 @@ export const getFlagInspector = async (req, res) => {
       `
       SELECT
         fi.id,
+        fi.public_id,
         fi.full_name,
         fi.organization_name,
         fi.organization_address,
@@ -236,7 +244,7 @@ export const getFlagInspector = async (req, res) => {
         fi.source_url,
         fi.source_record_url
       FROM flag_inspectors fi
-      WHERE fi.id = $1
+      WHERE ${/^FLI-[0-9A-F]{32}$/.test(String(req.params.inspectorId)) ? "fi.public_id" : "fi.id"} = $1
         AND fi.flag_id = $2
         AND fi.is_active = true
       LIMIT 1

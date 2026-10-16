@@ -128,7 +128,9 @@ export const getVessels = async (req, res) => {
           vessel_name ILIKE $${values.length} OR
           imo_number ILIKE $${values.length} OR
           vessel_type ILIKE $${values.length} OR
-          flag_state ILIKE $${values.length}
+          flag_state ILIKE $${values.length} OR
+          vessels.public_id ILIKE $${values.length} OR
+          EXISTS (SELECT 1 FROM magicport_vessel_directory d WHERE d.master_vessel_id=vessels.id AND d.public_id ILIKE $${values.length})
         )
       `);
     }
@@ -143,7 +145,7 @@ export const getVessels = async (req, res) => {
 
     const result = await pool.query(
       `
-      SELECT vessels.*, ${clientParam ? `(created_by_user_id=$${clientParam} AND
+      SELECT vessels.*, COALESCE((SELECT d.public_id FROM magicport_vessel_directory d WHERE d.master_vessel_id=vessels.id ORDER BY d.id LIMIT 1),vessels.public_id) AS public_id, ${clientParam ? `(created_by_user_id=$${clientParam} AND
         NOT EXISTS(SELECT 1 FROM magicport_vessel_directory WHERE master_vessel_id=vessels.id) AND
         (SELECT COUNT(*) FROM client_vessel_associations WHERE vessel_id=vessels.id)=1)` : "TRUE"} AS can_edit
       FROM vessels
@@ -172,7 +174,7 @@ export const getVesselById = async (req, res) => {
     const { id } = req.params;
 
     const result = await pool.query(
-      `SELECT * FROM vessels WHERE id = $1 AND is_active = true`,
+      `SELECT v.*,COALESCE((SELECT d.public_id FROM magicport_vessel_directory d WHERE d.master_vessel_id=v.id ORDER BY d.id LIMIT 1),v.public_id) AS public_id FROM vessels v WHERE v.id = $1 AND v.is_active = true`,
       [id]
     );
 

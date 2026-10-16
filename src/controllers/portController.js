@@ -66,7 +66,7 @@ export function buildPortListQuery(query = {}) {
   const values = [];
   const add = (sql, value) => { values.push(value); conditions.push(sql.replaceAll("?", `$${values.length}`)); };
   const search = cleanText(query.search);
-  if (search) add("(p.port_name ILIKE '%' || ? || '%' OR p.country ILIKE '%' || ? || '%' OR p.unlocode ILIKE '%' || ? || '%')", search);
+  if (search) add("(p.port_name ILIKE '%' || ? || '%' OR p.country ILIKE '%' || ? || '%' OR p.unlocode ILIKE '%' || ? || '%' OR p.public_id = ?)", search);
   if (cleanText(query.country)) add("LOWER(p.country)=LOWER(?)", cleanText(query.country));
   if (cleanText(query.region) && query.region !== "All Regions") add("LOWER(p.region)=LOWER(?)", cleanText(query.region));
   const harbourType = cleanText(query.harbourType ?? query.harbour_type);
@@ -111,8 +111,8 @@ export const getPorts = async (req, res) => {
     const filters = buildPortListQuery(req.query);
     const listValues = [...filters.values, filters.limit, filters.offset];
     const fields = filters.compact
-      ? "p.id,p.port_name,p.country,p.region,p.unlocode"
-      : `p.id,p.port_name,p.country,p.country_iso,p.region,p.unlocode,p.harbour_type,p.harbour_size,p.max_draft_m,p.psc_risk_level,p.is_active,
+      ? "p.id,p.public_id,p.port_name,p.country,p.region,p.unlocode"
+      : `p.id,p.public_id,p.port_name,p.country,p.country_iso,p.region,p.unlocode,p.harbour_type,p.harbour_size,p.max_draft_m,p.psc_risk_level,p.is_active,
          COALESCE((SELECT COUNT(DISTINCT ep.expert_id)::int FROM expert_ports ep WHERE LOWER(TRIM(ep.port_name))=LOWER(TRIM(p.port_name))),0) AS experts_available`;
     const data = await pool.query(`SELECT ${fields} FROM ports p WHERE ${filters.where} ORDER BY p.port_name,p.id LIMIT $${listValues.length - 1} OFFSET $${listValues.length}`, listValues);
     if (filters.compact) return res.json({ success: true, message: "Ports fetched successfully", ports: data.rows });
@@ -125,15 +125,15 @@ export const getPorts = async (req, res) => {
 export const getPortById = async (req, res) => {
   try {
     const { id } = req.params;
-    const portResult = await pool.query(`SELECT id,port_name,country,country_iso,unlocode,region,description,psc_risk_level,is_active,latitude,longitude,harbour_type,harbour_size,max_draft_m,depths,restrictions,equipment,navigation,communication,additional_attributes FROM ports WHERE id=$1 AND is_active=true`, [id]);
+    const portResult = await pool.query(`SELECT id,public_id,port_name,country,country_iso,unlocode,region,description,psc_risk_level,is_active,latitude,longitude,harbour_type,harbour_size,max_draft_m,depths,restrictions,equipment,navigation,communication,additional_attributes FROM ports WHERE (id::text=$1 OR public_id=$1) AND is_active=true`, [id]);
     if (!portResult.rows.length) return res.status(404).json({ message: "Port not found" });
     const port = portResult.rows[0];
     const [vessels, services, nearby, experts, directory] = await Promise.all([
-      pool.query("SELECT vessel_type FROM port_vessel_types WHERE port_id=$1 ORDER BY vessel_type", [id]),
-      pool.query("SELECT service_name FROM port_services WHERE port_id=$1 ORDER BY service_name", [id]),
-      pool.query(`SELECT n.nearby_port_id,n.nearby_unlocode,n.nearby_port_name,n.latitude,n.longitude,n.distance_nm,COALESCE(p.port_name,n.nearby_port_name) AS port_name FROM port_nearby_ports n LEFT JOIN ports p ON p.id=n.nearby_port_id AND p.is_active=true WHERE n.port_id=$1 ORDER BY COALESCE(n.distance_nm,999999),n.nearby_port_name`, [id]),
+      pool.query("SELECT vessel_type FROM port_vessel_types WHERE port_id=$1 ORDER BY vessel_type", [port.id]),
+      pool.query("SELECT service_name FROM port_services WHERE port_id=$1 ORDER BY service_name", [port.id]),
+      pool.query(`SELECT n.nearby_port_id,n.nearby_unlocode,n.nearby_port_name,n.latitude,n.longitude,n.distance_nm,COALESCE(p.port_name,n.nearby_port_name) AS port_name FROM port_nearby_ports n LEFT JOIN ports p ON p.id=n.nearby_port_id AND p.is_active=true WHERE n.port_id=$1 ORDER BY COALESCE(n.distance_nm,999999),n.nearby_port_name`, [port.id]),
       pool.query(`SELECT DISTINCT e.id,e.full_name,e.base_location,e.country,COALESCE(NULLIF(erd.discipline_other,''),erd.discipline) AS discipline,erd.photo_s3_key FROM expert_ports ep JOIN experts e ON e.id=ep.expert_id LEFT JOIN users u ON u.id=e.user_id LEFT JOIN expert_registration_details erd ON erd.expert_id=e.id WHERE LOWER(TRIM(ep.port_name))=LOWER(TRIM($1)) AND COALESCE(u.is_active,true)=true ORDER BY e.full_name`, [port.port_name]),
-      port.unlocode ? pool.query(`SELECT DISTINCT e.id,e.company_name,e.slug,e.country,e.city,ARRAY(SELECT mt.directory_type FROM maritime_directory_entity_types mt WHERE mt.entity_id=e.id ORDER BY mt.directory_type) AS directory_types FROM maritime_directory_ports mp JOIN maritime_directory_entities e ON e.id=mp.entity_id WHERE UPPER(TRIM(mp.unlocode))=UPPER(TRIM($1)) AND e.is_active=true AND e.review_status='approved' ORDER BY e.company_name`, [port.unlocode]) : Promise.resolve({ rows: [] }),
+      port.unlocode ? pool.query(`SELECT DISTINCT e.id,e.public_id,e.company_name,e.slug,e.country,e.city,ARRAY(SELECT mt.directory_type FROM maritime_directory_entity_types mt WHERE mt.entity_id=e.id ORDER BY mt.directory_type) AS directory_types FROM maritime_directory_ports mp JOIN maritime_directory_entities e ON e.id=mp.entity_id WHERE UPPER(TRIM(mp.unlocode))=UPPER(TRIM($1)) AND e.is_active=true AND e.review_status='approved' ORDER BY e.company_name`, [port.unlocode]) : Promise.resolve({ rows: [] }),
     ]);
     const localExperts = experts.rows.map(({ photo_s3_key: key, ...expert }) => ({ ...expert, photo_url: key ? createPresignedGetUrl({ key }).url : null }));
     res.json({ success: true, message: "Port fetched successfully", port: { ...port, vessel_types: vessels.rows.map((row) => row.vessel_type), services: services.rows.map((row) => row.service_name), nearby_ports: nearby.rows, experts_available: localExperts.length, local_experts: localExperts, maritime_directory_entities: directory.rows } });

@@ -11,6 +11,7 @@ const mapScheme = (row) => ({
 });
 
 const mapDirectoryScheme = (row) => ({
+  public_id: row.public_id,
   code: row.code,
   slug: row.slug,
   name: row.name,
@@ -22,7 +23,7 @@ const mapDirectoryScheme = (row) => ({
 const getActiveScheme = async (schemeSlug) => {
   const result = await pool.query(
     `
-    SELECT id, code, slug, name, description, source_name, source_url
+    SELECT id, public_id, code, slug, name, description, source_name, source_url
     FROM public.accreditation_schemes
     WHERE LOWER(slug) = LOWER($1)
       AND is_active = true
@@ -38,7 +39,7 @@ export const getAccreditationSchemes = async (_req, res) => {
   try {
     const result = await pool.query(
       `
-      SELECT id, code, slug, name, description, source_name, source_url
+      SELECT id, public_id, code, slug, name, description, source_name, source_url
       FROM public.accreditation_schemes
       WHERE is_active = true
       ORDER BY LOWER(name) ASC, id ASC
@@ -85,7 +86,9 @@ export const getAccreditedInspectors = async (req, res) => {
         OR ai.country ILIKE $${values.length}
         OR ai.email ILIKE $${values.length}
         OR ai.telephone ILIKE $${values.length}
+        OR ai.public_id = $${values.length + 1}
       )`);
+      values.push(search);
     }
 
     if (country) {
@@ -103,6 +106,7 @@ export const getAccreditedInspectors = async (req, res) => {
         `
         SELECT
           ai.id,
+          ai.public_id,
           ai.full_name,
           ai.rcms_status,
           ai.telephone,
@@ -145,6 +149,7 @@ export const getAccreditedInspectors = async (req, res) => {
 
     const inspectors = inspectorResult.rows.map((row) => ({
       id: row.id,
+      public_id: row.public_id,
       full_name: row.full_name,
       rcms_status: row.rcms_status,
       telephone: row.telephone,
