@@ -54,8 +54,12 @@ test("directory union has matching projection widths in list and count SQL", asy
     assert.equal(width(first), width(second));
     assert.match(first, /d\.id::text AS id,d\.public_id,d\.name/);
     assert.match(second, /'client-'\|\|v\.id,v\.public_id,v\.vessel_name/);
-    assert.match(second, /NULL::text,'\[\]'::jsonb/);
+    assert.match(second, /NULL::text,'Client-submitted/);
+    assert.doesNotMatch(first, /jsonb_agg/);
   }
+  assert.match(statements[0], /selected AS MATERIALIZED/);
+  assert.match(statements[0], /LEFT JOIN LATERAL/);
+  assert.doesNotMatch(statements[1], /jsonb_agg|magicport_vessel_management/);
 });
 
 test("public vessel reference lookup preserves old ID routes", async () => {
