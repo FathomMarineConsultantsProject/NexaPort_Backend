@@ -8,3 +8,4 @@ sql
 .vercel
 .env*
 scripts
+migrations

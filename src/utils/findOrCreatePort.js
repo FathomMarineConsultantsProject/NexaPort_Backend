@@ -1,5 +1,8 @@
 import { pool } from "../config/db.js";
 
+export const normalizePortText = (value) => typeof value === "string" ? value.trim().replace(/\s+/g, " ") : "";
+export const portIdentity = (value) => normalizePortText(value).toLocaleLowerCase("en");
+
 export const findOrCreatePort = async ({
   port_name,
   country,
@@ -7,24 +10,24 @@ export const findOrCreatePort = async ({
   description = null,
   queryable = pool,
 }) => {
-  const name = String(port_name ?? "").trim().replace(/\s+/g, " ");
-  const countryName = String(country ?? "").trim().replace(/\s+/g, " ");
+  const name = normalizePortText(port_name);
+  const countryName = normalizePortText(country);
   if (!name || !countryName || name.length > 240 || countryName.length > 120) {
     throw Object.assign(new Error("Enter a valid port name and country."), { status: 400 });
   }
   // The caller runs in the request transaction. Serialize matching manual entries
   // until a database uniqueness constraint can cover the same normalized identity.
-  await queryable.query("SELECT pg_advisory_xact_lock(hashtextextended(lower($1) || '|' || lower($2), 0))", [name, countryName]);
+  await queryable.query("SELECT pg_advisory_xact_lock(hashtextextended($1 || '|' || $2, 0))", [portIdentity(name), portIdentity(countryName)]);
   const existingPort = await queryable.query(
     `
     SELECT *
     FROM ports
-    WHERE LOWER(TRIM(port_name)) = LOWER($1)
-      AND LOWER(TRIM(country)) = LOWER($2)
+    WHERE LOWER(regexp_replace(BTRIM(port_name), '[[:space:]]+', ' ', 'g')) = $1
+      AND LOWER(regexp_replace(BTRIM(country), '[[:space:]]+', ' ', 'g')) = $2
       AND is_active = true
     LIMIT 1
     `,
-    [name, countryName]
+    [portIdentity(name), portIdentity(countryName)]
   );
 
   if (existingPort.rows.length) {

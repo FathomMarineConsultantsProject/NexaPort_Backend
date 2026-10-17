@@ -12,6 +12,7 @@ import { userMayViewRequest } from "../services/requestVisibilityService.js";
 import { findInspectionMethod } from "../services/inspectionCatalogueService.js";
 import { agentDetailsForRole, consultantHasConfirmedAgentAccess, clientAgentReplacement } from "../services/agentDisclosureService.js";
 import { resolveRequestVessel } from "../services/requestVesselService.js";
+import { reserveSubmission, completeSubmission } from "../services/requestSubmissionService.js";
 
 import { normalizeRequestParticulars, resolveRequestCompany, resolveRequestPort, REQUEST_PARTICULAR_FIELDS } from "../services/requestParticularsService.js";
 
@@ -222,6 +223,11 @@ export const createServiceRequest = async (req, res) => {
     }
 
     await client.query("BEGIN");
+    const reservation = await reserveSubmission(client, req.user.id, req.body);
+    if (reservation?.replay) {
+      await client.query("COMMIT");
+      return res.status(200).json(reservation.replay);
+    }
 
     const companyName = await resolveRequestCompany(client, req.user.id);
     const resolvedVessel = Number(req.user.role_id) === 3
@@ -230,7 +236,37 @@ export const createServiceRequest = async (req, res) => {
     let resolvedPortName = portName || null;
     let resolvedCountry = country || null;
     let selectedPorts = null;
-    if (Object.hasOwn(req.body, "portIds")) {
+    if (Object.hasOwn(req.body, "manualPorts")) {
+      if (!Array.isArray(req.body.manualPorts) || req.body.manualPorts.length > 50)
+        throw Object.assign(new Error("Select up to 50 new ports."), { status: 400 });
+      const selected = await resolveSelectedRequestPorts(client, { portIds: req.body.portIds || [], primaryPortId: req.body.portIds?.[0] });
+      const entries = selected.ports.map((p) => ({ ...p, key: `port:${p.id}`, isPrimary: false }));
+      const keys = new Set(entries.map((p) => p.key));
+      for (const manual of req.body.manualPorts) {
+        if (!manual || typeof manual.key !== "string" || !/^manual:[a-zA-Z0-9-]{1,80}$/.test(manual.key) || keys.has(manual.key))
+          throw Object.assign(new Error("Invalid new port selection."), { status: 400 });
+        keys.add(manual.key);
+        const port = await findOrCreatePort({ port_name: manual.portName, country: manual.country, queryable: client });
+        entries.push({ ...port, key: manual.key, isPrimary: false });
+      }
+      if (entries.length > 50) throw Object.assign(new Error("Select up to 50 ports."), { status: 400 });
+      const primaryKey = req.body.primaryPortKey;
+      if (entries.length && (!primaryKey || !keys.has(primaryKey)))
+        throw Object.assign(new Error("Select a valid primary port."), { status: 400 });
+      if (!entries.length && primaryKey) throw Object.assign(new Error("An empty selection cannot have a primary port."), { status: 400 });
+      if (req.body.portId != null && req.body.portId !== "" && `port:${Number(req.body.portId)}` !== primaryKey)
+        throw Object.assign(new Error("Conflicting primary port identifiers."), { status: 400 });
+      const unique = [...new Map(entries.map((p) => [Number(p.id), p])).values()];
+      if (unique.length !== entries.length) throw Object.assign(new Error("The same port was selected more than once."), { status: 400 });
+      selectedPorts = entries.map((p) => ({ ...p, isPrimary: p.key === primaryKey }));
+      const primary = selectedPorts.find((p) => p.isPrimary);
+      portId = primary?.id || null;
+      resolvedPortName = primary?.port_name || null;
+      resolvedCountry = primary?.country || null;
+    } else if (Object.hasOwn(req.body, "portIds") && Array.isArray(req.body.portIds) && !req.body.portIds.length && portName && country) {
+      const port = await findOrCreatePort({ port_name: portName, country, queryable: client });
+      portId = port.id; resolvedPortName = port.port_name; resolvedCountry = port.country;
+    } else if (Object.hasOwn(req.body, "portIds")) {
       const selected = await resolveSelectedRequestPorts(client, req.body);
       selectedPorts = selected.ports;
       portId = selected.primary?.id || null;
@@ -243,7 +279,7 @@ export const createServiceRequest = async (req, res) => {
       resolvedCountry = port.country;
     }
 
-    if (!Object.hasOwn(req.body, "portIds") && !portId && portName && country) {
+    if (!Object.hasOwn(req.body, "manualPorts") && !Object.hasOwn(req.body, "portIds") && !portId && portName && country) {
       const port = await findOrCreatePort({
         port_name: portName,
         country,
@@ -304,8 +340,8 @@ export const createServiceRequest = async (req, res) => {
         Number(req.user.role_id) === 3 ? companyName : (companyName || String(requesterName || "").trim() || null),
         resolvedVessel?.name || vesselName || null,
         resolvedVessel?.imo || imoNumber || null,
-        resolvedVessel?.type || vesselType || null,
-        resolvedVessel?.flag || flagState || null,
+        (typeof vesselType === "string" && vesselType.trim() ? vesselType.trim() : resolvedVessel?.type || null),
+        (typeof flagState === "string" && flagState.trim() ? flagState.trim() : resolvedVessel?.flag || null),
         portId,
         resolvedPortName,
         resolvedCountry,
@@ -324,13 +360,14 @@ export const createServiceRequest = async (req, res) => {
 
     if (selectedPorts !== null || portId) await persistSelectedRequestPorts(client, result.rows[0].id,
       selectedPorts || [{ id: portId, isPrimary: true }]);
-    await client.query("COMMIT");
-
-    res.status(201).json({
+    const response = {
       success: true,
       message: "Service request created successfully",
       data: (Number(req.user.role_id) === 3 ? serializeServiceRequestForClient : mapRequestRow)({ ...result.rows[0], selected_ports: selectedPorts, linked_company_name: companyName }),
-    });
+    };
+    await completeSubmission(client, req.user.id, reservation, result.rows[0].id, response);
+    await client.query("COMMIT");
+    res.status(201).json(response);
   } catch (error) {
     await client.query("ROLLBACK");
     if (error.fieldErrors) return sendValidationError(res, error.fieldErrors);

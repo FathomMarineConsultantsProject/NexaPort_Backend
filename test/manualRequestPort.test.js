@@ -11,7 +11,8 @@ test("manual request port reuses a normalized existing identity under an advisor
   } };
   assert.equal(await findOrCreatePort({ port_name: " New   Harbour ", country: " India ", queryable }), existing);
   assert.match(calls[0][0], /pg_advisory_xact_lock/);
-  assert.deepEqual(calls[0][1], ["New Harbour", "India"]);
+  assert.deepEqual(calls[0][1], ["new harbour", "india"]);
+  assert.deepEqual(calls[1][1], ["new harbour", "india"]);
   assert.ok(calls.every(([sql]) => !sql.includes("INSERT INTO ports")));
 });
 

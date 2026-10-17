@@ -74,6 +74,35 @@ test("legacy free-text Port and Country still resolve through existing helper", 
   assert.equal(stored.port_id, 5);
 });
 
+test("empty canonical selection does not discard a manual port", async () => {
+  const { stored } = await create({ portIds: [], portName: "New Harbour", country: "India" });
+  assert.equal(stored.port_id, 5);
+});
+
+test("mixed canonical and manual ports persist in one request transaction", async () => {
+  let stored; const calls = []; const res = response();
+  await withClient(async (sql, values = []) => {
+    calls.push(sql);
+    if (/SELECT cc.legal_name/.test(sql)) return { rows: [{ legal_name: "Registered Marine Ltd" }] };
+    if (/SELECT id,port_name,country,unlocode FROM ports/.test(sql)) return { rows: [{ id: 4, port_name: "Singapore", country: "Singapore" }] };
+    if (/FROM ports/.test(sql)) return { rows: [] };
+    if (/INSERT INTO ports/.test(sql)) return { rows: [{ id: 5, port_name: "New Harbour", country: "India" }] };
+    if (/INSERT INTO service_requests/.test(sql)) { stored = columns(sql, values); return { rows: [{ id: 9, ...stored }] }; }
+    return { rows: [] };
+  }, () => createServiceRequest({ body: { ...body, portIds: [4], manualPorts: [{ key: "manual:entry1", portName: "New Harbour", country: "India" }], primaryPortKey: "manual:entry1" }, user: { id: 3, role_id: 3 } }, res));
+  assert.equal(res.statusCode, 201);
+  assert.equal(stored.port_id, 5);
+  assert.ok(calls.some((sql) => /INSERT INTO service_request_ports/.test(sql)));
+  assert.equal(calls.at(-1), "COMMIT");
+});
+
+test("mixed port payload rejects a conflicting legacy primary ID", async () => {
+  const { res, calls } = await create({ portIds: [], manualPorts: [{ key: "manual:entry1", portName: "New Harbour", country: "India" }], primaryPortKey: "manual:entry1", portId: 9 });
+  assert.equal(res.statusCode, 400);
+  assert.ok(calls.includes("ROLLBACK"));
+  assert.ok(calls.every((sql) => !/INSERT INTO service_requests/.test(sql)));
+});
+
 test("Client request binds an existing IMO vessel and Fleet association in one transaction", async () => {
   let stored;
   const calls = [];

@@ -1,5 +1,5 @@
 import { pool } from "../config/db.js";
-import { listRequestVesselSuggestions, normalizeImo, validImo } from "../services/requestVesselService.js";
+import { listRequestVesselSuggestions, normalizeImo, validImo, resolveRequestVessel } from "../services/requestVesselService.js";
 
 export const suggestRequestVessels = async (req, res) => {
   try { return res.json({ success: true, data: await listRequestVesselSuggestions(req.query.search, req.user) }); }
@@ -55,41 +55,18 @@ export const createVessel = async (req, res) => {
 
     db = await pool.connect();
     await db.query("BEGIN");
-    const result = await db.query(
-      `
-      INSERT INTO vessels (
-        vessel_name,
-        imo_number,
-        vessel_type,
-        flag_state,
-        class_subtype,
-        dwt,
-        gt,
-        year_built,
-        trading_area,
-        owner_manager,
-        created_by_user_id
-      )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-      RETURNING *
-      `,
-      [
-        vessel_name,
-        normalizedImo,
-        vessel_type,
-        flag_state,
-        class_subtype || null,
-        dwt || null,
-        gt || null,
-        year_built || null,
-        trading_area || null,
-        owner_manager || null,
-        req.user.id,
-      ]
-    );
-
-    if (Number(req.user.role_id) === 3) await db.query(`INSERT INTO client_vessel_associations(client_user_id,vessel_id)
-      VALUES($1,$2) ON CONFLICT(client_user_id,vessel_id) DO NOTHING`, [req.user.id, result.rows[0].id]);
+    let result;
+    if (Number(req.user.role_id) === 3) {
+      const prior = await db.query("SELECT id FROM vessels WHERE regexp_replace(imo_number,'[^0-9]','','g')=$1 AND is_active=TRUE LIMIT 1", [normalizedImo]);
+      const resolved = await resolveRequestVessel(db, { vesselName: vessel_name, imoNumber: normalizedImo, vesselType: vessel_type, flagState: flag_state }, req.user.id);
+      if (!prior.rowCount) await db.query(`UPDATE vessels SET class_subtype=$2,dwt=$3,gt=$4,year_built=$5,trading_area=$6,owner_manager=$7
+        WHERE id=$1`, [resolved.id, class_subtype || null, dwt || null, gt || null, year_built || null, trading_area || null, owner_manager || null]);
+      result = await db.query("SELECT * FROM vessels WHERE id=$1", [resolved.id]);
+    } else {
+      result = await db.query(`INSERT INTO vessels (vessel_name,imo_number,vessel_type,flag_state,class_subtype,dwt,gt,year_built,trading_area,owner_manager,created_by_user_id)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+        [vessel_name, normalizedImo, vessel_type, flag_state, class_subtype || null, dwt || null, gt || null, year_built || null, trading_area || null, owner_manager || null, req.user.id]);
+    }
     await db.query("COMMIT");
 
     res.status(201).json({
@@ -99,6 +76,7 @@ export const createVessel = async (req, res) => {
     });
   } catch (error) {
     if (db) await db.query("ROLLBACK").catch(() => {});
+    if ([400, 403, 409].includes(error.status)) return res.status(error.status).json({ success: false, message: error.message });
     if (error.code === "23505") {
       return res.status(409).json({
         success: false,

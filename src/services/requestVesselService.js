@@ -61,10 +61,7 @@ export async function resolveRequestVessel(db, body, clientUserId) {
   )).rows[0] || null;
   const imo = imported?.imo || enteredImo || null;
   let vessel = imo ? await existingByImo(db, imo) : null;
-  if (vessel && !imported && Number(vessel.created_by_user_id) !== Number(clientUserId)) {
-    const own = await db.query("SELECT 1 FROM client_vessel_associations WHERE client_user_id=$1 AND vessel_id=$2", [clientUserId, vessel.id]);
-    if (!own.rowCount) throw Object.assign(new Error("This vessel identity is already registered. Contact Admin to link it to your fleet."), { status: 403 });
-  }
+  let createdHere = false;
   if (!vessel) {
     const name = imported?.name || enteredName || `IMO ${imo}`;
     const type = imported?.vessel_type || clean(body.vesselType) || "Not provided";
@@ -72,8 +69,15 @@ export async function resolveRequestVessel(db, body, clientUserId) {
     const inserted = await db.query(`INSERT INTO vessels
       (vessel_name,imo_number,vessel_type,flag_state,created_by_user_id)
       VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING RETURNING *`, [name, imo, type, flag, clientUserId]);
+    createdHere = Boolean(inserted.rows[0]);
     vessel = inserted.rows[0] || (imo ? await existingByImo(db, imo) : null);
     if (!vessel) throw Object.assign(new Error("A conflicting inactive vessel record requires Admin review."), { status: 409 });
+  }
+  // Recheck after ON CONFLICT: another client may have inserted this IMO while
+  // this transaction was waiting on the unique index.
+  if (!createdHere && !imported && Number(vessel.created_by_user_id) !== Number(clientUserId)) {
+    const own = await db.query("SELECT 1 FROM client_vessel_associations WHERE client_user_id=$1 AND vessel_id=$2", [clientUserId, vessel.id]);
+    if (!own.rowCount) throw Object.assign(new Error("This vessel identity is already registered. Contact Admin to link it to your fleet."), { status: 403 });
   }
   if (imported) {
     if (imported.master_vessel_id && Number(imported.master_vessel_id) !== Number(vessel.id))

@@ -15,7 +15,13 @@ test("fleet registration rejects invalid IMO before database access", async (t) 
 test("fleet registration inserts normalized IMO into the expected column", async (t) => {
   const calls = [];
   t.mock.method(pool, "connect", async () => ({
-    query: async (sql, values) => { calls.push([sql, values]); return { rows: [{ id: 81 }] }; },
+    query: async (sql, values) => {
+      calls.push([sql, values]);
+      if (/SELECT id FROM vessels|FROM magicport_vessel_directory WHERE imo=|FROM vessels WHERE regexp_replace/.test(sql)) return { rows: [], rowCount: 0 };
+      if (/INSERT INTO vessels/.test(sql)) return { rows: [{ id: 81, vessel_name: "Ocean", imo_number: "9620865" }], rowCount: 1 };
+      if (/SELECT \* FROM vessels WHERE id=/.test(sql)) return { rows: [{ id: 81, vessel_name: "Ocean", imo_number: "9620865" }] };
+      return { rows: [], rowCount: 1 };
+    },
     release() {},
   }));
   const res = response();
@@ -24,4 +30,5 @@ test("fleet registration inserts normalized IMO into the expected column", async
   const insert = calls.find(([sql]) => sql.includes("INSERT INTO vessels"));
   assert.match(insert[0], /vessel_name,\s*imo_number,/);
   assert.equal(insert[1][1], "9620865");
+  assert.ok(calls.some(([sql]) => /INSERT INTO client_submitted_vessel_directory/.test(sql)));
 });

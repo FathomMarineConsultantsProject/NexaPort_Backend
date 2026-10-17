@@ -83,6 +83,21 @@ test("a Client cannot claim a different Client's private IMO identity", async ()
   assert.ok(calls.every(([statement]) => !statement.includes("INSERT INTO client_vessel_associations")));
 });
 
+test("an IMO insert race cannot associate the other Client's winning private vessel", async () => {
+  let lookups = 0; const calls = [];
+  const db = { query: async (statement) => {
+    calls.push(statement);
+    if (statement.includes("FROM vessels WHERE regexp_replace")) {
+      lookups += 1;
+      return { rows: lookups === 1 ? [] : [{ id: 81, vessel_name: "OCEAN", imo_number: "9620865", created_by_user_id: 99 }] };
+    }
+    if (statement.includes("INSERT INTO vessels")) return { rows: [] };
+    return { rows: [], rowCount: 0 };
+  } };
+  await assert.rejects(resolveRequestVessel(db, { vesselName: "OCEAN", imoNumber: "9620865" }, 21), { status: 403 });
+  assert.ok(calls.every((statement) => !statement.includes("INSERT INTO client_vessel_associations")));
+});
+
 test("selected private vessel requires an existing client association", async () => {
   const calls = [];
   const db = { query: async (statement, values) => { calls.push([statement, values]); return { rows: [] }; } };
