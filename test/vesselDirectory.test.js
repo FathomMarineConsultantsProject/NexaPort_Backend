@@ -70,6 +70,26 @@ test("public vessel reference lookup preserves old ID routes", async () => {
   await assert.rejects(() => getVesselDirectoryDetail("VSL-invalid", db), /Invalid vessel ID/);
 });
 
+test("linked managed references resolve to the canonical imported vessel", async () => {
+  const id = `MVS-${"C".repeat(32)}`;
+  const canonical = `VSL-${"D".repeat(32)}`;
+  const calls = [];
+  const db = { query: async (sql, values) => {
+    calls.push([sql, values]);
+    return { rows: sql.includes("JOIN vessels v ON v.id=d.master_vessel_id") ? [{ id: "19", public_id: canonical }] : [] };
+  } };
+  assert.deepEqual(await getVesselDirectoryDetail(id, db), { id: "19", public_id: canonical });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0][1], [id]);
+  assert.match(buildVesselDirectoryFilter({ search: id }).where, /linked\.id=imported\.master_vessel_id WHERE imported\.public_id=d\.public_id AND linked\.public_id=\$1/);
+});
+
+test("unlinked managed references still resolve to client-submitted vessels", async () => {
+  const id = `MVS-${"E".repeat(32)}`;
+  const db = { query: async (sql) => ({ rows: sql.includes("client_submitted_vessel_directory") ? [{ id: "client-7", public_id: id }] : [] }) };
+  assert.deepEqual(await getVesselDirectoryDetail(id, db), { id: "client-7", public_id: id });
+});
+
 test("flag suggestions query distinct global values with a fixed bound", async () => {
   let sql = "";
   const db = { query: async (statement) => { sql = statement; return { rows: [{ flag: "India" }, { flag: "Panama" }] }; } };

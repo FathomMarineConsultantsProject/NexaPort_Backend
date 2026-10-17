@@ -10,7 +10,7 @@ export function buildVesselDirectoryFilter(input = {}) {
   const values = [];
   const clauses = [];
   const add = (sql, value) => { values.push(value); clauses.push(sql.replaceAll("?", `$${values.length}`)); };
-  if (clean(input.search)) add("(d.name ILIKE '%' || ? || '%' OR d.imo ILIKE '%' || ? || '%' OR d.mmsi ILIKE '%' || ? || '%' OR d.call_sign ILIKE '%' || ? || '%' OR d.public_id = ?)", clean(input.search).slice(0, 120));
+  if (clean(input.search)) add("(d.name ILIKE '%' || ? || '%' OR d.imo ILIKE '%' || ? || '%' OR d.mmsi ILIKE '%' || ? || '%' OR d.call_sign ILIKE '%' || ? || '%' OR d.public_id = ? OR EXISTS (SELECT 1 FROM magicport_vessel_directory imported JOIN vessels linked ON linked.id=imported.master_vessel_id WHERE imported.public_id=d.public_id AND linked.public_id=?))", clean(input.search).slice(0, 120));
   if (clean(input.type)) add("d.vessel_type = ?", clean(input.type).slice(0, 80));
   if (clean(input.flag)) add("d.flag = ?", clean(input.flag).slice(0, 80));
   for (const [key, column, op] of [["dwtMin", "d.dwt", ">="], ["dwtMax", "d.dwt", "<="], ["gtMin", "d.gt", ">="], ["gtMax", "d.gt", "<="]]) {
@@ -51,11 +51,19 @@ export async function listVesselDirectoryFlags(db = pool) {
 
 export async function getVesselDirectoryDetail(id, db = pool) {
   if (/^client-\d+$/.test(String(id)) || /^MVS-[0-9A-F]{32}$/.test(String(id))) {
+    const legacyId = String(id).startsWith("client-");
+    // The foreign key is verified identity. Resolve an old managed reference to
+    // the imported record without changing either stored public ID.
+    const linked = await db.query(`SELECT ${publicFields}, s.payload->'faq' AS faq, s.payload->'additionalAttributes' AS additional_attributes, s.payload_hash
+      FROM magicport_vessel_directory d JOIN vessels v ON v.id=d.master_vessel_id
+      JOIN magicport_vessel_sources s ON s.source_key=d.source_key
+      WHERE ${legacyId ? "v.id" : "v.public_id"}=$1`, [legacyId ? Number(String(id).slice(7)) : id]);
+    if (linked.rows[0]) return linked.rows[0];
     const result = await db.query(`SELECT 'client-'||v.id AS id,v.public_id,v.vessel_name AS name,v.imo_number AS imo,
       v.vessel_type,v.flag_state AS flag,v.dwt,v.gt,v.year_built,
       'Client-submitted · unverified' AS provenance,'[]'::jsonb AS management
       FROM client_submitted_vessel_directory cd JOIN vessels v ON v.id=cd.vessel_id
-      WHERE ${String(id).startsWith("client-") ? "v.id=$1" : "v.public_id=$1"} AND v.is_active=TRUE`, [String(id).startsWith("client-") ? Number(String(id).slice(7)) : id]);
+      WHERE ${legacyId ? "v.id=$1" : "v.public_id=$1"} AND v.is_active=TRUE`, [legacyId ? Number(String(id).slice(7)) : id]);
     return result.rows[0] || null;
   }
   if (!/^\d+$/.test(String(id)) && !/^VSL-[0-9A-F]{32}$/.test(String(id))) throw Object.assign(new Error("Invalid vessel ID"), { status: 400 });

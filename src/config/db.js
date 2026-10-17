@@ -19,6 +19,10 @@ export const pool = new Pool({
     rejectUnauthorized: false,
   },
   connectionTimeoutMillis: 15000,
+  query_timeout: 30000,
+  statement_timeout: 25000,
+  idleTimeoutMillis: 10000,
+  max: 5,
 });
 
 // Idle-client failures are emitted by pg.Pool outside an active request.
