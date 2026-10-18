@@ -44,12 +44,16 @@ test("detail uses separate child queries, returns arrays, and deduplicates stabl
         ] };
       }
       if (/maritime_directory_ports/.test(sql)) return { rows: [{ id: "123e4567-e89b-42d3-a456-426614174004", port_name: "Chennai" }] };
+      if (/maritime_directory_contact_methods/.test(sql)) return { rows: [{ branch_id: null, contact_type: "email", contact_value: "office@example.com" }] };
+      if (/directory_entity_sources/.test(sql)) return { rows: [{ source_name: "MagicPort", source_url: "https://magicport.ai/bunker-suppliers/example" }] };
       return { rows: null };
     },
   };
   const detail = await getMaritimeEntity(ID, queryable);
   assert.equal(detail.services.length, 2);
   assert.equal(detail.ports.length, 1);
+  assert.equal(detail.contact_methods[0].contact_value, "office@example.com");
+  assert.equal(detail.sources[0].source_name, "MagicPort");
   for (const name of ["services", "ports", "branches", "certifications", "class_approvals", "memberships", "products", "faqs"]) {
     assert.ok(Array.isArray(detail[name]));
   }
@@ -108,6 +112,19 @@ test("list search is parameterized and fixed-table only", async () => {
   const calls = [];
   const queryable = { query: async (sql, params) => { calls.push({ sql, params }); return /SELECT COUNT/.test(sql) ? { rows: [{ total: 0 }] } : { rows: [] }; } };
   await listMaritimeEntities({ type: "supplier", search: "%' OR 1=1 --" }, queryable); assert.ok(calls.every(({ sql }) => !sql.includes("OR 1=1"))); assert.equal(calls[0].params[1], "%' OR 1=1 --");
+});
+
+test("bunker supplier category and port filters retain server pagination", async () => {
+  const calls = [];
+  const queryable = { query: async (sql, params) => { calls.push({ sql, params: [...params] }); return /SELECT COUNT/.test(sql) && !/service_count/.test(sql) ? { rows: [{ total: 1 }] } : { rows: [{ id: ID }] }; } };
+  const result = await listMaritimeEntities({ type: "supplier", category: "bunker", port: "AEFJR", page: 2, limit: 10 }, queryable);
+  assert.equal(result.pagination.page, 2);
+  assert.equal(result.pagination.total, 1);
+  assert.ok(calls.every(({ sql }) => /source_external_id LIKE 'bunker:%'/.test(sql)));
+  assert.ok(calls.every(({ sql }) => /p\.unlocode ILIKE/.test(sql)));
+  assert.deepEqual(calls[0].params, ["supplier", "AEFJR"]);
+  assert.deepEqual(calls[1].params.slice(-2), [10, 10]);
+  await assert.rejects(listMaritimeEntities({ type: "ship_agent", category: "bunker" }, queryable), /correct the highlighted fields/);
 });
 
 test("combined owners and managers filter keeps pagination, country, search and global sort on server", async () => {

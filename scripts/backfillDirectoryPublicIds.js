@@ -64,12 +64,12 @@ if (!process.argv.includes("--apply")) {
       expertUpdated += result.rowCount;
       if (result.rowCount === 0) break;
     }
-    const experts = await pool.query("SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE COALESCE(public_id,nexaport_id) IS NULL)::int AS missing, COUNT(DISTINCT COALESCE(public_id,nexaport_id))::int AS unique_ids FROM public.experts");
+    const experts = await pool.query("SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE COALESCE(nexaport_id,public_id) IS NULL)::int AS missing, COUNT(DISTINCT COALESCE(nexaport_id,public_id))::int AS unique_ids FROM public.experts");
     console.log(JSON.stringify({ table: "experts", updated: expertUpdated, ...experts.rows[0] }));
     if (experts.rows[0].missing || experts.rows[0].unique_ids !== experts.rows[0].total)
       throw new Error("experts requires sql/nexaport_public_ids_001.sql or identity review");
     const globalIds = tables.map(([table]) => `SELECT public_id FROM public.${table}`).join(" UNION ALL ") +
-      " UNION ALL SELECT COALESCE(public_id,nexaport_id) AS public_id FROM public.experts";
+      " UNION ALL SELECT COALESCE(nexaport_id,public_id) AS public_id FROM public.experts";
     const globalCheck = await pool.query(`SELECT COUNT(*)::bigint AS total,COUNT(DISTINCT public_id)::bigint AS unique_ids FROM (${globalIds}) ids`);
     console.log(JSON.stringify({ scope: "all_directories", ...globalCheck.rows[0] }));
     if (globalCheck.rows[0].total !== globalCheck.rows[0].unique_ids)

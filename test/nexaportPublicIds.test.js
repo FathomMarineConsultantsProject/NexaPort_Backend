@@ -39,3 +39,14 @@ test("registration is database-assigned, profile edits reject submitted IDs, and
   assert.match(registration, /await client\.query\("ROLLBACK"\)/);
   assert.match(expert, /await client\.query\("ROLLBACK"\)/);
 });
+
+test("registered consultant readers prefer issued numeric IDs and retain EXP lookup aliases", async () => {
+  const expert = await controller("expertController.js");
+  const flag = await controller("flagController.js");
+  const inspector = await readFile(new URL("../src/services/inspectorDirectoryService.js", import.meta.url), "utf8");
+  assert.doesNotMatch(expert + flag + inspector, /COALESCE\(e\.public_id,e\.nexaport_id\)/);
+  assert.match(expert, /COALESCE\(e\.nexaport_id,e\.public_id\) AS directory_public_id/g);
+  assert.match(flag, /COALESCE\(e\.nexaport_id,e\.public_id\) AS nexaport_id/);
+  assert.match(flag, /OR e\.public_id = \$\$\{expertValues\.length \+ 1\}/);
+  assert.match(inspector, /legacy_public_id=\$2/);
+});

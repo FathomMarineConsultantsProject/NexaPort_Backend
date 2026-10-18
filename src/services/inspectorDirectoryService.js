@@ -49,7 +49,7 @@ WITH inspector_records AS (
     NULL::text AS source_url,
     (SELECT STRING_AGG(DISTINCT ep.port_name, ', ' ORDER BY ep.port_name) FROM expert_ports ep WHERE ep.expert_id=e.id) AS base_ports,
     e.years_experience::text AS experience,NULL::text AS scheme_slug,NULL::text AS flag_slug,
-    COALESCE(e.public_id,e.nexaport_id) AS nexaport_id,
+    COALESCE(e.nexaport_id,e.public_id) AS nexaport_id,e.public_id AS legacy_public_id,
     ARRAY['Maritime Consultants']::text[] ||
       CASE WHEN (COALESCE(erd.discipline,'') || ' ' || COALESCE(erd.discipline_other,'') || ' ' ||
         COALESCE((SELECT STRING_AGG(ms.name,' ') FROM expert_specialties es JOIN master_specialties ms ON ms.id=es.specialty_id WHERE es.expert_id=e.id),'')) ~* 'survey'
@@ -68,20 +68,20 @@ WITH inspector_records AS (
     COALESCE(NULLIF(fi.location,''),NULLIF(fi.region,''),fi.country),fi.country,fi.areas_covered_text,NULL,mfs.name,NULL,
     COALESCE(fi.source_name,'Flag Inspector Directory'),fi.source_record_url,NULL,NULL,NULL,
     LOWER(REGEXP_REPLACE(TRIM(mfs.name), '[^a-zA-Z0-9]+', '-', 'g')),
-    fi.public_id,ARRAY['Flag State Inspectors']::text[],fi.areas_covered_text,NULL::text,NULL::text,NULL::text,
+    fi.public_id,NULL::text,ARRAY['Flag State Inspectors']::text[],fi.areas_covered_text,NULL::text,NULL::text,NULL::text,
     NULLIF(BTRIM(fi.full_name),'') IS NOT NULL
   FROM flag_inspectors fi JOIN master_flag_states mfs ON mfs.id=fi.flag_id WHERE fi.is_active=true
   UNION ALL
   SELECT ai.id::text,'accredited_inspector',ai.full_name,NULL,ai.country,ai.country,acs.name,ai.rcms_status,NULL,NULL,
     COALESCE(ai.source_name,acs.source_name,'Accredited Inspectors Directory'),COALESCE(ai.source_url,acs.source_url),NULL,NULL,acs.slug,NULL,
-    ai.public_id,ARRAY['Accredited Inspectors']::text[],acs.name,NULL::text,acs.name,NULL::text,
+    ai.public_id,NULL::text,ARRAY['Accredited Inspectors']::text[],acs.name,NULL::text,acs.name,NULL::text,
     NULLIF(BTRIM(ai.full_name),'') IS NOT NULL
   FROM accredited_inspectors ai JOIN accreditation_schemes acs ON acs.id=ai.scheme_id WHERE ai.is_active=true AND acs.is_active=true
   UNION ALL
   SELECT aps.id::text,'appointed_surveyor',COALESCE(aps.full_name,aps.organization_name),aps.organization_name,
     COALESCE(NULLIF(aps.address_text,''),aps.country),aps.country,aps.appointment_scope,aps.professional_title,NULL,NULL,
     COALESCE(aps.source_name,'Appointed Surveyors Directory'),NULL,NULL,NULL,NULL,NULL,
-    aps.public_id,ARRAY['Appointed Surveyors']::text[],aps.appointment_scope,NULL::text,NULL::text,NULL::text,
+    aps.public_id,NULL::text,ARRAY['Appointed Surveyors']::text[],aps.appointment_scope,NULL::text,NULL::text,NULL::text,
     NULLIF(BTRIM(aps.full_name),'') IS NOT NULL
   FROM appointed_ship_surveyors aps WHERE aps.is_active=true
 ), filtered AS (
@@ -104,7 +104,7 @@ WITH inspector_records AS (
    AND ($1='%%' OR name ILIKE $1 OR COALESCE(organization,'') ILIKE $1 OR COALESCE(country,'') ILIKE $1
      OR COALESCE(country_location,'') ILIKE $1 OR COALESCE(base_ports,'') ILIKE $1 OR COALESCE(discipline,'') ILIKE $1
      OR COALESCE(authority,'') ILIKE $1 OR COALESCE(flag_state,'') ILIKE $1 OR COALESCE(specialization,'') ILIKE $1
-     OR COALESCE(inspection_types,'') ILIKE $1 OR COALESCE(accreditation,'') ILIKE $1 OR nexaport_id=$2)
+     OR COALESCE(inspection_types,'') ILIKE $1 OR COALESCE(accreditation,'') ILIKE $1 OR nexaport_id=$2 OR legacy_public_id=$2)
 )
 SELECT *,COUNT(*) OVER()::int AS total FROM filtered
 ORDER BY relevance,name,inspector_type,source_id LIMIT $7 OFFSET $8`;
@@ -120,7 +120,7 @@ export const searchInspectors = async (queryable, input = {}) => {
   const { sql, values, filters } = buildInspectorSearchQuery(input);
   const rows = (await queryable.query(sql, values)).rows;
   const total = Number(rows[0]?.total || 0);
-  const items = rows.map(({ total: _total, relevance: _relevance, image_key: imageKey, ...row }) => ({
+  const items = rows.map(({ total: _total, relevance: _relevance, image_key: imageKey, legacy_public_id: _legacyPublicId, ...row }) => ({
     ...row, photo_url: photoUrl(imageKey),
   }));
   return { items, total, page: filters.page, limit: filters.limit, totalPages: Math.ceil(total / filters.limit) };

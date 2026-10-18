@@ -17,6 +17,7 @@ test("all canonical directory sources have disjoint immutable ID namespaces", as
   assert.match(migration, /BEGIN;[\s\S]*COMMIT;[\s\S]*CREATE UNIQUE INDEX CONCURRENTLY/);
   assert.match(migration, /to_regclass\('public\.' \|\| target_table\)/);
   assert.match(migration, /NEW\.public_id IS NULL AND NEW\.nexaport_id IS NULL/);
+  assert.match(migration, /Registered experts cannot be assigned a new EXP public ID/);
   assert.match(backfill, /WHERE nexaport_id IS NULL AND public_id IS NULL/);
   assert.match(backfill, /indisvalid,i\.indisunique/);
   assert.match(backfill, /--apply/);

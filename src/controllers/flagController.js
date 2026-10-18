@@ -111,8 +111,11 @@ export const getFlagDirectory = async (req, res) => {
           OR efc.region ILIKE $${expertValues.length}
           OR efc.location ILIKE $${expertValues.length}
           OR efc.coverage_note ILIKE $${expertValues.length}
+          OR e.nexaport_id = $${expertValues.length + 1}
+          OR e.public_id = $${expertValues.length + 1}
         )
       `;
+      expertValues.push(search);
     }
 
     const [externalResult, expertResult] = await Promise.all([
@@ -141,7 +144,7 @@ export const getFlagDirectory = async (req, res) => {
         `
         SELECT
           e.id AS expert_id,
-          COALESCE(e.public_id,e.nexaport_id) AS nexaport_id,
+          COALESCE(e.nexaport_id,e.public_id) AS nexaport_id,
           e.full_name,
           e.country,
           e.base_location,
