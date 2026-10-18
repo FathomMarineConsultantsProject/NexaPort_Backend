@@ -127,6 +127,14 @@ test("bunker supplier category and port filters retain server pagination", async
   await assert.rejects(listMaritimeEntities({ type: "ship_agent", category: "bunker" }, queryable), /correct the highlighted fields/);
 });
 
+test("IMPA Premium filter applies only to suppliers and stays in paginated SQL", async () => {
+  const calls = [];
+  const queryable = { query: async (sql, params) => { calls.push({ sql, params }); return /SELECT COUNT/.test(sql) ? { rows: [{ total: 0 }] } : { rows: [] }; } };
+  await listMaritimeEntities({ type: "supplier", membershipTier: "impa-premium" }, queryable);
+  assert.ok(calls.every(({ sql }) => sql.includes("e.extra_data->'impa'->>'premium'='true'")));
+  await assert.rejects(listMaritimeEntities({ type: "ship_agent", membershipTier: "impa-premium" }, queryable), /highlighted fields/);
+});
+
 test("combined owners and managers filter keeps pagination, country, search and global sort on server", async () => {
   const calls = [];
   const queryable = { query: async (sql, params) => { calls.push({ sql, params }); return /SELECT COUNT/.test(sql) && !/service_count/.test(sql) ? { rows: [{ total: 2 }] } : { rows: [{ id: ID, company_name: "A Marine", directory_types: ["owner", "manager", "supplier"] }] }; } };

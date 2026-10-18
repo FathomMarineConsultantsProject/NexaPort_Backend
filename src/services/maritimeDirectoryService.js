@@ -145,7 +145,7 @@ export const getMaritimeEntity = async (entityId, queryable = pool) => {
   for (const [name, sql] of detailQueries) result[name] = uniqueCollectionRows((await queryable.query(sql, [canonicalId])).rows);
   if (result.directory_types.includes("supplier")) {
     result.contact_methods = (await queryable.query(`SELECT id,branch_id,contact_type,contact_value,person_name,role_name,source_url FROM public.maritime_directory_contact_methods WHERE entity_id=$1 ORDER BY created_at,id`, [canonicalId])).rows;
-    result.sources = (await queryable.query(`SELECT source_name,source_url,last_seen_at FROM public.directory_entity_sources WHERE entity_id=$1 AND source_external_id LIKE 'bunker:%' ORDER BY source_name,source_url`, [canonicalId])).rows;
+    result.sources = (await queryable.query(`SELECT source_name,source_url,last_seen_at FROM public.directory_entity_sources WHERE entity_id=$1 ORDER BY source_name,source_url`, [canonicalId])).rows;
   }
   return result;
 };
@@ -162,6 +162,10 @@ export const listMaritimeEntities = async (query, queryable = pool) => {
   const add = (sql, value) => { values.push(value); conditions.push(sql.replaceAll("?", `$${values.length}`)); };
   if (clean(query.search)) add(`(e.company_name ILIKE '%' || ? || '%' OR e.public_id = ? OR e.description ILIKE '%' || ? || '%' OR EXISTS (SELECT 1 FROM public.maritime_directory_services s WHERE s.entity_id=e.id AND s.service_name ILIKE '%' || ? || '%') OR EXISTS (SELECT 1 FROM public.maritime_directory_ports p WHERE p.entity_id=e.id AND p.port_name ILIKE '%' || ? || '%') OR EXISTS (SELECT 1 FROM public.maritime_directory_products p WHERE p.entity_id=e.id AND p.product_name ILIKE '%' || ? || '%'))`, clean(query.search));
   if (clean(query.country)) add("LOWER(e.country)=LOWER(?)", clean(query.country));
+  if (clean(query.membershipTier)) {
+    if (query.type !== "supplier" || query.membershipTier !== "impa-premium") throw validationError({ membershipTier: "Unsupported membership tier." });
+    conditions.push("e.extra_data->'impa'->>'premium'='true'");
+  }
   if (clean(query.port)) add(`EXISTS (SELECT 1 FROM ${T.ports} p WHERE p.entity_id=e.id AND (p.port_name ILIKE '%' || ? || '%' OR p.unlocode ILIKE '%' || ? || '%'))`, clean(query.port));
   if (clean(query.category)) {
     if (query.type !== "supplier" || query.category !== "bunker") throw validationError({ category: "Unsupported supplier category." });
