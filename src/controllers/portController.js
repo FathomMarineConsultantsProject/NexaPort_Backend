@@ -95,7 +95,7 @@ export const createPort = async (req, res) => {
     for (const field of ["description", "psc_risk_level", "experts_available", ...ENRICHMENT_FIELDS]) {
       if (input[field] !== undefined) { columns.push(field); values.push(JSON_FIELDS.has(field) ? JSON.stringify(input[field]) : input[field]); }
     }
-    const result = await client.query(`INSERT INTO ports (${columns.join(",")}) VALUES (${values.map((_, index) => `$${index + 1}`).join(",")}) RETURNING *`, values);
+    const result = await client.query(`INSERT INTO ports (${columns.join(",")},public_id) VALUES (${values.map((_, index) => `$${index + 1}`).join(",")},'PRT-'||upper(replace(gen_random_uuid()::text,'-',''))) RETURNING *`, values);
     await writeRelations(client, result.rows[0].id, input.vessel_types ?? [], input.services ?? []);
     await client.query("COMMIT");
     res.status(201).json({ success: true, message: "Port created successfully", port: result.rows[0] });

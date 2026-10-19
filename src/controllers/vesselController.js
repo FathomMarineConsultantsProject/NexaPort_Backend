@@ -63,8 +63,8 @@ export const createVessel = async (req, res) => {
         WHERE id=$1`, [resolved.id, class_subtype || null, dwt || null, gt || null, year_built || null, trading_area || null, owner_manager || null]);
       result = await db.query("SELECT * FROM vessels WHERE id=$1", [resolved.id]);
     } else {
-      result = await db.query(`INSERT INTO vessels (vessel_name,imo_number,vessel_type,flag_state,class_subtype,dwt,gt,year_built,trading_area,owner_manager,created_by_user_id)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+      result = await db.query(`INSERT INTO vessels (vessel_name,imo_number,vessel_type,flag_state,class_subtype,dwt,gt,year_built,trading_area,owner_manager,created_by_user_id,public_id)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'MVS-'||upper(replace(gen_random_uuid()::text,'-',''))) RETURNING *`,
         [vessel_name, normalizedImo, vessel_type, flag_state, class_subtype || null, dwt || null, gt || null, year_built || null, trading_area || null, owner_manager || null, req.user.id]);
     }
     await db.query("COMMIT");

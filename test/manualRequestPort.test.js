@@ -22,3 +22,14 @@ test("manual request port validates name and country before querying", async () 
   await assert.rejects(findOrCreatePort({ port_name: "Harbour", country: " ", queryable }), { status: 400 });
   assert.equal(calls, 0);
 });
+
+test("new request ports receive a NexaPort ID", async () => {
+  const calls = [];
+  const queryable = { query: async (sql) => {
+    calls.push(sql);
+    return { rows: sql.includes("INSERT INTO ports") ? [{ id: 8, public_id: "PRT-123E4567E89B42D3A456426614174000" }] : [] };
+  } };
+  const port = await findOrCreatePort({ port_name: "New Harbour", country: "India", queryable });
+  assert.equal(port.public_id, "PRT-123E4567E89B42D3A456426614174000");
+  assert.match(calls.at(-1), /'PRT-'\|\|upper\(replace\(gen_random_uuid\(\)::text/);
+});

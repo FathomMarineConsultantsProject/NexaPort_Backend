@@ -71,7 +71,7 @@ test("manual create is transactional, approved, source controlled, and creates c
   const query = async (sql, params = []) => {
     calls.push({ sql, params });
     if (/SELECT 1 FROM public\.maritime_directory_entities/.test(sql)) return { rows: [] };
-    if (/INSERT INTO public\.maritime_directory_entities/.test(sql)) return { rows: [{ id: ID }] };
+    if (/INSERT INTO public\.maritime_directory_entities/.test(sql)) return { rows: [{ id: ID, public_id: "COM-123E4567E89B42D3A456426614174000" }] };
     if (/SELECT \* FROM public\.maritime_directory_entities/.test(sql)) return { rows: [{ id: ID, company_name: "Harbour Services", data_source: "manual_admin", review_status: "approved" }] };
     if (/SELECT directory_type/.test(sql)) return { rows: [{ directory_type: "ship_agent" }, { directory_type: "supplier" }] };
     return { rows: [] };
@@ -83,6 +83,8 @@ test("manual create is transactional, approved, source controlled, and creates c
     assert.ok(calls.some(({ sql }) => sql === "BEGIN")); assert.ok(calls.some(({ sql }) => sql === "COMMIT"));
     const entityInsert = calls.find(({ sql }) => /INSERT INTO public\.maritime_directory_entities/.test(sql));
     assert.match(entityInsert.sql, /'manual_admin','approved'/); assert.equal(entityInsert.params.at(-1), 9);
+    assert.match(entityInsert.sql, /public_id/);
+    assert.match(entityInsert.sql, /'COM-'\|\|upper\(replace\(gen_random_uuid\(\)::text/);
     assert.ok(calls.some(({ sql }) => /INSERT INTO public\.maritime_directory_services/.test(sql)));
 });
 
@@ -91,12 +93,26 @@ test("a child database failure rolls back the whole create", async () => {
   const query = async (sql) => {
     calls.push(sql);
     if (/SELECT 1 FROM/.test(sql)) return { rows: [] };
-    if (/INSERT INTO public\.maritime_directory_entities/.test(sql)) return { rows: [{ id: ID }] };
+    if (/INSERT INTO public\.maritime_directory_entities/.test(sql)) return { rows: [{ id: ID, public_id: "COM-123E4567E89B42D3A456426614174000" }] };
     if (/INSERT INTO public\.maritime_directory_services/.test(sql)) throw new Error("child failed");
     return { rows: [] };
   };
   const database = { connect: async () => ({ query, release() {} }), query };
   await assert.rejects(createMaritimeEntity(validPayload, 9, database), /child failed/); assert.ok(calls.includes("ROLLBACK")); assert.ok(!calls.includes("COMMIT"));
+});
+
+test("manual create rolls back if a NexaPort ID is missing", async () => {
+  const calls = [];
+  const query = async (sql) => {
+    calls.push(sql);
+    if (/SELECT 1 FROM public\.maritime_directory_entities/.test(sql)) return { rows: [] };
+    if (/INSERT INTO public\.maritime_directory_entities/.test(sql)) return { rows: [{ id: ID, public_id: null }] };
+    return { rows: [] };
+  };
+  const database = { connect: async () => ({ query, release() {} }), query };
+  await assert.rejects(createMaritimeEntity(validPayload, 9, database), /public ID was not assigned/);
+  assert.ok(calls.includes("ROLLBACK"));
+  assert.ok(!calls.includes("COMMIT"));
 });
 
 test("list uses server pagination and returns pending imports by default", async () => {
@@ -133,6 +149,16 @@ test("IMPA Premium filter applies only to suppliers and stays in paginated SQL",
   await listMaritimeEntities({ type: "supplier", membershipTier: "impa-premium" }, queryable);
   assert.ok(calls.every(({ sql }) => sql.includes("e.extra_data->'impa'->>'premium'='true'")));
   await assert.rejects(listMaritimeEntities({ type: "ship_agent", membershipTier: "impa-premium" }, queryable), /highlighted fields/);
+});
+
+test("IMPA source filter selects linked suppliers without changing pagination", async () => {
+  const calls = [];
+  const queryable = { query: async (sql, params) => { calls.push({ sql, params }); return /SELECT COUNT/.test(sql) ? { rows: [{ total: 3 }] } : { rows: [] }; } };
+  const result = await listMaritimeEntities({ type: "supplier", source: "IMPA", page: 2, limit: 2 }, queryable);
+  assert.equal(result.pagination.total, 3);
+  assert.ok(calls.every(({ sql }) => sql.includes("src.source_name='IMPA'")));
+  assert.deepEqual(calls.at(-1).params.slice(-2), [2, 2]);
+  await assert.rejects(listMaritimeEntities({ type: "ship_agent", source: "IMPA" }, queryable), /highlighted fields/);
 });
 
 test("combined owners and managers filter keeps pagination, country, search and global sort on server", async () => {

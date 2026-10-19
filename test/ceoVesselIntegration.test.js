@@ -67,6 +67,7 @@ test("new valid IMO creates one unverified vessel identity and association", asy
   } };
   const vessel = await resolveRequestVessel(db, { vesselName: "OCEAN", imoNumber: "9620865", vesselType: "Tanker", flagState: "Panama" }, 20);
   assert.equal(vessel.id, 81);
+  assert.match(sql.find(([statement]) => statement.includes("INSERT INTO vessels"))[0], /'MVS-'\|\|upper\(replace\(gen_random_uuid\(\)::text/);
   assert.ok(sql.some(([statement]) => statement.includes("INSERT INTO client_submitted_vessel_directory")));
   assert.ok(sql.some(([statement, values]) => statement.includes("INSERT INTO client_vessel_associations") && values[0] === 20 && values[1] === 81));
 });

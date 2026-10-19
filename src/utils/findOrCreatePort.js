@@ -37,9 +37,9 @@ export const findOrCreatePort = async ({
   const newPort = await queryable.query(
     `
     INSERT INTO ports (
-      port_name, country, region, description, psc_risk_level, experts_available
+      port_name, country, region, description, psc_risk_level, experts_available, public_id
     )
-    VALUES ($1,$2,$3,$4,'Medium',0)
+    VALUES ($1,$2,$3,$4,'Medium',0,'PRT-'||upper(replace(gen_random_uuid()::text,'-','')))
     RETURNING *
     `,
     [name, countryName, region, description]

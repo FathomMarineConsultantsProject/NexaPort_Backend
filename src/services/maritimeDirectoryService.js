@@ -145,7 +145,7 @@ export const getMaritimeEntity = async (entityId, queryable = pool) => {
   for (const [name, sql] of detailQueries) result[name] = uniqueCollectionRows((await queryable.query(sql, [canonicalId])).rows);
   if (result.directory_types.includes("supplier")) {
     result.contact_methods = (await queryable.query(`SELECT id,branch_id,contact_type,contact_value,person_name,role_name,source_url FROM public.maritime_directory_contact_methods WHERE entity_id=$1 ORDER BY created_at,id`, [canonicalId])).rows;
-    result.sources = (await queryable.query(`SELECT source_name,source_url,last_seen_at FROM public.directory_entity_sources WHERE entity_id=$1 ORDER BY source_name,source_url`, [canonicalId])).rows;
+    result.sources = (await queryable.query(`SELECT source_name,source_external_id,source_url,last_seen_at FROM public.directory_entity_sources WHERE entity_id=$1 ORDER BY source_name,source_url`, [canonicalId])).rows;
   }
   return result;
 };
@@ -165,6 +165,10 @@ export const listMaritimeEntities = async (query, queryable = pool) => {
   if (clean(query.membershipTier)) {
     if (query.type !== "supplier" || query.membershipTier !== "impa-premium") throw validationError({ membershipTier: "Unsupported membership tier." });
     conditions.push("e.extra_data->'impa'->>'premium'='true'");
+  }
+  if (clean(query.source)) {
+    if (query.type !== "supplier" || query.source !== "IMPA") throw validationError({ source: "Unsupported directory source." });
+    conditions.push("EXISTS (SELECT 1 FROM public.directory_entity_sources src WHERE src.entity_id=e.id AND src.source_name='IMPA')");
   }
   if (clean(query.port)) add(`EXISTS (SELECT 1 FROM ${T.ports} p WHERE p.entity_id=e.id AND (p.port_name ILIKE '%' || ? || '%' OR p.unlocode ILIKE '%' || ? || '%'))`, clean(query.port));
   if (clean(query.category)) {
@@ -204,7 +208,8 @@ export const createMaritimeEntity = async (payload, actorUserId, database = pool
     const slug = await uniqueSlug(client, normalized.company.company_name);
     const columns = Object.keys(normalized.company);
     const values = Object.values(normalized.company);
-    const inserted = await client.query(`INSERT INTO ${T.entities} (${columns.join(",")},slug,data_source,review_status,created_by_user_id,updated_by_user_id) VALUES (${columns.map((_, index) => `$${index + 1}`).join(",")},$${values.length + 1},'manual_admin','approved',$${values.length + 2},$${values.length + 2}) RETURNING id`, [...values, slug, actorUserId]);
+    const inserted = await client.query(`INSERT INTO ${T.entities} (${columns.join(",")},slug,public_id,data_source,review_status,created_by_user_id,updated_by_user_id) VALUES (${columns.map((_, index) => `$${index + 1}`).join(",")},$${values.length + 1},'COM-'||upper(replace(gen_random_uuid()::text,'-','')),'manual_admin','approved',$${values.length + 2},$${values.length + 2}) RETURNING id,public_id`, [...values, slug, actorUserId]);
+    if (!inserted.rows[0]?.public_id) throw new Error("Directory public ID was not assigned.");
     const entityId = inserted.rows[0].id;
     await replaceTypes(client, entityId, normalized.directoryTypes);
     await writeCollections(client, entityId, payload);

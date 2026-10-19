@@ -67,8 +67,8 @@ export async function resolveRequestVessel(db, body, clientUserId) {
     const type = imported?.vessel_type || clean(body.vesselType) || "Not provided";
     const flag = imported?.flag || clean(body.flagState) || "Not provided";
     const inserted = await db.query(`INSERT INTO vessels
-      (vessel_name,imo_number,vessel_type,flag_state,created_by_user_id)
-      VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING RETURNING *`, [name, imo, type, flag, clientUserId]);
+      (vessel_name,imo_number,vessel_type,flag_state,created_by_user_id,public_id)
+      VALUES($1,$2,$3,$4,$5,'MVS-'||upper(replace(gen_random_uuid()::text,'-',''))) ON CONFLICT DO NOTHING RETURNING *`, [name, imo, type, flag, clientUserId]);
     createdHere = Boolean(inserted.rows[0]);
     vessel = inserted.rows[0] || (imo ? await existingByImo(db, imo) : null);
     if (!vessel) throw Object.assign(new Error("A conflicting inactive vessel record requires Admin review."), { status: 409 });

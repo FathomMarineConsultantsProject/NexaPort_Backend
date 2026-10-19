@@ -82,7 +82,7 @@ export const approveClientRegistration = async (req, res) => {
       const vesselType = onboarding.vessel_type_name || onboarding.vessel_type_text;
       if (!vesselType) continue;
       const created = await client.query(
-        `INSERT INTO vessels (vessel_name, imo_number, vessel_type, flag_state, trading_area, owner_manager, created_by_user_id) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+        `INSERT INTO vessels (vessel_name, imo_number, vessel_type, flag_state, trading_area, owner_manager, created_by_user_id, public_id) VALUES ($1,$2,$3,$4,$5,$6,$7,'MVS-'||upper(replace(gen_random_uuid()::text,'-',''))) RETURNING id`,
         [onboarding.vessel_name, onboarding.imo_number, vesselType, "Not provided during onboarding", onboarding.operating_regions, onboarding.ownership_relationship, registration.profile.user_id]
       );
       await client.query(`UPDATE client_onboarding_vessels SET converted_vessel_id=$1 WHERE id=$2`, [created.rows[0].id, onboarding.id]);
