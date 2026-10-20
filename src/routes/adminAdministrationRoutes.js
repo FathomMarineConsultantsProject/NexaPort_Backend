@@ -1,5 +1,6 @@
 import express from "express";
 import { requireAuth, allowRoles } from "../middlewares/authMiddleware.js";
+import { createAccountAsAdmin } from "../controllers/adminAccountProvisioningController.js";
 import {
   getConsultantDeletionImpact,
   updateConsultantAsAdmin,
@@ -18,6 +19,8 @@ import {
 
 const router = express.Router();
 router.use(requireAuth, allowRoles(1));
+
+router.post("/accounts", createAccountAsAdmin);
 
 router.get("/consultants/:expertId/deletion-impact", getConsultantDeletionImpact);
 router.patch("/consultants/:expertId", updateConsultantAsAdmin);
