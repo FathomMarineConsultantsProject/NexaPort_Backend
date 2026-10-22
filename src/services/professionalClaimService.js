@@ -166,14 +166,17 @@ export async function adminProfessionalDetail(id, db = pool) {
 }
 export async function adminProfessionalTargetStatus(type,id,db=pool) {
   const profile=await getProfessional(type,id,db);
-  const [members,history]=await Promise.all([
+  const [members,history,counts]=await Promise.all([
     db.query(`SELECT m.user_id,m.status,m.approved_at,m.approved_by_user_id,m.revoked_at,u.full_name,u.email
       FROM professional_memberships m JOIN users u ON u.id=m.user_id
       WHERE m.source_type=$1 AND m.source_id=$2 ORDER BY m.approved_at DESC`,[type,profile.source_id]),
     db.query(`SELECT id,claimant_user_id,status,reviewer_user_id,created_at,reviewed_at
       FROM professional_claims WHERE source_type=$1 AND source_id=$2 ORDER BY created_at DESC LIMIT 100`,[type,profile.source_id]),
+    db.query(`SELECT count(*) FILTER (WHERE status='pending')::int AS pending,
+      count(*) FILTER (WHERE status='disputed')::int AS disputed
+      FROM professional_claims WHERE source_type=$1 AND source_id=$2`,[type,profile.source_id]),
   ]);
-  return {profile,members:members.rows,history:history.rows};
+  return {profile,members:members.rows,history:history.rows,counts:counts.rows[0]};
 }
 export async function professionalEvidenceUrl(id, db = pool) {
   if (!UUID.test(id)) fail(400,"INVALID_ID","Invalid claim ID.");

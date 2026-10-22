@@ -12,14 +12,18 @@ const hash=token=>createHash("sha256").update(token).digest("hex");
 const targetInfo=async(type,id,db)=>{
   if(type==="company") {
     const company=await getPublicCompany(id,db);
-    return {type:"company",id:company.id,publicId:company.public_id,name:company.company_name,path:`/companies/${company.id}/claim`};
+    return {type:"company",id:company.id,publicId:company.nexaport_company_id,legacyPublicId:company.public_id,name:company.company_name,path:`/companies/${company.id}/claim`};
   }
   const profile=await getProfessional(type,id,db);
   return {type,id:profile.source_id,publicId:profile.public_id,name:profile.name,path:`/professionals/${type}/${profile.source_id}/claim`};
 };
 
 export async function issueClaimInvitation(reviewer,input={},db=pool,send=sendClaimInvitationEmail,env=process.env) {
-  if(env.CLAIM_INVITATIONS_ENABLED!=="true") fail(503,"INVITATIONS_DISABLED","Invitation delivery is not enabled until SMTP is verified.");
+  const mode=input.mode === "link" ? "link" : input.mode === undefined || input.mode === "email" ? "email" : null;
+  if(!mode) fail(400,"INVALID_MODE","Select email or manual link.");
+  if(mode==="email" && env.CLAIM_INVITATIONS_ENABLED!=="true") fail(503,"INVITATIONS_DISABLED","Invitation delivery is not enabled until SMTP is verified.");
+  if(mode==="email" && (!env.SMTP_HOST || !env.SMTP_USER || !env.SMTP_PASSWORD || !(env.SMTP_FROM_EMAIL || env.SMTP_USER)))
+    fail(503,"SMTP_UNAVAILABLE","Invitation email transport is not configured.");
   const email=clean(input.email).toLowerCase();
   if(!/^\S+@\S+\.\S+$/.test(email) || email.length>320) fail(400,"INVALID_EMAIL","Enter a valid recipient email.");
   let origin;
@@ -32,9 +36,20 @@ export async function issueClaimInvitation(reviewer,input={},db=pool,send=sendCl
   }
   const token=randomBytes(32).toString("hex");
   const link=new URL(`/claim-invitations/${token}`,origin).toString();
-  const row=(await db.query(`INSERT INTO profile_claim_invitations(target_type,target_id,recipient_email,token_hash,
-    issued_by_user_id,expires_at) VALUES($1,$2,$3,$4,$5,now()+interval '48 hours') RETURNING id,expires_at`,
-    [target.type,target.id,email,hash(token),reviewer.id])).rows[0];
+  await db.query(`UPDATE profile_claim_invitations SET status='revoked',revoked_at=now()
+    WHERE target_type=$1 AND target_id=$2 AND recipient_email=$3 AND status IN ('created','ready','sent') AND expires_at<=now()`,
+    [target.type,target.id,email]);
+  let row;
+  try {row=(await db.query(`INSERT INTO profile_claim_invitations(target_type,target_id,recipient_email,token_hash,
+    issued_by_user_id,expires_at,status) VALUES($1,$2,$3,$4,$5,now()+interval '48 hours',$6) RETURNING id,expires_at`,
+    [target.type,target.id,email,hash(token),reviewer.id,mode==="link"?"ready":"created"])).rows[0];}
+  catch(error){if(error.code==="23505") fail(409,"INVITATION_EXISTS","An active invitation already exists for this recipient and profile. Revoke it before issuing another.");throw error;}
+  if(mode==="link") {
+    try {await writeAdminAudit(db,{actorUserId:reviewer.id,action:"profile_claim_invitation_link_created",targetType:"profile_claim_invitation",
+      targetId:row.id,summary:`Manual invitation created for ${target.type}:${target.id}`});}
+    catch(error){await db.query("UPDATE profile_claim_invitations SET status='revoked',revoked_at=now() WHERE id=$1 AND status='ready'",[row.id]);throw error;}
+    return {id:row.id,targetType:target.type,targetId:target.id,expiresAt:row.expires_at,status:"ready",url:link};
+  }
   try {
     await send({email,claimUrl:link,targetName:target.name});
     await db.query(`UPDATE profile_claim_invitations SET status='sent',sent_at=now() WHERE id=$1 AND status='created'`,[row.id]);
@@ -47,10 +62,33 @@ export async function issueClaimInvitation(reviewer,input={},db=pool,send=sendCl
   return {id:row.id,targetType:target.type,targetId:target.id,expiresAt:row.expires_at,status:"sent"};
 }
 
+export async function revokeClaimInvitation(id,reviewer,db=pool) {
+  if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(id))) fail(400,"INVALID_ID","Invalid invitation ID.");
+  const client=await db.connect();
+  try {
+    await client.query("BEGIN");
+    const row=(await client.query(`UPDATE profile_claim_invitations SET status='revoked',revoked_at=now()
+      WHERE id=$1 AND status IN ('created','ready','sent') RETURNING target_type,target_id`,[id])).rows[0];
+    if(!row) fail(404,"INVITATION_UNAVAILABLE","Active invitation not found.");
+    await writeAdminAudit(client,{actorUserId:reviewer.id,action:"profile_claim_invitation_revoked",targetType:"profile_claim_invitation",
+      targetId:id,summary:`Invitation revoked for ${row.target_type}:${row.target_id}`});
+    await client.query("COMMIT");return {id,status:"revoked"};
+  }catch(error){await client.query("ROLLBACK");throw error;}finally{client.release();}
+}
+
+export async function listClaimInvitations(input={},db=pool) {
+  const target=await targetInfo(input.targetType,clean(input.targetId),db);
+  return (await db.query(`SELECT id,recipient_email,
+    CASE WHEN status IN ('ready','sent') AND expires_at<=now() THEN 'expired' ELSE status END AS status,
+    expires_at,created_at,sent_at,redeemed_at,revoked_at
+    FROM profile_claim_invitations WHERE target_type=$1 AND target_id=$2
+    ORDER BY created_at DESC LIMIT 25`,[target.type,target.id])).rows;
+}
+
 export async function previewClaimInvitation(token,db=pool) {
   if(!TOKEN.test(String(token))) fail(404,"INVITATION_UNAVAILABLE","Invitation is unavailable.");
   const row=(await db.query(`SELECT target_type,target_id FROM profile_claim_invitations
-    WHERE token_hash=$1 AND status='sent' AND expires_at>now()`,[hash(token)])).rows[0];
+    WHERE token_hash=$1 AND status IN ('ready','sent') AND expires_at>now()`,[hash(token)])).rows[0];
   if(!row) fail(404,"INVITATION_UNAVAILABLE","Invitation is unavailable or expired.");
   return targetInfo(row.target_type,row.target_id,db);
 }
@@ -61,7 +99,7 @@ export async function redeemClaimInvitation(token,user,db=pool) {
   try {
     await client.query("BEGIN");
     const row=(await client.query(`SELECT * FROM profile_claim_invitations WHERE token_hash=$1 FOR UPDATE`,[hash(token)])).rows[0];
-    if(!row || row.status!=="sent" || new Date(row.expires_at).getTime()<=Date.now()) fail(404,"INVITATION_UNAVAILABLE","Invitation is unavailable or expired.");
+    if(!row || !["ready","sent"].includes(row.status) || new Date(row.expires_at).getTime()<=Date.now()) fail(404,"INVITATION_UNAVAILABLE","Invitation is unavailable or expired.");
     if(clean(user.email).toLowerCase()!==row.recipient_email.toLowerCase()) fail(403,"INVITATION_RECIPIENT_MISMATCH","Sign in with the email address invited by NexaPort.");
     const target=await targetInfo(row.target_type,row.target_id,client);
     await client.query(`UPDATE profile_claim_invitations SET status='redeemed',redeemed_by_user_id=$1,

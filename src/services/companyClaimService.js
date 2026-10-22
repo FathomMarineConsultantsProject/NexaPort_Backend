@@ -6,6 +6,7 @@ import { inspectPrivateObject } from "./privateObjectService.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const COM = /^COM-[0-9A-F]{32}$/;
+const NXP = /^NXP-[0-9]{7,}$/;
 const MIME = { "application/pdf": "pdf", "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" };
 const clean = (value) => String(value ?? "").trim();
 const fail = (status, code, message) => { throw Object.assign(new Error(message), { status, code }); };
@@ -17,19 +18,20 @@ export async function searchCompanies(query = {}, db = pool) {
   if (term.length < 2 || term.length > 120) fail(400, "INVALID_SEARCH", "Enter 2 to 120 search characters.");
   const page = bounded(query.page, 1, 100000);
   const limit = bounded(query.limit, 12, 30);
-  const result = await db.query(`SELECT e.id,e.public_id,e.company_name,e.city,e.country,
+  const result = await db.query(`SELECT e.id,e.public_id,e.nexaport_company_id,e.company_name,e.city,e.country,
     ARRAY(SELECT t.directory_type FROM maritime_directory_entity_types t WHERE t.entity_id=e.id ORDER BY t.directory_type) AS directory_types
     FROM maritime_directory_entities e WHERE e.is_active=true AND e.review_status='approved'
-      AND (e.public_id=upper($1) OR e.company_name ILIKE '%'||$1||'%' OR e.city ILIKE $1||'%' OR e.country ILIKE $1||'%')
-    ORDER BY CASE WHEN e.public_id=upper($1) THEN 0 WHEN lower(e.company_name)=lower($1) THEN 1 ELSE 2 END,e.company_name,e.id
+      AND (e.public_id=upper($1) OR e.nexaport_company_id=upper($1) OR e.company_name ILIKE '%'||$1||'%' OR e.city ILIKE $1||'%' OR e.country ILIKE $1||'%')
+    ORDER BY CASE WHEN e.nexaport_company_id=upper($1) OR e.public_id=upper($1) THEN 0 WHEN lower(e.company_name)=lower($1) THEN 1 ELSE 2 END,e.company_name,e.id
     LIMIT $2 OFFSET $3`, [term, limit, (page - 1) * limit]);
   return { data: result.rows, page, limit, hasMore: result.rows.length === limit };
 }
 
 export async function getPublicCompany(id, db = pool) {
-  const byCom = COM.test(String(id));
-  if (!byCom) validId(id);
-  const result = await db.query(`SELECT e.id,e.public_id,e.company_name,e.description,e.city,e.country,e.website,
+  const byCom = COM.test(String(id).toUpperCase());
+  const byNxp = NXP.test(String(id).toUpperCase());
+  if (!byCom && !byNxp) validId(id);
+  const result = await db.query(`SELECT e.id,e.public_id,e.nexaport_company_id,e.company_name,e.description,e.city,e.country,e.website,
     EXISTS(SELECT 1 FROM maritime_company_memberships m WHERE m.entity_id=e.id AND m.status='approved') AS has_existing_association,
     CASE WHEN EXISTS(SELECT 1 FROM maritime_company_memberships m WHERE m.entity_id=e.id AND m.status='approved' AND m.verification_origin='reviewed_claim') THEN 'verified'
       WHEN EXISTS(SELECT 1 FROM maritime_company_memberships m WHERE m.entity_id=e.id AND m.status='approved') THEN 'legacy_association'
@@ -37,7 +39,7 @@ export async function getPublicCompany(id, db = pool) {
       WHEN EXISTS(SELECT 1 FROM maritime_company_claims c WHERE c.entity_id=e.id AND c.status='disputed') THEN 'disputed'
       ELSE 'unclaimed' END AS account_claim_state,
     ARRAY(SELECT t.directory_type FROM maritime_directory_entity_types t WHERE t.entity_id=e.id ORDER BY t.directory_type) AS directory_types
-    FROM maritime_directory_entities e WHERE ${byCom ? "e.public_id" : "e.id"}=$1 AND e.is_active=true AND e.review_status='approved'`, [id]);
+    FROM maritime_directory_entities e WHERE ${byCom ? "e.public_id" : byNxp ? "e.nexaport_company_id" : "e.id"}=$1 AND e.is_active=true AND e.review_status='approved'`, [byCom||byNxp?String(id).toUpperCase():id]);
   if (!result.rows.length) fail(404, "COMPANY_NOT_FOUND", "Company not found.");
   return result.rows[0];
 }
@@ -48,7 +50,7 @@ export async function companyAccess(userId, entityId, db = pool) {
 }
 
 export async function listManagedCompanies(userId, db = pool) {
-  const result = await db.query(`SELECT e.id,e.public_id,e.company_name,e.review_status,m.membership_role
+  const result = await db.query(`SELECT e.id,e.public_id,e.nexaport_company_id,e.company_name,e.review_status,m.membership_role
     FROM maritime_company_memberships m JOIN maritime_directory_entities e ON e.id=m.entity_id
     WHERE m.user_id=$1 AND m.status='approved' ORDER BY e.company_name,e.id`, [userId]);
   return result.rows;
@@ -56,12 +58,12 @@ export async function listManagedCompanies(userId, db = pool) {
 
 export async function ownClaims(userId, db = pool) {
   const result = await db.query(`SELECT * FROM (
-    SELECT c.id,c.entity_id,e.public_id,e.company_name,c.status,c.applicant_designation,
+    SELECT c.id,c.entity_id,e.public_id,e.nexaport_company_id,e.company_name,c.status,c.applicant_designation,
       c.created_at,c.reviewed_at,CASE WHEN c.status='rejected' THEN c.public_reason END AS decision_note
       FROM maritime_company_claims c JOIN maritime_directory_entities e ON e.id=c.entity_id
       WHERE c.claimant_user_id=$1
     UNION ALL
-    SELECT NULL::uuid,i.entity_id,e.public_id,e.company_name,'not_submitted'::text,NULL::text,
+    SELECT NULL::uuid,i.entity_id,e.public_id,e.nexaport_company_id,e.company_name,'not_submitted'::text,NULL::text,
       i.created_at,NULL::timestamptz,NULL::text
       FROM maritime_company_claim_account_intents i JOIN maritime_directory_entities e ON e.id=i.entity_id
       WHERE i.user_id=$1 AND NOT EXISTS(SELECT 1 FROM maritime_company_claims c
@@ -123,7 +125,7 @@ export async function adminClaims(query = {}, db = pool) {
   const page = bounded(query.page, 1, 100000);
   const limit = bounded(query.limit, 20, 50);
   const result = await db.query(`SELECT c.id,c.entity_id,c.claimant_user_id,c.applicant_designation,c.status,c.created_at,c.reviewed_at,
-    c.evidence_s3_key IS NOT NULL AS has_evidence,e.company_name,e.public_id,u.full_name AS claimant_name,u.email AS account_email,
+    c.evidence_s3_key IS NOT NULL AS has_evidence,e.company_name,e.public_id,e.nexaport_company_id,u.full_name AS claimant_name,u.email AS account_email,
     ARRAY(SELECT t.directory_type FROM maritime_directory_entity_types t WHERE t.entity_id=e.id ORDER BY t.directory_type) AS directory_types,
     EXISTS(SELECT 1 FROM maritime_company_memberships m WHERE m.entity_id=e.id AND m.status='approved') AS has_existing_association
     FROM maritime_company_claims c JOIN maritime_directory_entities e ON e.id=c.entity_id JOIN users u ON u.id=c.claimant_user_id
@@ -133,7 +135,7 @@ export async function adminClaims(query = {}, db = pool) {
 
 export async function adminClaimDetail(id, db = pool) {
   validId(id);
-  const result = await db.query(`SELECT c.*,e.company_name,e.public_id,e.description,e.country,e.city,e.data_source,
+  const result = await db.query(`SELECT c.*,e.company_name,e.public_id,e.nexaport_company_id,e.description,e.country,e.city,e.data_source,
     u.full_name AS claimant_account_name,u.email AS claimant_account_email
     FROM maritime_company_claims c JOIN maritime_directory_entities e ON e.id=c.entity_id
     JOIN users u ON u.id=c.claimant_user_id WHERE c.id=$1`, [id]);
@@ -150,16 +152,19 @@ export async function adminClaimDetail(id, db = pool) {
 
 export async function adminCompanyTargetStatus(entityId, db=pool) {
   validId(entityId);
-  const company=(await db.query("SELECT id,public_id,company_name,claimed_status,review_status FROM maritime_directory_entities WHERE id=$1",[entityId])).rows[0];
+  const company=(await db.query("SELECT id,public_id,nexaport_company_id,company_name,claimed_status,review_status FROM maritime_directory_entities WHERE id=$1",[entityId])).rows[0];
   if(!company) fail(404,"COMPANY_NOT_FOUND","Company not found.");
-  const [members,history]=await Promise.all([
+  const [members,history,counts]=await Promise.all([
     db.query(`SELECT m.user_id,m.membership_role,m.status,m.verification_origin,m.approved_at,m.approved_by_user_id,
       m.revoked_at,u.full_name,u.email FROM maritime_company_memberships m JOIN users u ON u.id=m.user_id
       WHERE m.entity_id=$1 ORDER BY m.approved_at DESC`,[entityId]),
     db.query(`SELECT id,claimant_user_id,status,reviewer_user_id,created_at,reviewed_at
       FROM maritime_company_claims WHERE entity_id=$1 ORDER BY created_at DESC LIMIT 100`,[entityId]),
+    db.query(`SELECT count(*) FILTER (WHERE status='pending')::int AS pending,
+      count(*) FILTER (WHERE status='disputed')::int AS disputed
+      FROM maritime_company_claims WHERE entity_id=$1`,[entityId]),
   ]);
-  return {company,members:members.rows,history:history.rows};
+  return {company,members:members.rows,history:history.rows,counts:counts.rows[0]};
 }
 
 export async function claimEvidenceUrl(id, db = pool) {

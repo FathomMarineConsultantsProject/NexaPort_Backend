@@ -6,4 +6,6 @@ publicClaimInvitationRoutes.get("/:token",controller.preview);
 export const claimInvitationRoutes=express.Router();
 claimInvitationRoutes.post("/:token/redeem",requireAuth,controller.redeem);
 export const adminClaimInvitationRoutes=express.Router();
+adminClaimInvitationRoutes.get("/",requireAuth,allowRoles(1),controller.list);
 adminClaimInvitationRoutes.post("/",requireAuth,allowRoles(1),controller.issue);
+adminClaimInvitationRoutes.post("/:id/revoke",requireAuth,allowRoles(1),controller.revoke);

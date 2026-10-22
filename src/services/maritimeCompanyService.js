@@ -75,7 +75,7 @@ export const registerMaritimeCompany = async (payload, database = pool) => {
       if (!selected.rows.length) throw Object.assign(new Error("Selected company is unavailable."), { status: 404, code: "COMPANY_NOT_FOUND" });
     } else {
       const name = normalized.company.company_name;
-      const candidates = await client.query(`SELECT id,public_id,company_name,city,country,review_status,
+      const candidates = await client.query(`SELECT id,public_id,nexaport_company_id,company_name,city,country,review_status,
         lower(btrim(company_name))=lower(btrim($1)) AS exact_match FROM maritime_directory_entities
         WHERE is_active=true AND (lower(btrim(company_name))=lower(btrim($1)) OR similarity(company_name,$1) >= 0.55)
         ORDER BY exact_match DESC,similarity(company_name,$1) DESC,company_name LIMIT 5`, [name]);

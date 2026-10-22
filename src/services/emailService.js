@@ -79,10 +79,12 @@ NexaPort Team
 };
 
 export const sendClaimInvitationEmail = async ({ email, claimUrl, targetName }) => {
-  await transporter.sendMail({
+  const result = await transporter.sendMail({
     from: { name: process.env.SMTP_FROM_NAME || "NexaPort", address: process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER },
     to: email,
     subject: "NexaPort profile claim invitation",
     text: `You have been invited to request access to ${targetName} on NexaPort. Open this one-time link within 48 hours: ${claimUrl}\n\nYou will choose your own password if you need an account. Invitation redemption does not grant profile access; Super Admin must review your claim. If you did not expect this invitation, ignore it.`,
   });
+  if (!result.accepted?.some(address => address.toLowerCase() === email.toLowerCase()))
+    throw new Error("Invitation was not accepted by the SMTP transport.");
 };

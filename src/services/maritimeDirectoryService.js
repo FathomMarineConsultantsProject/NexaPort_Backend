@@ -134,8 +134,9 @@ const uniqueCollectionRows = (rows) => {
 };
 
 export const getMaritimeEntity = async (entityId, queryable = pool) => {
-  if (!UUID.test(String(entityId)) && !/^COM-[0-9A-F]{32}$/.test(String(entityId))) throw notFound();
-  const entity = await queryable.query(`SELECT * FROM ${T.entities} WHERE ${UUID.test(String(entityId)) ? "id" : "public_id"}=$1`, [entityId]);
+  if (!UUID.test(String(entityId)) && !/^COM-[0-9A-F]{32}$/i.test(String(entityId)) && !/^NXP-[0-9]{7,}$/i.test(String(entityId))) throw notFound();
+  const lookupColumn = UUID.test(String(entityId)) ? "id" : String(entityId).toUpperCase().startsWith("NXP-") ? "nexaport_company_id" : "public_id";
+  const entity = await queryable.query(`SELECT * FROM ${T.entities} WHERE ${lookupColumn}=$1`, [lookupColumn==="id"?entityId:String(entityId).toUpperCase()]);
   if (!entity.rows.length) throw notFound();
   const canonicalId = entity.rows[0].id;
   const types = await queryable.query(`SELECT directory_type FROM ${T.entityTypes} WHERE entity_id=$1 ORDER BY directory_type`, [canonicalId]);
@@ -169,7 +170,7 @@ export const listMaritimeEntities = async (query, queryable = pool) => {
   const conditions = [`EXISTS (SELECT 1 FROM public.maritime_directory_entity_types mt WHERE mt.entity_id=e.id AND ${typeSql})`];
   const values = [companyType === "all" ? ["owner", "manager"] : companyType === "both" ? "owner" : companyType];
   const add = (sql, value) => { values.push(value); conditions.push(sql.replaceAll("?", `$${values.length}`)); };
-  if (clean(query.search)) add(`(e.company_name ILIKE '%' || ? || '%' OR e.public_id = ? OR e.description ILIKE '%' || ? || '%' OR EXISTS (SELECT 1 FROM public.maritime_directory_services s WHERE s.entity_id=e.id AND s.service_name ILIKE '%' || ? || '%') OR EXISTS (SELECT 1 FROM public.maritime_directory_ports p WHERE p.entity_id=e.id AND p.port_name ILIKE '%' || ? || '%') OR EXISTS (SELECT 1 FROM public.maritime_directory_products p WHERE p.entity_id=e.id AND p.product_name ILIKE '%' || ? || '%'))`, clean(query.search));
+  if (clean(query.search)) add(`(e.company_name ILIKE '%' || ? || '%' OR e.public_id = upper(?) OR e.nexaport_company_id = upper(?) OR e.description ILIKE '%' || ? || '%' OR EXISTS (SELECT 1 FROM public.maritime_directory_services s WHERE s.entity_id=e.id AND s.service_name ILIKE '%' || ? || '%') OR EXISTS (SELECT 1 FROM public.maritime_directory_ports p WHERE p.entity_id=e.id AND p.port_name ILIKE '%' || ? || '%') OR EXISTS (SELECT 1 FROM public.maritime_directory_products p WHERE p.entity_id=e.id AND p.product_name ILIKE '%' || ? || '%'))`, clean(query.search));
   if (clean(query.country)) add("LOWER(e.country)=LOWER(?)", clean(query.country));
   if (clean(query.membershipTier)) {
     if (query.type !== "supplier" || query.membershipTier !== "impa-premium") throw validationError({ membershipTier: "Unsupported membership tier." });
@@ -197,7 +198,7 @@ export const listMaritimeEntities = async (query, queryable = pool) => {
   values.push(limit, (page - 1) * limit);
   const sort = query.sort === "name-desc" ? "DESC" : "ASC";
   if (query.sort && !["name-asc", "name-desc"].includes(query.sort)) throw validationError({ sort: "Unsupported sort order." });
-  const data = await queryable.query(`SELECT e.id,e.public_id,e.company_name,e.slug,e.logo_url,e.logo_s3_key,e.country,e.city,e.public_email,e.public_phone,e.website,e.extra_data,
+  const data = await queryable.query(`SELECT e.id,e.public_id,e.nexaport_company_id,e.company_name,e.slug,e.logo_url,e.logo_s3_key,e.country,e.city,e.public_email,e.public_phone,e.website,e.extra_data,
     CASE WHEN length(coalesce(e.description,''))>180 THEN left(e.description,177)||'...' ELSE e.description END AS description_excerpt,
     ARRAY(SELECT mt.directory_type FROM ${T.entityTypes} mt WHERE mt.entity_id=e.id ORDER BY mt.directory_type) AS directory_types,
     e.review_status,e.is_active,e.data_source,e.created_at,e.updated_at,
