@@ -220,14 +220,25 @@ export const createMaritimeEntity = async (payload, actorUserId, database = pool
   finally { client.release(); }
 };
 
-export const updateMaritimeEntity = async (entityId, payload, actorUserId) => {
+export const updateMaritimeEntity = async (entityId, payload, actorUserId, { provider = false } = {}) => {
   if (!UUID.test(String(entityId))) throw notFound();
   const normalized = validateMaritimePayload(payload, { partial: true });
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const locked = await client.query(`SELECT id,company_name FROM ${T.entities} WHERE id=$1 FOR UPDATE`, [entityId]);
+    const locked = await client.query(`SELECT id,company_name,data_source FROM ${T.entities} WHERE id=$1 FOR UPDATE`, [entityId]);
     if (!locked.rows.length) throw notFound();
+    if (provider) {
+      if (Object.hasOwn(normalized.company, "claimed_status")) throw Object.assign(new Error("Ownership status cannot be edited from a company profile."), { status: 403, code: "OWNERSHIP_STATUS_PROTECTED" });
+      const source = await client.query("SELECT EXISTS(SELECT 1 FROM directory_entity_sources WHERE entity_id=$1) AS has_imported_sources", [entityId]);
+      if (locked.rows[0].data_source !== "self_registered" || source.rows[0]?.has_imported_sources) {
+        const allowed = new Set(["description", "website", "public_email", "public_phone", "public_address"]);
+        if (Object.keys(normalized.company).some(column => !allowed.has(column)) || normalized.directoryTypes ||
+          Object.keys(COLLECTIONS).some(name => payload[name] !== undefined)) {
+          throw Object.assign(new Error("Imported company classifications and source records require Super Admin review."), { status: 403, code: "IMPORTED_DATA_PROTECTED" });
+        }
+      }
+    }
     const changed = [];
     if (Object.keys(normalized.company).length) {
       const entries = Object.entries(normalized.company);

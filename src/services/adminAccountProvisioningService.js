@@ -106,6 +106,7 @@ export const provisionAdminAccount = async ({ actor, body, database = pool }) =>
       profileId = await insert("maritime_directory_entities", { company_name: input.companyName, slug, data_source: "self_registered", review_status: "pending", is_active: true, created_by_user_id: userId, updated_by_user_id: userId });
       await replaceTypes(db, profileId, [input.companyType]);
       await db.query("INSERT INTO maritime_company_accounts(user_id,entity_id,primary_type) VALUES($1,$2,$3)", [userId, profileId, input.companyType]);
+      await db.query("INSERT INTO maritime_company_memberships(entity_id,user_id,membership_role,status) VALUES($1,$2,'owner','approved')", [profileId,userId]);
     }
     await writeAdminAudit(db, { actorUserId: actor.id, action: "account.admin_provisioned", targetType: "user", targetId: userId,
       summary: `Created active ${ROLE_NAMES[input.roleId]} account; role/profile linked.`, reason: "Explicit Super Admin provisioning; no email delivery or credential verification claim." });

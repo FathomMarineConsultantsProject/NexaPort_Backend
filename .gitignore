@@ -9,3 +9,4 @@ sql
 .env*
 scripts
 migrations
+docs

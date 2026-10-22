@@ -12,6 +12,7 @@ const sendError = (res, error) => res.status(error.status || 500).json({
   code: error.code || "MARITIME_COMPANY_REQUEST_FAILED",
   message: error.status ? error.message : "The company request could not be completed.",
   ...(error.fieldErrors ? { field_errors: error.fieldErrors } : {}),
+  ...(error.candidates ? { candidates: error.candidates } : {}),
 });
 
 export const registerCompany = async (req, res) => {
@@ -22,6 +23,7 @@ export const registerCompany = async (req, res) => {
       message: "Company account submitted for review.",
       token: createToken(result.user),
       user: result.user,
+      ...(result.claimTarget ? { claimTarget: result.claimTarget } : {}),
     });
   } catch (error) {
     return sendError(res, error);
@@ -29,21 +31,21 @@ export const registerCompany = async (req, res) => {
 };
 
 export const getCompanyProfile = async (req, res) => {
-  try { return res.json({ success: true, data: await getOwnedMaritimeCompany(req.user.id) }); }
+  try { return res.json({ success: true, data: await getOwnedMaritimeCompany(req.user.id, req.params.entityId) }); }
   catch (error) { return sendError(res, error); }
 };
 
 export const updateCompanyProfile = async (req, res) => {
-  try { return res.json({ success: true, data: await updateOwnedMaritimeCompany(req.user.id, req.body) }); }
+  try { return res.json({ success: true, data: await updateOwnedMaritimeCompany(req.user.id, req.body, req.params.entityId) }); }
   catch (error) { return sendError(res, error); }
 };
 
 export const presignCompanyLogo = async (req, res) => {
-  try { return res.json({ success: true, data: await createCompanyLogoUpload(req.user.id, req.body) }); }
+  try { return res.json({ success: true, data: await createCompanyLogoUpload(req.user.id, req.body, req.params.entityId) }); }
   catch (error) { return sendError(res, error); }
 };
 
 export const confirmCompanyLogo = async (req, res) => {
-  try { return res.json({ success: true, data: await confirmCompanyLogoUpload(req.user.id, req.body) }); }
+  try { return res.json({ success: true, data: await confirmCompanyLogoUpload(req.user.id, req.body, req.params.entityId) }); }
   catch (error) { return sendError(res, error); }
 };

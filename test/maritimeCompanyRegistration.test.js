@@ -23,6 +23,14 @@ test("company profile routes require authentication and role 4", async () => {
   assert.match(routes, /router\.patch\("\/profile"/);
 });
 
+test("new-company registration serializes same-name creation and checks canonical candidates", async () => {
+  const service = await source("../src/services/maritimeCompanyService.js");
+  assert.match(service, /pg_advisory_xact_lock/);
+  assert.match(service, /similarity\(company_name,\$1\)/);
+  assert.match(service, /hiddenExact/);
+  assert.match(service, /existingEntityId/);
+});
+
 test("standalone migrations preserve account linkage and allow multiple directory types", async () => {
   const sql = await source("../sql/maritime_company_accounts_001.sql");
   assert.match(sql, /BEGIN;/);

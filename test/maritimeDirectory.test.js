@@ -184,7 +184,8 @@ test("controller exposes stable error fields rather than database implementation
 test("normal updates cannot overwrite imported provenance", async () => {
   const service = await source("src/services/maritimeDirectoryService.js");
   const updateBlock = service.slice(service.indexOf("export const updateMaritimeEntity"), service.indexOf("export const setMaritimeEntityState"));
-  assert.doesNotMatch(updateBlock, /source_key|source_provider_id|source_url|scraped_at|content_checksum|data_source|created_by_user_id/);
+  assert.doesNotMatch(updateBlock, /(?:SET|,)\s*(?:source_key|source_provider_id|source_url|scraped_at|content_checksum|data_source|created_by_user_id)\s*=/i);
+  assert.match(updateBlock, /IMPORTED_DATA_PROTECTED/);
 });
 
 test("migrations preserve staging, normalize children, and map every supported evidence type", async () => {

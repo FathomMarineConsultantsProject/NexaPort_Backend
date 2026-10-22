@@ -474,9 +474,9 @@ export const getProviderDashboard = async (req, res) => {
 
     /* Resolve the company account and entity owned by this user */
     const accountResult = await pool.query(
-      `SELECT mca.entity_id, mca.primary_type
-       FROM public.maritime_company_accounts mca
-       WHERE mca.user_id = $1`,
+      `SELECT m.entity_id,(SELECT directory_type FROM maritime_directory_entity_types WHERE entity_id=m.entity_id ORDER BY directory_type LIMIT 1) AS primary_type
+       FROM public.maritime_company_memberships m
+       WHERE m.user_id=$1 AND m.status='approved' ORDER BY m.approved_at,m.entity_id LIMIT 1`,
       [userId]
     );
     const account = accountResult.rows[0];

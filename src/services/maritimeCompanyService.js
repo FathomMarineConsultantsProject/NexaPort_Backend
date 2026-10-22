@@ -11,6 +11,7 @@ import {
   writeCollections,
 } from "./maritimeDirectoryService.js";
 import { createPresignedPutUrl } from "../utils/s3Presign.js";
+import { companyAccess } from "./companyClaimService.js";
 
 const T = MARITIME_DIRECTORY_TABLES;
 const COMPANY_TYPES = new Set(["service_provider", "ship_agent", "supplier"]);
@@ -58,13 +59,31 @@ const validateCompanyTypes = (types) => {
 
 export const registerMaritimeCompany = async (payload, database = pool) => {
   const account = validateAccount(payload?.account);
-  const normalized = validateMaritimePayload(payload);
-  const directoryTypes = validateCompanyTypes(normalized.directoryTypes);
+  const existingEntityId = payload?.existingEntityId;
+  const normalized = existingEntityId ? null : validateMaritimePayload(payload);
+  const directoryTypes = existingEntityId ? null : validateCompanyTypes(normalized.directoryTypes);
   const client = await database.connect();
   try {
     await client.query("BEGIN");
+    if (!existingEntityId) await client.query("SELECT pg_advisory_xact_lock(hashtext(lower(btrim($1))))", [normalized.company.company_name]);
     const duplicate = await client.query("SELECT 1 FROM users WHERE LOWER(email)=$1 OR username=$2", [account.email, account.username]);
     if (duplicate.rows.length) throw Object.assign(new Error("Email or username already exists."), { status: 409, code: "MARITIME_COMPANY_ACCOUNT_EXISTS" });
+
+    if (existingEntityId) {
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(existingEntityId))) throw Object.assign(new Error("Choose a valid existing company."), { status: 400, code: "INVALID_COMPANY" });
+      const selected = await client.query("SELECT id FROM maritime_directory_entities WHERE id=$1 AND is_active=true AND review_status='approved'", [existingEntityId]);
+      if (!selected.rows.length) throw Object.assign(new Error("Selected company is unavailable."), { status: 404, code: "COMPANY_NOT_FOUND" });
+    } else {
+      const name = normalized.company.company_name;
+      const candidates = await client.query(`SELECT id,public_id,company_name,city,country,review_status,
+        lower(btrim(company_name))=lower(btrim($1)) AS exact_match FROM maritime_directory_entities
+        WHERE is_active=true AND (lower(btrim(company_name))=lower(btrim($1)) OR similarity(company_name,$1) >= 0.55)
+        ORDER BY exact_match DESC,similarity(company_name,$1) DESC,company_name LIMIT 5`, [name]);
+      const hiddenExact = candidates.rows.some(row => row.exact_match && row.review_status !== "approved");
+      const publicCandidates = candidates.rows.filter(row => row.review_status === "approved").map(({ review_status, ...row }) => row);
+      if (hiddenExact || candidates.rows.some(row => row.exact_match) || (candidates.rows.length && payload?.confirmDistinctCompany !== true))
+        throw Object.assign(new Error(hiddenExact ? "A company with this name is already being reviewed. Contact NexaPort support before creating another record." : "Possible existing companies found. Select your company or confirm that you represent a different company for Super Admin review."), { status: 409, code: "COMPANY_CANDIDATES", candidates: publicCandidates });
+    }
 
     const passwordHash = await bcrypt.hash(account.password, 10);
     const userResult = await client.query(
@@ -74,6 +93,10 @@ export const registerMaritimeCompany = async (payload, database = pool) => {
       [account.fullName, account.email, account.username, passwordHash, account.phone]
     );
     const user = userResult.rows[0];
+    if (existingEntityId) {
+      await client.query("COMMIT");
+      return { user: { ...user, account_type: "maritime_company", verification_status: "pending" }, entityId: existingEntityId, claimTarget: existingEntityId };
+    }
     const columns = Object.keys(normalized.company);
     const values = Object.values(normalized.company);
     const slug = await uniqueSlug(client, normalized.company.company_name);
@@ -89,6 +112,8 @@ export const registerMaritimeCompany = async (payload, database = pool) => {
       `INSERT INTO public.maritime_company_accounts (user_id,entity_id,primary_type) VALUES ($1,$2,$3)`,
       [user.id, entityId, directoryTypes[0]]
     );
+    await client.query(`INSERT INTO public.maritime_company_memberships(entity_id,user_id,membership_role,status)
+      VALUES($1,$2,'owner','approved')`, [entityId,user.id]);
     await client.query("COMMIT");
     return { user: { ...user, account_type: "maritime_company", verification_status: "pending" }, entityId };
   } catch (error) {
@@ -102,31 +127,40 @@ export const registerMaritimeCompany = async (payload, database = pool) => {
 
 export const getMaritimeCompanyAccount = async (userId, queryable = pool) => {
   const result = await queryable.query(
-    `SELECT mca.entity_id,mca.primary_type,e.review_status,e.is_active
-     FROM public.maritime_company_accounts mca
-     JOIN ${T.entities} e ON e.id=mca.entity_id
-     WHERE mca.user_id=$1`,
+    `SELECT m.entity_id,(SELECT directory_type FROM maritime_directory_entity_types WHERE entity_id=m.entity_id ORDER BY directory_type LIMIT 1) AS primary_type,e.review_status,e.is_active
+     FROM public.maritime_company_memberships m JOIN ${T.entities} e ON e.id=m.entity_id
+     WHERE m.user_id=$1 AND m.status='approved' ORDER BY m.approved_at,m.entity_id LIMIT 1`,
     [userId]
   );
   return result.rows[0] || null;
 };
 
-export const getOwnedMaritimeCompany = async (userId) => {
-  const account = await getMaritimeCompanyAccount(userId);
-  if (!account) throw Object.assign(new Error("Company profile not found."), { status: 404 });
-  return { ...(await getMaritimeEntity(account.entity_id)), account };
+export const getOwnedMaritimeCompany = async (userId, entityId = null) => {
+  const account = entityId ? { entity_id: entityId } : await getMaritimeCompanyAccount(userId);
+  if (!account || !(await companyAccess(userId, account.entity_id))) throw Object.assign(new Error("Company profile not found."), { status: 404 });
+  const detail = await getMaritimeEntity(account.entity_id);
+  const sources = await pool.query("SELECT EXISTS(SELECT 1 FROM directory_entity_sources WHERE entity_id=$1) AS has_imported_sources", [account.entity_id]);
+  return { ...detail, account: { ...account, imported_protected: detail.entity.data_source !== "self_registered" || sources.rows[0]?.has_imported_sources } };
 };
 
-export const updateOwnedMaritimeCompany = async (userId, payload) => {
-  const account = await getMaritimeCompanyAccount(userId);
-  if (!account) throw Object.assign(new Error("Company profile not found."), { status: 404 });
+export const updateOwnedMaritimeCompany = async (userId, payload, entityId = null) => {
+  const account = entityId ? { entity_id: entityId } : await getMaritimeCompanyAccount(userId);
+  if (!account || !(await companyAccess(userId, account.entity_id))) throw Object.assign(new Error("Company profile not found."), { status: 404 });
+  const source = await pool.query(`SELECT e.data_source,EXISTS(SELECT 1 FROM directory_entity_sources s WHERE s.entity_id=e.id) AS has_imported_sources FROM ${T.entities} e WHERE e.id=$1`, [account.entity_id]);
+  if (source.rows[0]?.data_source !== "self_registered" || source.rows[0]?.has_imported_sources) {
+    const allowed = new Set(["description", "website", "publicEmail", "publicPhone", "publicAddress"]);
+    const forbiddenCompany = Object.keys(payload?.company || {}).filter(key => !allowed.has(key));
+    const forbiddenSections = ["directoryTypes","services","ports","branches","products","certifications","classApprovals","memberships","faqs"]
+      .filter(key => payload?.[key] !== undefined);
+    if (forbiddenCompany.length || forbiddenSections.length) throw Object.assign(new Error("Imported company classifications and source records require Super Admin review."), { status: 403, code: "IMPORTED_DATA_PROTECTED" });
+  }
   let directoryTypes;
   if (payload?.directoryTypes !== undefined) {
     directoryTypes = validateCompanyTypes(payload.directoryTypes);
   }
   const company = { ...(payload?.company || {}) };
   delete company.logoUrl;
-  return updateMaritimeEntity(account.entity_id, { ...payload, company, ...(directoryTypes ? { directoryTypes } : {}) }, userId);
+  return updateMaritimeEntity(account.entity_id, { ...payload, company, ...(directoryTypes ? { directoryTypes } : {}) }, userId, { provider: true });
 };
 
 const validateLogo = ({ contentType, size }) => {
@@ -134,21 +168,25 @@ const validateLogo = ({ contentType, size }) => {
   if (!Number.isInteger(Number(size)) || Number(size) < 1 || Number(size) > 5 * 1024 * 1024) throw invalid({ logo: "Logo must be 5 MB or smaller." });
 };
 
-export const createCompanyLogoUpload = async (userId, input) => {
+export const createCompanyLogoUpload = async (userId, input, entityId = null) => {
   validateLogo(input);
-  const account = await getMaritimeCompanyAccount(userId);
-  if (!account) throw Object.assign(new Error("Company profile not found."), { status: 404 });
-  const key = `company-logos/${userId}/${randomUUID()}.${LOGO_TYPES[input.contentType]}`;
+  const account = entityId ? { entity_id: entityId } : await getMaritimeCompanyAccount(userId);
+  if (!account || !(await companyAccess(userId, account.entity_id))) throw Object.assign(new Error("Company profile not found."), { status: 404 });
+  const source = await pool.query(`SELECT e.data_source,EXISTS(SELECT 1 FROM directory_entity_sources s WHERE s.entity_id=e.id) AS has_imported_sources FROM ${T.entities} e WHERE e.id=$1`, [account.entity_id]);
+  if (source.rows[0]?.data_source !== "self_registered" || source.rows[0]?.has_imported_sources) throw Object.assign(new Error("Imported company logo changes require review."), { status: 403 });
+  const key = `company-logos/${userId}/${account.entity_id}/${randomUUID()}.${LOGO_TYPES[input.contentType]}`;
   return { key, uploadUrl: createPresignedPutUrl({ key, contentType: input.contentType, expiresIn: 300 }) };
 };
 
-export const confirmCompanyLogoUpload = async (userId, input) => {
+export const confirmCompanyLogoUpload = async (userId, input, entityId = null) => {
   validateLogo(input);
-  const account = await getMaritimeCompanyAccount(userId);
-  const expected = `company-logos/${userId}/`;
-  if (!account || typeof input.key !== "string" || !input.key.startsWith(expected) || !input.key.endsWith(`.${LOGO_TYPES[input.contentType]}`)) {
+  const account = entityId ? { entity_id: entityId } : await getMaritimeCompanyAccount(userId);
+  const expected = `company-logos/${userId}/${account?.entity_id}/`;
+  if (!account || !(await companyAccess(userId, account.entity_id)) || typeof input.key !== "string" || !input.key.startsWith(expected) || !input.key.endsWith(`.${LOGO_TYPES[input.contentType]}`)) {
     throw invalid({ logo: "Invalid company logo upload key." });
   }
+  const source = await pool.query(`SELECT e.data_source,EXISTS(SELECT 1 FROM directory_entity_sources s WHERE s.entity_id=e.id) AS has_imported_sources FROM ${T.entities} e WHERE e.id=$1`, [account.entity_id]);
+  if (source.rows[0]?.data_source !== "self_registered" || source.rows[0]?.has_imported_sources) throw Object.assign(new Error("Imported company logo changes require review."), { status: 403 });
   await pool.query(`UPDATE ${T.entities} SET logo_s3_key=$1,logo_url=NULL,updated_by_user_id=$2,updated_at=CURRENT_TIMESTAMP WHERE id=$3`, [input.key, userId, account.entity_id]);
-  return getOwnedMaritimeCompany(userId);
+  return getOwnedMaritimeCompany(userId, account.entity_id);
 };

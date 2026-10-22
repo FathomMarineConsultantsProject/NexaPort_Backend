@@ -9,7 +9,7 @@ import { createAccountAsAdmin } from "../src/controllers/adminAccountProvisionin
 const actor = { id: 10, role_id: 1 };
 const body = { full_name: "Sanjay Joseph", username: "sanjay_joseph_client", email: "sanjay.joseph.client@example.com", password: "Unit-test-credential29!", role_id: 3 };
 const fixture = () => {
-  let state = { users: [], user_roles: [], client_profiles: [], experts: [], expert_registration_details: [], maritime_directory_entities: [], maritime_company_accounts: [], maritime_directory_entity_types: [], client_verification_events: [], admin_audit_logs: [] };
+  let state = { users: [], user_roles: [], client_profiles: [], experts: [], expert_registration_details: [], maritime_directory_entities: [], maritime_company_accounts: [], maritime_company_memberships: [], maritime_directory_entity_types: [], client_verification_events: [], admin_audit_logs: [] };
   let snapshot;
   const calls = [];
   const db = { state: () => state, calls, released: false, missingMemberships: false, roleNames: null, failOn: null, columns: [],
@@ -82,6 +82,7 @@ test("Super Admin and Maritime Company roles use their existing profile conventi
   const adminDb = fixture(), admin = await run(adminDb, { role_id: 1 }); assert.equal(admin.user.role_id, 1); assert.equal(admin.profileId, null);
   const companyDb = fixture(), company = await run(companyDb, { role_id: 4, company_name: "Display name", company_type: "supplier" });
   assert.equal(company.user.role_id, 4); assert.equal(companyDb.state().maritime_company_accounts[0].primary_type, "supplier");
+  assert.equal(companyDb.state().maritime_company_memberships[0].entity_id, company.profileId);
   assert.equal(companyDb.state().maritime_directory_entity_types[0].directory_type, "supplier");
   assert.equal(companyDb.state().maritime_directory_entities[0].review_status, "pending");
 });
