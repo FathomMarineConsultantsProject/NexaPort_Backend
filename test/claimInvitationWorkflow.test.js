@@ -6,6 +6,24 @@ const source={source_id:"42",name:"Alex Surveyor",public_id:"FLI-AAAAAAAAAAAAAAA
 test("invitation is disabled until mail delivery is explicitly enabled",async()=>{
   await assert.rejects(issueClaimInvitation({id:1},{targetType:"flag_inspector",targetId:"42",email:"alex@example.test"},null,null,{CLAIM_INVITATIONS_ENABLED:"false"}),{code:"INVITATIONS_DISABLED"});
 });
+test("email mode requires a recipient even with transport enabled",async()=>{
+  await assert.rejects(issueClaimInvitation({id:1},{targetType:"flag_inspector",targetId:"42",mode:"email"},null,null,
+    {CLAIM_INVITATIONS_ENABLED:"true",SMTP_HOST:"mail.example",SMTP_USER:"sender@example.test",SMTP_PASSWORD:"test"}),{code:"INVALID_EMAIL",status:400});
+});
+test("blank-email link uses the exact public claim page without SMTP or invitation table",async()=>{
+  const companyId="11111111-1111-4111-8111-111111111111",queries=[];
+  const company={id:companyId,company_name:"Harbor Works",nexaport_company_id:"NXP-0000001",public_id:"COM-"+"A".repeat(32)};
+  const db={query:async(sql)=>{queries.push(sql);if(sql.includes("FROM maritime_directory_entities e"))return{rows:[company]};
+    if(sql.includes("FROM public.flag_inspectors"))return{rows:[source]};return{rows:[]};}};
+  const options={FRONTEND_URL:"https://nexa-port-frontend.vercel.app",CLAIM_INVITATIONS_ENABLED:"false"};
+  const companyLink=await issueClaimInvitation({id:1},{targetType:"company",targetId:companyId,mode:"link"},db,null,options);
+  const professionalLink=await issueClaimInvitation({id:1},{targetType:"flag_inspector",targetId:"42",mode:"link"},db,null,options);
+  assert.equal(companyLink.url,`https://nexa-port-frontend.vercel.app/companies/${companyId}/claim`);
+  assert.equal(professionalLink.url,"https://nexa-port-frontend.vercel.app/professionals/flag_inspector/42/claim");
+  assert.equal(companyLink.status,"shareable");assert.equal(professionalLink.status,"shareable");
+  assert(!queries.some(sql=>sql.includes("profile_claim_invitations")));
+  assert(!JSON.stringify([companyLink,professionalLink]).includes("token"));
+});
 test("Admin issue stores only a token hash and sends a one-time link",async()=>{
   const calls=[];let delivered;
   const db={query:async(sql,values)=>{calls.push([sql,values]);if(sql.includes("FROM public.flag_inspectors"))return {rows:[source]};

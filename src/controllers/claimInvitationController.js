@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import * as invitations from "../services/claimInvitationService.js";
 const handle=(work,status=200)=>async(req,res)=>{try{return res.status(status).json({success:true,data:await work(req)});}catch(error){
+  if(error.code==="42P01") return res.status(503).json({success:false,code:"INVITATION_SCHEMA_UNAVAILABLE",message:"Claim invitation database setup is incomplete. Contact an administrator."});
   if(!error.status) console.error(`[claim-invitation:${randomUUID()}]`,error);
   return res.status(error.status||500).json({success:false,code:error.code||"INVITATION_FAILED",message:error.status?error.message:"Invitation request failed."});}};
 export const issue=handle(req=>invitations.issueClaimInvitation(req.user,req.body),201);

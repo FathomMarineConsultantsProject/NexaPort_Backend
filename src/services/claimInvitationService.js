@@ -21,15 +21,21 @@ const targetInfo=async(type,id,db)=>{
 export async function issueClaimInvitation(reviewer,input={},db=pool,send=sendClaimInvitationEmail,env=process.env) {
   const mode=input.mode === "link" ? "link" : input.mode === undefined || input.mode === "email" ? "email" : null;
   if(!mode) fail(400,"INVALID_MODE","Select email or manual link.");
-  if(mode==="email" && env.CLAIM_INVITATIONS_ENABLED!=="true") fail(503,"INVITATIONS_DISABLED","Invitation delivery is not enabled until SMTP is verified.");
+  const email=clean(input.email).toLowerCase();
+  if((mode==="email" || email) && (!/^\S+@\S+\.\S+$/.test(email) || email.length>320)) fail(400,"INVALID_EMAIL","Enter a valid recipient email.");
+  if(mode==="email" && env.CLAIM_INVITATIONS_ENABLED!=="true") fail(503,"INVITATIONS_DISABLED","Invitation email is disabled in this backend environment. Generate a claim link instead.");
   if(mode==="email" && (!env.SMTP_HOST || !env.SMTP_USER || !env.SMTP_PASSWORD || !(env.SMTP_FROM_EMAIL || env.SMTP_USER)))
     fail(503,"SMTP_UNAVAILABLE","Invitation email transport is not configured.");
-  const email=clean(input.email).toLowerCase();
-  if(!/^\S+@\S+\.\S+$/.test(email) || email.length>320) fail(400,"INVALID_EMAIL","Enter a valid recipient email.");
   let origin;
-  try {origin=new URL(env.FRONTEND_URL);if(!["https:","http:"].includes(origin.protocol) || (origin.protocol==="http:" && !["localhost","127.0.0.1"].includes(origin.hostname))) throw new Error();}
+  try {origin=new URL(env.FRONTEND_URL || "https://nexa-port-frontend.vercel.app");if(!["https:","http:"].includes(origin.protocol) || (origin.protocol==="http:" && !["localhost","127.0.0.1"].includes(origin.hostname))) throw new Error();}
   catch {fail(503,"INVITATION_URL_UNAVAILABLE","Frontend URL is not configured for claim invitations.");}
   const target=await targetInfo(input.targetType,clean(input.targetId),db);
+  if(mode==="link" && !email) {
+    const url=new URL(target.path,origin).toString();
+    await writeAdminAudit(db,{actorUserId:reviewer.id,action:"profile_claim_share_link_created",targetType:target.type,
+      targetId:target.id,summary:`Shareable claim page generated for ${target.type}:${target.id}`});
+    return {targetType:target.type,targetId:target.id,status:"shareable",url};
+  }
   if(target.type!=="company") {
     const linked=(await db.query(`SELECT 1 FROM professional_memberships WHERE source_type=$1 AND source_id=$2 AND status='approved'`,[target.type,target.id])).rows[0];
     if(linked) fail(409,"CONTROLLER_EXISTS","This professional profile already has a verified controller; review a dispute first.");
@@ -48,15 +54,15 @@ export async function issueClaimInvitation(reviewer,input={},db=pool,send=sendCl
     try {await writeAdminAudit(db,{actorUserId:reviewer.id,action:"profile_claim_invitation_link_created",targetType:"profile_claim_invitation",
       targetId:row.id,summary:`Manual invitation created for ${target.type}:${target.id}`});}
     catch(error){await db.query("UPDATE profile_claim_invitations SET status='revoked',revoked_at=now() WHERE id=$1 AND status='ready'",[row.id]);throw error;}
-    return {id:row.id,targetType:target.type,targetId:target.id,expiresAt:row.expires_at,status:"ready",url:link};
+    return {id:row.id,targetType:target.type,targetId:target.id,recipientEmail:email,expiresAt:row.expires_at,status:"ready",url:link};
   }
   try {
     await send({email,claimUrl:link,targetName:target.name});
-    await db.query(`UPDATE profile_claim_invitations SET status='sent',sent_at=now() WHERE id=$1 AND status='created'`,[row.id]);
   } catch {
     await db.query(`UPDATE profile_claim_invitations SET status='failed' WHERE id=$1 AND status='created'`,[row.id]);
-    fail(503,"INVITATION_DELIVERY_FAILED","Invitation email was not delivered. No active invitation was issued.");
+    fail(503,"INVITATION_DELIVERY_FAILED","Invitation email was not accepted by the mail transport. No active invitation was issued.");
   }
+  await db.query(`UPDATE profile_claim_invitations SET status='sent',sent_at=now() WHERE id=$1 AND status='created'`,[row.id]);
   await writeAdminAudit(db,{actorUserId:reviewer.id,action:"profile_claim_invitation_sent",targetType:"profile_claim_invitation",
     targetId:row.id,summary:`Invitation sent for ${target.type}:${target.id}`});
   return {id:row.id,targetType:target.type,targetId:target.id,expiresAt:row.expires_at,status:"sent"};
