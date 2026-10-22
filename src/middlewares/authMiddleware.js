@@ -4,7 +4,11 @@ import { loadUserRoles, activateRole } from "../services/userRoleService.js";
 
 const queryCurrentUser = async (userId) => {
   const result = await pool.query(
-    `SELECT id, full_name, email, username, role_id, is_active FROM users WHERE id = $1 LIMIT 1`, [userId]
+    `SELECT u.id,u.full_name,u.email,u.username,u.role_id,u.is_active,
+      EXISTS(SELECT 1 FROM professional_claim_account_intents i WHERE i.user_id=u.id)
+      AND NOT EXISTS(SELECT 1 FROM professional_memberships m WHERE m.user_id=u.id AND m.status='approved')
+      AS professional_claim_pending
+      FROM users u WHERE u.id=$1 LIMIT 1`, [userId]
   );
   if (result.rows[0]) result.rows[0].roles = await loadUserRoles(pool, result.rows[0]);
   return result;
@@ -106,6 +110,9 @@ export const optionalAuth = async (req, res, next) => {
 
 export const allowRoles = (...roles) => {
   return (req, res, next) => {
+    if (req.user.professional_claim_pending && Number(req.user.role_id) === 2) {
+      return res.status(403).json({ success: false, code: "PROFILE_CLAIM_PENDING", message: "Professional profile approval is required." });
+    }
     if (!roles.includes(Number(req.user.role_id))) {
       return res.status(403).json({
         success: false,

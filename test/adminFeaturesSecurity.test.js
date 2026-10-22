@@ -159,7 +159,8 @@ test("available request moderation migration preserves existing budget and opera
 
 test("authenticated requests revalidate active account and database role", async () => {
   const middleware = await source("src/middlewares/authMiddleware.js");
-  assert.match(middleware, /SELECT id, full_name, email, username, role_id, is_active FROM users/);
+  assert.match(middleware, /SELECT u\.id,u\.full_name,u\.email,u\.username,u\.role_id,u\.is_active/);
+  assert.match(middleware, /professional_claim_pending/);
   assert.match(middleware, /ACCOUNT_INACTIVE/);
   assert.match(middleware, /req\.user = decoded\.active_role === undefined \? user/);
   assert.match(middleware, /activateRole\(user, user\.roles/);

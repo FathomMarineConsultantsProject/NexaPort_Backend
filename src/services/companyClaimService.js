@@ -31,6 +31,11 @@ export async function getPublicCompany(id, db = pool) {
   if (!byCom) validId(id);
   const result = await db.query(`SELECT e.id,e.public_id,e.company_name,e.description,e.city,e.country,e.website,
     EXISTS(SELECT 1 FROM maritime_company_memberships m WHERE m.entity_id=e.id AND m.status='approved') AS has_existing_association,
+    CASE WHEN EXISTS(SELECT 1 FROM maritime_company_memberships m WHERE m.entity_id=e.id AND m.status='approved' AND m.verification_origin='reviewed_claim') THEN 'verified'
+      WHEN EXISTS(SELECT 1 FROM maritime_company_memberships m WHERE m.entity_id=e.id AND m.status='approved') THEN 'legacy_association'
+      WHEN EXISTS(SELECT 1 FROM maritime_company_claims c WHERE c.entity_id=e.id AND c.status='pending') THEN 'pending'
+      WHEN EXISTS(SELECT 1 FROM maritime_company_claims c WHERE c.entity_id=e.id AND c.status='disputed') THEN 'disputed'
+      ELSE 'unclaimed' END AS account_claim_state,
     ARRAY(SELECT t.directory_type FROM maritime_directory_entity_types t WHERE t.entity_id=e.id ORDER BY t.directory_type) AS directory_types
     FROM maritime_directory_entities e WHERE ${byCom ? "e.public_id" : "e.id"}=$1 AND e.is_active=true AND e.review_status='approved'`, [id]);
   if (!result.rows.length) fail(404, "COMPANY_NOT_FOUND", "Company not found.");
@@ -50,10 +55,18 @@ export async function listManagedCompanies(userId, db = pool) {
 }
 
 export async function ownClaims(userId, db = pool) {
-  const result = await db.query(`SELECT c.id,c.entity_id,e.public_id,e.company_name,c.status,c.applicant_designation,
-    c.created_at,c.reviewed_at,CASE WHEN c.status='rejected' THEN c.public_reason END AS decision_note
-    FROM maritime_company_claims c JOIN maritime_directory_entities e ON e.id=c.entity_id
-    WHERE c.claimant_user_id=$1 ORDER BY c.created_at DESC LIMIT 100`, [userId]);
+  const result = await db.query(`SELECT * FROM (
+    SELECT c.id,c.entity_id,e.public_id,e.company_name,c.status,c.applicant_designation,
+      c.created_at,c.reviewed_at,CASE WHEN c.status='rejected' THEN c.public_reason END AS decision_note
+      FROM maritime_company_claims c JOIN maritime_directory_entities e ON e.id=c.entity_id
+      WHERE c.claimant_user_id=$1
+    UNION ALL
+    SELECT NULL::uuid,i.entity_id,e.public_id,e.company_name,'not_submitted'::text,NULL::text,
+      i.created_at,NULL::timestamptz,NULL::text
+      FROM maritime_company_claim_account_intents i JOIN maritime_directory_entities e ON e.id=i.entity_id
+      WHERE i.user_id=$1 AND NOT EXISTS(SELECT 1 FROM maritime_company_claims c
+        WHERE c.claimant_user_id=i.user_id AND c.entity_id=i.entity_id)
+    ) claims ORDER BY created_at DESC LIMIT 100`, [userId]);
   return result.rows;
 }
 
@@ -106,7 +119,7 @@ export function createClaimEvidenceUpload(userId, input = {}) {
 
 export async function adminClaims(query = {}, db = pool) {
   const status = clean(query.status) || "pending";
-  if (!["pending", "approved", "rejected", "all"].includes(status)) fail(400, "INVALID_STATUS", "Invalid status filter.");
+  if (!["pending", "approved", "rejected", "disputed", "all"].includes(status)) fail(400, "INVALID_STATUS", "Invalid status filter.");
   const page = bounded(query.page, 1, 100000);
   const limit = bounded(query.limit, 20, 50);
   const result = await db.query(`SELECT c.id,c.entity_id,c.claimant_user_id,c.applicant_designation,c.status,c.created_at,c.reviewed_at,
@@ -128,11 +141,25 @@ export async function adminClaimDetail(id, db = pool) {
   const claim = result.rows[0];
   const [sources,members,history,types] = await Promise.all([
     db.query("SELECT source_name,source_external_id,source_url FROM directory_entity_sources WHERE entity_id=$1 ORDER BY source_name", [claim.entity_id]),
-    db.query(`SELECT m.user_id,m.membership_role,m.status,u.full_name,u.email FROM maritime_company_memberships m JOIN users u ON u.id=m.user_id WHERE m.entity_id=$1`, [claim.entity_id]),
+    db.query(`SELECT m.user_id,m.membership_role,m.status,m.verification_origin,m.approved_at,m.approved_by_user_id,m.revoked_at,m.revoked_by_user_id,u.full_name,u.email FROM maritime_company_memberships m JOIN users u ON u.id=m.user_id WHERE m.entity_id=$1`, [claim.entity_id]),
     db.query("SELECT id,claimant_user_id,status,created_at,reviewed_at FROM maritime_company_claims WHERE entity_id=$1 ORDER BY created_at DESC LIMIT 100", [claim.entity_id]),
     db.query("SELECT directory_type FROM maritime_directory_entity_types WHERE entity_id=$1 ORDER BY directory_type", [claim.entity_id]),
   ]);
   return { ...claim, evidence_s3_key: undefined, has_evidence: Boolean(claim.evidence_s3_key), sources: sources.rows, members: members.rows, history: history.rows, directory_types: types.rows.map(row => row.directory_type) };
+}
+
+export async function adminCompanyTargetStatus(entityId, db=pool) {
+  validId(entityId);
+  const company=(await db.query("SELECT id,public_id,company_name,claimed_status,review_status FROM maritime_directory_entities WHERE id=$1",[entityId])).rows[0];
+  if(!company) fail(404,"COMPANY_NOT_FOUND","Company not found.");
+  const [members,history]=await Promise.all([
+    db.query(`SELECT m.user_id,m.membership_role,m.status,m.verification_origin,m.approved_at,m.approved_by_user_id,
+      m.revoked_at,u.full_name,u.email FROM maritime_company_memberships m JOIN users u ON u.id=m.user_id
+      WHERE m.entity_id=$1 ORDER BY m.approved_at DESC`,[entityId]),
+    db.query(`SELECT id,claimant_user_id,status,reviewer_user_id,created_at,reviewed_at
+      FROM maritime_company_claims WHERE entity_id=$1 ORDER BY created_at DESC LIMIT 100`,[entityId]),
+  ]);
+  return {company,members:members.rows,history:history.rows};
 }
 
 export async function claimEvidenceUrl(id, db = pool) {
@@ -144,10 +171,11 @@ export async function claimEvidenceUrl(id, db = pool) {
 
 export async function decideClaim(id, action, reviewer, notes, database = pool, publicReason = null) {
   validId(id);
-  if (!["approve", "reject"].includes(action)) fail(400, "INVALID_ACTION", "Invalid decision.");
+  if (!["approve", "reject", "dispute"].includes(action)) fail(400, "INVALID_ACTION", "Invalid decision.");
   const reason = clean(notes);
   const applicantReason = clean(publicReason);
   if (action === "reject" && !applicantReason) fail(400, "REASON_REQUIRED", "Record a reason to share with the applicant.");
+  if (action === "dispute" && reason.length < 10) fail(400, "REASON_REQUIRED", "Record why this claim is disputed.");
   if (reason.length > 3000) fail(400, "INVALID_NOTES", "Review notes are too long.");
   if (applicantReason.length > 1000) fail(400, "INVALID_REASON", "Applicant reason is too long.");
   const client = await database.connect();
@@ -168,11 +196,11 @@ export async function decideClaim(id, action, reviewer, notes, database = pool, 
       await client.query(`INSERT INTO maritime_company_memberships(entity_id,user_id,membership_role,approved_by_user_id)
         VALUES($1,$2,$3,$4) ON CONFLICT(entity_id,user_id) DO UPDATE SET
         membership_role=EXCLUDED.membership_role,status='approved',approved_by_user_id=EXCLUDED.approved_by_user_id,
-        approved_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
+        approved_at=CURRENT_TIMESTAMP,revoked_by_user_id=NULL,revoked_at=NULL,updated_at=CURRENT_TIMESTAMP
         WHERE maritime_company_memberships.status='revoked'`, [claim.entity_id,claim.claimant_user_id,role,reviewer.id]);
       await client.query("INSERT INTO user_roles(user_id,role_id) VALUES($1,4) ON CONFLICT(user_id,role_id) DO NOTHING", [claim.claimant_user_id]);
     }
-    const status = action === "approve" ? "approved" : "rejected";
+  const status = action === "approve" ? "approved" : action === "dispute" ? "disputed" : "rejected";
     await client.query("UPDATE maritime_company_claims SET status=$1,reviewer_user_id=$2,reviewed_at=CURRENT_TIMESTAMP,review_notes=$3,public_reason=$4,updated_at=CURRENT_TIMESTAMP WHERE id=$5", [status,reviewer.id,reason || null,action === "reject" ? applicantReason : null,id]);
     await writeAdminAudit(client,{ actorUserId: reviewer.id, action: `company_claim_${status}`, targetType: "maritime_company_claim", targetId: id, summary: `${status} company claim for ${claim.entity_id}`, reason: reason || null });
     await client.query("COMMIT");
@@ -182,4 +210,23 @@ export async function decideClaim(id, action, reviewer, notes, database = pool, 
     if (error.code === "23505") fail(409, "OWNERSHIP_CONFLICT", "Company association changed. Review the current company state.");
     throw error;
   } finally { client.release(); }
+}
+
+export async function revokeCompanyMembership(entityId,userId,reviewer,notes,db=pool) {
+  validId(entityId);
+  const reason=clean(notes);
+  if (reason.length<10 || reason.length>3000) fail(400,"REASON_REQUIRED","Record a 10–3000 character revocation reason.");
+  const client=await db.connect();
+  try {
+    await client.query("BEGIN");
+    const company=(await client.query("SELECT id FROM maritime_directory_entities WHERE id=$1 FOR UPDATE",[entityId])).rows[0];
+    if(!company) fail(404,"COMPANY_NOT_FOUND","Company not found.");
+    const membership=(await client.query(`UPDATE maritime_company_memberships SET status='revoked',revoked_by_user_id=$1,
+      revoked_at=now(),updated_at=now() WHERE entity_id=$2 AND user_id=$3 AND status='approved' RETURNING user_id`,
+      [reviewer.id,entityId,userId])).rows[0];
+    if(!membership) fail(404,"MEMBERSHIP_NOT_FOUND","Active representative not found.");
+    await writeAdminAudit(client,{actorUserId:reviewer.id,action:"company_membership_revoked",targetType:"maritime_directory_entity",
+      targetId:entityId,summary:`Revoked user ${userId} from company`,reason});
+    await client.query("COMMIT");return {entityId,userId,status:"revoked"};
+  }catch(error){await client.query("ROLLBACK");throw error;}finally{client.release();}
 }

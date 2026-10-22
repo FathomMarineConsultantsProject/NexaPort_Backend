@@ -94,6 +94,8 @@ export const registerMaritimeCompany = async (payload, database = pool) => {
     );
     const user = userResult.rows[0];
     if (existingEntityId) {
+      await client.query(`INSERT INTO maritime_company_claim_account_intents(user_id,entity_id)
+        VALUES($1,$2)`, [user.id,existingEntityId]);
       await client.query("COMMIT");
       return { user: { ...user, account_type: "maritime_company", verification_status: "pending" }, entityId: existingEntityId, claimTarget: existingEntityId };
     }
@@ -112,8 +114,8 @@ export const registerMaritimeCompany = async (payload, database = pool) => {
       `INSERT INTO public.maritime_company_accounts (user_id,entity_id,primary_type) VALUES ($1,$2,$3)`,
       [user.id, entityId, directoryTypes[0]]
     );
-    await client.query(`INSERT INTO public.maritime_company_memberships(entity_id,user_id,membership_role,status)
-      VALUES($1,$2,'owner','approved')`, [entityId,user.id]);
+    await client.query(`INSERT INTO public.maritime_company_memberships(entity_id,user_id,membership_role,status,verification_origin)
+      VALUES($1,$2,'owner','approved','legacy_association')`, [entityId,user.id]);
     await client.query("COMMIT");
     return { user: { ...user, account_type: "maritime_company", verification_status: "pending" }, entityId };
   } catch (error) {

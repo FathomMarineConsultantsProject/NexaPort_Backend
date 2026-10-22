@@ -1,10 +1,5 @@
 import nodemailer from "nodemailer";
 
-console.log("SMTP_HOST:", process.env.SMTP_HOST);
-console.log("SMTP_PORT:", process.env.SMTP_PORT);
-console.log("SMTP_USER:", process.env.SMTP_USER);
-console.log("SMTP_FROM_EMAIL:", process.env.SMTP_FROM_EMAIL);
-console.log("SMTP_PASSWORD Exists:", !!process.env.SMTP_PASSWORD);
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
   port: Number(process.env.SMTP_PORT || 587),
@@ -80,5 +75,14 @@ NexaPort Team
         <p>NexaPort Team</p>
       </div>
     `,
+  });
+};
+
+export const sendClaimInvitationEmail = async ({ email, claimUrl, targetName }) => {
+  await transporter.sendMail({
+    from: { name: process.env.SMTP_FROM_NAME || "NexaPort", address: process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER },
+    to: email,
+    subject: "NexaPort profile claim invitation",
+    text: `You have been invited to request access to ${targetName} on NexaPort. Open this one-time link within 48 hours: ${claimUrl}\n\nYou will choose your own password if you need an account. Invitation redemption does not grant profile access; Super Admin must review your claim. If you did not expect this invitation, ignore it.`,
   });
 };

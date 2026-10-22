@@ -773,6 +773,10 @@ export const createExpert = async (req, res) => {
       Number(req.user.role_id) === 1 ? user_id || null : req.user.id;
 
     if (Number(req.user.role_id) === 2) {
+      const claimAccount = await pool.query(`SELECT 1 FROM professional_claim_account_intents WHERE user_id=$1`, [req.user.id]);
+      if (claimAccount.rows.length) {
+        return res.status(403).json({ success: false, message: "This account manages verified imported profiles; a second Expert identity cannot be created here." });
+      }
       const existing = await pool.query(
         `SELECT id FROM experts WHERE user_id = $1`,
         [req.user.id]

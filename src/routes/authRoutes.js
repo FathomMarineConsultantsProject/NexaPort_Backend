@@ -13,6 +13,7 @@ import {
   registerClient,
 } from "../controllers/clientRegistrationController.js";
 import { registerCompany } from "../controllers/maritimeCompanyController.js";
+import { registerAccount as registerProfessionalClaimAccount } from "../controllers/professionalClaimController.js";
 
 const router = express.Router();
 
@@ -24,6 +25,7 @@ router.post("/register-client", optionalAuth, registerClient);
 router.post("/register-consultant/upload-url", presignConsultantUpload);
 router.post("/register-consultant", registerConsultant);
 router.post("/register-maritime-company", registerCompany);
+router.post("/register-professional-claim", registerProfessionalClaimAccount);
 router.post("/login", login);
 router.get("/me", requireAuth, getMe);
 router.post("/switch-role", requireAuth, switchRole);

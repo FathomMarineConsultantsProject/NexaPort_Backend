@@ -35,6 +35,7 @@ test("detail uses separate child queries, returns arrays, and deduplicates stabl
       calls.push(sql);
       if (/SELECT \* FROM public\.maritime_directory_entities/.test(sql)) return { rows: [{ id: ID, company_name: "Harbour Services" }] };
       if (/SELECT directory_type/.test(sql)) return { rows: [{ directory_type: "supplier" }] };
+      if (/AS account_claim_state/.test(sql)) return { rows: [{ account_claim_state: "unclaimed", active_account_count: 0, pending_claim_count: 0 }] };
       if (/maritime_directory_services/.test(sql)) {
         return { rows: [
           { id: duplicateId, service_name: "Stores", service_type: "supplier" },
@@ -54,6 +55,7 @@ test("detail uses separate child queries, returns arrays, and deduplicates stabl
   assert.equal(detail.ports.length, 1);
   assert.equal(detail.contact_methods[0].contact_value, "office@example.com");
   assert.equal(detail.sources[0].source_name, "MagicPort");
+  assert.equal(detail.account_claim_state, "unclaimed");
   for (const name of ["services", "ports", "branches", "certifications", "class_approvals", "memberships", "products", "faqs"]) {
     assert.ok(Array.isArray(detail[name]));
   }

@@ -142,6 +142,15 @@ export const getMaritimeEntity = async (entityId, queryable = pool) => {
   const { logo_s3_key: logoKey, ...safeEntity } = entity.rows[0];
   if (logoKey) safeEntity.logo_url = createPresignedGetUrl({ key: logoKey }).url;
   const result = { entity: safeEntity, directory_types: types.rows.map((row) => row.directory_type), ...serializeMaritimeEnrichment(safeEntity) };
+  const claimState = await queryable.query(`SELECT
+    CASE WHEN EXISTS(SELECT 1 FROM maritime_company_memberships m WHERE m.entity_id=$1 AND m.status='approved' AND m.verification_origin='reviewed_claim') THEN 'verified'
+      WHEN EXISTS(SELECT 1 FROM maritime_company_memberships m WHERE m.entity_id=$1 AND m.status='approved') THEN 'legacy_association'
+      WHEN EXISTS(SELECT 1 FROM maritime_company_claims c WHERE c.entity_id=$1 AND c.status='pending') THEN 'pending'
+      WHEN EXISTS(SELECT 1 FROM maritime_company_claims c WHERE c.entity_id=$1 AND c.status='disputed') THEN 'disputed'
+      ELSE 'unclaimed' END AS account_claim_state,
+    (SELECT count(*)::int FROM maritime_company_memberships m WHERE m.entity_id=$1 AND m.status='approved') AS active_account_count,
+    (SELECT count(*)::int FROM maritime_company_claims c WHERE c.entity_id=$1 AND c.status='pending') AS pending_claim_count`, [canonicalId]);
+  Object.assign(result, claimState.rows[0]);
   for (const [name, sql] of detailQueries) result[name] = uniqueCollectionRows((await queryable.query(sql, [canonicalId])).rows);
   if (result.directory_types.includes("supplier")) {
     result.contact_methods = (await queryable.query(`SELECT id,branch_id,contact_type,contact_value,person_name,role_name,source_url FROM public.maritime_directory_contact_methods WHERE entity_id=$1 ORDER BY created_at,id`, [canonicalId])).rows;

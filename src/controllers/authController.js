@@ -153,11 +153,18 @@ export const login = async (req, res) => {
       `
       SELECT u.id, u.full_name, u.email, u.username, u.password_hash, u.role_id,
              u.phone, u.is_active, COALESCE(cp.verification_status, mde.review_status) AS verification_status,
-             CASE WHEN mca.user_id IS NOT NULL THEN 'maritime_company' END AS account_type
+             CASE WHEN cm.entity_id IS NOT NULL OR u.role_id=4 THEN 'maritime_company'
+               WHEN pm.user_id IS NOT NULL THEN 'professional_claim_linked'
+               WHEN EXISTS(SELECT 1 FROM professional_claim_account_intents i WHERE i.user_id=u.id) THEN 'professional_claim_pending' END AS account_type,
+             CASE WHEN cm.entity_id IS NULL THEN 'pending' ELSE cm.verification_origin END AS company_claim_status,
+             cm.entity_id AS company_entity_id
       FROM users u
       LEFT JOIN client_profiles cp ON cp.user_id = u.id
-      LEFT JOIN public.maritime_company_accounts mca ON mca.user_id = u.id
-      LEFT JOIN public.maritime_directory_entities mde ON mde.id = mca.entity_id
+      LEFT JOIN LATERAL (SELECT entity_id,verification_origin FROM public.maritime_company_memberships
+        WHERE user_id=u.id AND status='approved' ORDER BY approved_at,entity_id LIMIT 1) cm ON true
+      LEFT JOIN public.maritime_directory_entities mde ON mde.id = cm.entity_id
+      LEFT JOIN LATERAL (SELECT user_id FROM public.professional_memberships
+        WHERE user_id=u.id AND status='approved' LIMIT 1) pm ON true
       WHERE LOWER(u.email) = $1 OR LOWER(u.username) = $1
       `,
       [identifier.trim().toLowerCase()]
@@ -217,11 +224,18 @@ export const getMe = async (req, res) => {
       `
       SELECT u.id, u.full_name, u.email, u.username, u.role_id, u.phone,
              u.is_active, u.created_at, COALESCE(cp.verification_status, mde.review_status) AS verification_status,
-             CASE WHEN mca.user_id IS NOT NULL THEN 'maritime_company' END AS account_type
+             CASE WHEN cm.entity_id IS NOT NULL OR u.role_id=4 THEN 'maritime_company'
+               WHEN pm.user_id IS NOT NULL THEN 'professional_claim_linked'
+               WHEN EXISTS(SELECT 1 FROM professional_claim_account_intents i WHERE i.user_id=u.id) THEN 'professional_claim_pending' END AS account_type,
+             CASE WHEN cm.entity_id IS NULL THEN 'pending' ELSE cm.verification_origin END AS company_claim_status,
+             cm.entity_id AS company_entity_id
       FROM users u
       LEFT JOIN client_profiles cp ON cp.user_id = u.id
-      LEFT JOIN public.maritime_company_accounts mca ON mca.user_id = u.id
-      LEFT JOIN public.maritime_directory_entities mde ON mde.id = mca.entity_id
+      LEFT JOIN LATERAL (SELECT entity_id,verification_origin FROM public.maritime_company_memberships
+        WHERE user_id=u.id AND status='approved' ORDER BY approved_at,entity_id LIMIT 1) cm ON true
+      LEFT JOIN public.maritime_directory_entities mde ON mde.id = cm.entity_id
+      LEFT JOIN LATERAL (SELECT user_id FROM public.professional_memberships
+        WHERE user_id=u.id AND status='approved' LIMIT 1) pm ON true
       WHERE u.id = $1
       `,
       [req.user.id]
@@ -258,10 +272,17 @@ export const switchRole = async (req, res) => {
     const result = await pool.query(
       `SELECT u.id,u.full_name,u.email,u.username,u.role_id,u.is_active,u.phone,
         COALESCE(cp.verification_status,mde.review_status) AS verification_status,
-        CASE WHEN mca.user_id IS NOT NULL THEN 'maritime_company' END AS account_type
+        CASE WHEN cm.entity_id IS NOT NULL OR u.role_id=4 THEN 'maritime_company'
+          WHEN pm.user_id IS NOT NULL THEN 'professional_claim_linked'
+          WHEN EXISTS(SELECT 1 FROM professional_claim_account_intents i WHERE i.user_id=u.id) THEN 'professional_claim_pending' END AS account_type,
+        CASE WHEN cm.entity_id IS NULL THEN 'pending' ELSE cm.verification_origin END AS company_claim_status,
+        cm.entity_id AS company_entity_id
        FROM users u LEFT JOIN client_profiles cp ON cp.user_id=u.id
-       LEFT JOIN maritime_company_accounts mca ON mca.user_id=u.id
-       LEFT JOIN maritime_directory_entities mde ON mde.id=mca.entity_id WHERE u.id=$1`, [req.user.id]
+       LEFT JOIN LATERAL (SELECT entity_id,verification_origin FROM maritime_company_memberships
+         WHERE user_id=u.id AND status='approved' ORDER BY approved_at,entity_id LIMIT 1) cm ON true
+       LEFT JOIN maritime_directory_entities mde ON mde.id=cm.entity_id
+       LEFT JOIN LATERAL (SELECT user_id FROM professional_memberships WHERE user_id=u.id AND status='approved' LIMIT 1) pm ON true
+       WHERE u.id=$1`, [req.user.id]
     );
     const current = result.rows[0];
     if (!current?.is_active) return res.status(401).json({ success: false, message: "Account is inactive" });
