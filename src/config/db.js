@@ -15,9 +15,9 @@ export const pool = new Pool({
   database: process.env.DB_NAME,
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
-  ssl: {
-    rejectUnauthorized: false,
-  },
+  ssl: ["127.0.0.1", "localhost"].includes(process.env.DB_HOST) && process.env.DB_NAME === "shipserv_test"
+    ? false
+    : { rejectUnauthorized: false },
   connectionTimeoutMillis: 15000,
   query_timeout: 30000,
   statement_timeout: 25000,
