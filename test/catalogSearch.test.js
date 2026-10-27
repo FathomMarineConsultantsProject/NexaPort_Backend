@@ -11,3 +11,15 @@ test('product detail pages verified canonical suppliers and separates external e
   const result=await getCatalogProduct('product',{page:2,limit:10},db);
   assert.equal(result.supplierCount,15);assert.equal(result.sourceSupplierCount,16);assert.equal(result.pagination.pages,2);assert.equal(result.suppliers.length,5);assert.equal(result.sourceSuppliers.length,1);assert.deepEqual(calls.at(-1).values,['product']);
 });
+test('six-digit search passes leading zeros and prioritizes the canonical code record',async()=>{
+  const db={query:async(sql,values)=>{
+    if(sql.includes('catalog_candidate_source_mentions'))return {rows:[]};
+    assert.equal(values[1],'000119');
+    assert.match(sql,/p\.impa_code=\$2/);
+    assert.match(sql,/NOT EXISTS\(SELECT 1 FROM public\.catalog_products canonical/);
+    return {rows:[{id:'canonical',impa_code:'000119',name:'CELERY TABLE FRESH',exact_match:true,total_matches:1}]};
+  }};
+  const result=await searchCatalog('000119',db);
+  assert.equal(result.rows[0].impa_code,'000119');
+  assert.equal(result.pagination.total,1);
+});

@@ -7,14 +7,18 @@ export async function searchCatalog(query, db=pool, page=1) {
   const normalized=(namespace?.[2]||q).toUpperCase().replace(/\s+/g,'');
   const namespaceFilter=namespace?.[1]?.toUpperCase()||null;
   const result=await db.query(`WITH hits AS (SELECT p.id,
-    CASE WHEN EXISTS(SELECT 1 FROM public.product_identifiers x WHERE x.product_id=p.id AND x.display_value=$5 AND ($4::text IS NULL OR x.namespace=$4)) THEN 0
+    CASE WHEN p.impa_code=$2 AND ($4::text IS NULL OR $4='IMPA') THEN -1
+         WHEN EXISTS(SELECT 1 FROM public.product_identifiers x WHERE x.product_id=p.id AND x.display_value=$5 AND ($4::text IS NULL OR x.namespace=$4)) THEN 0
          WHEN EXISTS(SELECT 1 FROM public.product_identifiers x WHERE x.product_id=p.id AND x.normalized_value=$2 AND ($4::text IS NULL OR x.namespace=$4)) THEN 1
          WHEN lower(p.name)=lower($1) THEN 2 ELSE 3 END AS rank
     FROM public.catalog_products p
-    WHERE EXISTS(SELECT 1 FROM public.product_identifiers x WHERE x.product_id=p.id AND x.normalized_value=$2 AND ($4::text IS NULL OR x.namespace=$4))
+    WHERE (EXISTS(SELECT 1 FROM public.product_identifiers x WHERE x.product_id=p.id AND x.normalized_value=$2 AND ($4::text IS NULL OR x.namespace=$4))
        OR EXISTS(SELECT 1 FROM public.product_identifiers x WHERE x.product_id=p.id AND lower(coalesce(p.manufacturer,'')||' '||x.display_value)=lower($1))
        OR p.source_key=$1 OR lower(p.name) LIKE lower($1)||'%')
-    SELECT p.id,p.source_namespace,p.source_key,p.name,p.canonical_url,p.uom,COUNT(*) OVER()::int AS total_matches,
+      AND (NOT ($2 ~ '^[0-9]{6}$' AND ($4::text IS NULL OR $4='IMPA'))
+        OR p.impa_code=$2
+        OR NOT EXISTS(SELECT 1 FROM public.catalog_products canonical WHERE canonical.impa_code=$2)))
+    SELECT p.id,p.source_namespace,p.source_key,p.impa_code,p.impa_identity_state,p.name,p.canonical_url,p.uom,COUNT(*) OVER()::int AS total_matches,
     array_agg(DISTINCT i.display_value) FILTER (WHERE i.id IS NOT NULL) AS identifiers,(h.rank<=1) AS exact_match
     FROM hits h JOIN public.catalog_products p ON p.id=h.id LEFT JOIN public.product_identifiers i ON i.product_id=p.id
     GROUP BY p.id,h.rank ORDER BY h.rank,p.name,p.id LIMIT 50 OFFSET $3`,[q,normalized,(page-1)*50,namespaceFilter,namespace?.[2]||q]);
@@ -39,7 +43,8 @@ export async function getCatalogProduct(id,{page=1,limit=25}={},db=pool) {
       e.city AS canonical_city,e.country AS canonical_country,e.public_email,e.public_phone,e.website,
       (SELECT jsonb_agg(jsonb_build_object('type',r.relationship_type,'evidenceClassification',r.evidence_classification,
         'evidenceUrl',r.evidence_url,'evidencePage',r.page_number,'evidenceText',r.evidence_text,
-        'reviewStatus',r.review_status,'verifiedStockStatus',r.verified_stock_status) ORDER BY r.id)
+        'reviewStatus',r.review_status,'supplierPartNumber',r.supplier_part_number,
+        'verifiedStockStatus',r.verified_stock_status) ORDER BY r.id)
        FROM public.supplier_product_relationships r WHERE r.product_id=$1 AND r.supplier_id=s.id
          AND r.relationship_type IN ('supplier_listing','verified_offer')
          AND r.review_status IN ('accepted_local_extraction','reviewed_verified')) AS relationships
@@ -60,9 +65,18 @@ export async function getCatalogProduct(id,{page=1,limit=25}={},db=pool) {
   const hasListing=row=>row.relationships?.some(relationship=>qualifying.has(relationship.evidenceClassification));
   const offerings=listed.filter(hasListing);
   const matched=offerings.filter(row=>row.canonical_entity_id);
+  const related=(await db.query(`SELECT s.id,s.name,s.location,s.country,
+    jsonb_build_array(jsonb_build_object('type','related','evidenceClassification','related_supplier')) AS relationships
+    FROM public.catalog_suppliers s JOIN public.supplier_product_relationships r ON r.supplier_id=s.id
+    WHERE r.product_id=$1 AND r.relationship_type='related'
+      AND NOT EXISTS (SELECT 1 FROM public.supplier_product_relationships exact
+        WHERE exact.product_id=$1 AND exact.supplier_id=s.id
+          AND exact.relationship_type IN ('supplier_listing','verified_offer')
+          AND exact.review_status IN ('accepted_local_extraction','reviewed_verified'))
+    GROUP BY s.id ORDER BY s.name,s.id LIMIT 25`,[id])).rows;
   return {...product,identifiers:identifiers.rows,categories:categories.rows,
     supplierCount:matched.length,sourceSupplierCount:offerings.length,
     suppliers:matched.slice((page-1)*limit,page*limit),sourceSuppliers:offerings.filter(row=>!row.canonical_entity_id),
-    relatedProductSources:listed.filter(row=>!hasListing(row)),
+    relatedProductSources:related,
     pagination:{page,limit,total:matched.length,pages:Math.ceil(matched.length/limit)}};
 }
