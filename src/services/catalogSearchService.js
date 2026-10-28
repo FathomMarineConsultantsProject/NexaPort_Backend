@@ -1,5 +1,20 @@
 import { pool } from '../config/db.js';
 
+const publicWebsite = value => {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    return ['http:', 'https:'].includes(url.protocol) && !/(^|\.)shipserv\.com$/i.test(url.hostname) ? url.href : null;
+  } catch { return null; }
+};
+const localImage = value => typeof value === 'string' && /^\/catalog\/images\/[0-9a-f]{32}\.png$/i.test(value) ? value : null;
+const redactSource = value => {
+  if (typeof value === 'string') return /shipserv(?:\.com)?/i.test(value) ? null : value;
+  if (Array.isArray(value)) return value.map(redactSource).filter(item => item !== null);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key,item]) => [key,redactSource(item)]));
+  return value;
+};
+
 export async function searchCatalog(query, db=pool, page=1) {
   const q=String(query||'').trim().slice(0,120);
   if (!q) return {rows:[],pagination:{page,total:0,pages:0},relatedSources:[],relatedPagination:{page,total:0,pages:0}};
@@ -18,31 +33,34 @@ export async function searchCatalog(query, db=pool, page=1) {
       AND (NOT ($2 ~ '^[0-9]{6}$' AND ($4::text IS NULL OR $4='IMPA'))
         OR p.impa_code=$2
         OR NOT EXISTS(SELECT 1 FROM public.catalog_products canonical WHERE canonical.impa_code=$2)))
-    SELECT p.id,p.source_namespace,p.source_key,p.impa_code,p.impa_identity_state,p.name,p.canonical_url,p.uom,COUNT(*) OVER()::int AS total_matches,
+    SELECT p.id,p.impa_code,p.impa_identity_state,p.name,p.uom,COUNT(*) OVER()::int AS total_matches,
     array_agg(DISTINCT i.display_value) FILTER (WHERE i.id IS NOT NULL) AS identifiers,(h.rank<=1) AS exact_match
     FROM hits h JOIN public.catalog_products p ON p.id=h.id LEFT JOIN public.product_identifiers i ON i.product_id=p.id
     GROUP BY p.id,h.rank ORDER BY h.rank,p.name,p.id LIMIT 50 OFFSET $3`,[q,normalized,(page-1)*50,namespaceFilter,namespace?.[2]||q]);
   const total=result.rows[0]?.total_matches||0;
-  const related=await db.query(`SELECT m.id,m.namespace,m.display_identifier,m.source_url,m.page_number,m.evidence_text,m.evidence_state,
-    s.name AS supplier_name,s.profile_url AS supplier_profile_url,s.location AS supplier_location,count(*) OVER()::int AS total_matches
+  const related=await db.query(`SELECT m.id,m.namespace,m.display_identifier,m.evidence_state,
+    s.name AS supplier_name,s.location AS supplier_location,count(*) OVER()::int AS total_matches
     FROM public.catalog_candidate_source_mentions m JOIN public.catalog_suppliers s ON s.id=m.supplier_id
     WHERE m.normalized_identifier=$1 AND m.evidence_state='document_host_only'
-    ORDER BY s.name,m.source_url,m.page_number,m.id LIMIT 20 OFFSET $2`,[normalized,(page-1)*20]);
+    ORDER BY s.name,m.id LIMIT 20 OFFSET $2`,[normalized,(page-1)*20]);
   const relatedTotal=related.rows[0]?.total_matches||0;
-  return {rows:result.rows,pagination:{page,total,pages:Math.ceil(total/50)},relatedSources:related.rows,
-    relatedPagination:{page,total:relatedTotal,pages:Math.ceil(relatedTotal/20)}};
+  return redactSource({rows:result.rows,pagination:{page,total,pages:Math.ceil(total/50)},relatedSources:related.rows,
+    relatedPagination:{page,total:relatedTotal,pages:Math.ceil(relatedTotal/20)}});
 }
 
 export async function getCatalogProduct(id,{page=1,limit=25}={},db=pool) {
-  const product=(await db.query('SELECT * FROM public.catalog_products WHERE id=$1',[id])).rows[0];
+  const product=(await db.query(`SELECT id,impa_code,impa_identity_state,impa_name_conflict,name,
+    description,uom,mtml_uom,manufacturer,specifications,image_url
+    FROM public.catalog_products WHERE id=$1`,[id])).rows[0];
   if (!product) return null;
-  const identifiers=await db.query('SELECT namespace,display_value,manufacturer_context,evidence_url,page_number FROM public.product_identifiers WHERE product_id=$1 ORDER BY namespace,display_value',[id]);
-  const categories=await db.query('SELECT c.name,c.path,c.source_url FROM public.product_categories c JOIN public.catalog_product_categories pc ON pc.category_id=c.id WHERE pc.product_id=$1 ORDER BY c.path',[id]);
-  const sourceSuppliers=await db.query(`SELECT s.id,s.source_key,s.tnid,s.name,s.profile_url,s.country,s.location,
+  const identifiers=await db.query('SELECT namespace,display_value,manufacturer_context FROM public.product_identifiers WHERE product_id=$1 ORDER BY namespace,display_value',[id]);
+  const categories=await db.query('SELECT c.name,c.path FROM public.product_categories c JOIN public.catalog_product_categories pc ON pc.category_id=c.id WHERE pc.product_id=$1 ORDER BY c.path',[id]);
+  const sourceSuppliers=await db.query(`SELECT s.id,s.name,s.country,s.location,
+      s.profile_data->>'email' AS email,s.profile_data->>'phone' AS phone,
+      s.profile_data->>'address' AS address,s.profile_data->>'website' AS supplier_website,
       e.id AS canonical_entity_id,e.company_name AS canonical_company_name,e.nexaport_company_id,e.public_id,
       e.city AS canonical_city,e.country AS canonical_country,e.public_email,e.public_phone,e.website,
       (SELECT jsonb_agg(jsonb_build_object('type',r.relationship_type,'evidenceClassification',r.evidence_classification,
-        'evidenceUrl',r.evidence_url,'evidencePage',r.page_number,'evidenceText',r.evidence_text,
         'reviewStatus',r.review_status,'supplierPartNumber',r.supplier_part_number,
         'verifiedStockStatus',r.verified_stock_status) ORDER BY r.id)
        FROM public.supplier_product_relationships r WHERE r.product_id=$1 AND r.supplier_id=s.id
@@ -74,9 +92,12 @@ export async function getCatalogProduct(id,{page=1,limit=25}={},db=pool) {
           AND exact.relationship_type IN ('supplier_listing','verified_offer')
           AND exact.review_status IN ('accepted_local_extraction','reviewed_verified'))
     GROUP BY s.id ORDER BY s.name,s.id LIMIT 25`,[id])).rows;
-  return {...product,identifiers:identifiers.rows,categories:categories.rows,
+  const publicOfferings=offerings.map(({supplier_website,...row})=>({
+    ...row,website:publicWebsite(row.website || supplier_website)
+  }));
+  return redactSource({...product,image_url:localImage(product.image_url),identifiers:identifiers.rows,categories:categories.rows,
     supplierCount:matched.length,sourceSupplierCount:offerings.length,
-    suppliers:matched.slice((page-1)*limit,page*limit),sourceSuppliers:offerings.filter(row=>!row.canonical_entity_id),
+    suppliers:publicOfferings.filter(row=>row.canonical_entity_id).slice((page-1)*limit,page*limit),sourceSuppliers:publicOfferings.filter(row=>!row.canonical_entity_id),
     relatedProductSources:related,
-    pagination:{page,limit,total:matched.length,pages:Math.ceil(matched.length/limit)}};
+    pagination:{page,limit,total:matched.length,pages:Math.ceil(matched.length/limit)}});
 }

@@ -7,7 +7,7 @@ test('identifier search keeps ambiguous product matches separate',async()=>{
   const result=await searchCatalog('abc 123',db);assert.equal(result.rows.length,2);assert.equal(result.relatedSources.length,1);assert.equal(result.relatedPagination.total,1);
 });
 test('product detail pages verified canonical suppliers and separates external evidence',async()=>{
-  const calls=[];const db={query:async(sql,values)=>{calls.push({sql,values});if(sql.startsWith('SELECT * FROM'))return {rows:[{id:'product',name:'Guide'}]};if(sql.includes('FROM public.catalog_suppliers s'))return {rows:[...Array.from({length:15},(_,i)=>({id:`supplier-${i}`,canonical_entity_id:`entity-${i}`,relationships:[{type:'supplier_listing',evidenceClassification:'supplier_catalogue_listing'}]})),{id:'external',canonical_entity_id:null,relationships:[{type:'supplier_listing',evidenceClassification:'supplier_catalogue_listing'}]}]};return {rows:[]}}};
+  const calls=[];const db={query:async(sql,values)=>{calls.push({sql,values});if(sql.includes('FROM public.catalog_products WHERE id=$1'))return {rows:[{id:'product',name:'Guide'}]};if(sql.includes('FROM public.catalog_suppliers s'))return {rows:[...Array.from({length:15},(_,i)=>({id:`supplier-${i}`,canonical_entity_id:`entity-${i}`,relationships:[{type:'supplier_listing',evidenceClassification:'supplier_catalogue_listing'}]})),{id:'external',canonical_entity_id:null,relationships:[{type:'supplier_listing',evidenceClassification:'supplier_catalogue_listing'}]}]};return {rows:[]}}};
   const result=await getCatalogProduct('product',{page:2,limit:10},db);
   assert.equal(result.supplierCount,15);assert.equal(result.sourceSupplierCount,16);assert.equal(result.pagination.pages,2);assert.equal(result.suppliers.length,5);assert.equal(result.sourceSuppliers.length,1);assert.deepEqual(calls.at(-1).values,['product']);
 });
@@ -22,4 +22,17 @@ test('six-digit search passes leading zeros and prioritizes the canonical code r
   const result=await searchCatalog('000119',db);
   assert.equal(result.rows[0].impa_code,'000119');
   assert.equal(result.pagination.total,1);
+});
+test('product API projection omits source links while retaining exact supplier parts',async()=>{
+  const db={query:async(sql)=>{
+    if(sql.includes('FROM public.catalog_products WHERE id=$1')) return {rows:[{id:'product',name:'Valve',impa_code:'334421',image_url:'https://impa-catalogue.shipserv.com/image.png'}]};
+    if(sql.includes('FROM public.catalog_suppliers s')) return {rows:[{id:'supplier',name:'Bourne Group',canonical_entity_id:null,profile_url:'https://www.shipserv.com/supplier/1',supplier_website:'https://www.shipserv.com/supplier/1',relationships:[{type:'supplier_listing',evidenceClassification:'supplier_catalogue_part',supplierPartNumber:'4421',evidenceUrl:'https://impa-catalogue.shipserv.com/item'}]}]};
+    return {rows:[]};
+  }};
+  const result=await getCatalogProduct('product',{},db);
+  assert.equal(result.impa_code,'334421');
+  assert.equal(result.sourceSuppliers[0].relationships[0].supplierPartNumber,'4421');
+  assert.equal(result.image_url,null);
+  assert.equal(result.sourceSuppliers[0].website,null);
+  assert.doesNotMatch(JSON.stringify(result),/shipserv/i);
 });

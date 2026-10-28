@@ -8,6 +8,12 @@ const T = MARITIME_DIRECTORY_TABLES;
 const TYPE_SET = new Set(MARITIME_DIRECTORY_TYPES);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const redactSupplierSource = value => {
+  if (typeof value === 'string') return /shipserv(?:\.com)?/i.test(value) ? null : value;
+  if (Array.isArray(value)) return value.map(redactSupplierSource).filter(item => item !== null);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key,item]) => [key,redactSupplierSource(item)]));
+  return value;
+};
 const clean = (value) => String(value ?? "").trim();
 const nullable = (value) => clean(value) || null;
 const validationError = (fieldErrors) => Object.assign(new Error("Please correct the highlighted fields."), { status: 400, code: "MARITIME_DIRECTORY_VALIDATION_FAILED", fieldErrors });
@@ -154,10 +160,10 @@ export const getMaritimeEntity = async (entityId, queryable = pool) => {
   Object.assign(result, claimState.rows[0]);
   for (const [name, sql] of detailQueries) result[name] = uniqueCollectionRows((await queryable.query(sql, [canonicalId])).rows);
   if (result.directory_types.includes("supplier")) {
-    result.contact_methods = (await queryable.query(`SELECT id,branch_id,contact_type,contact_value,person_name,role_name,source_url FROM public.maritime_directory_contact_methods WHERE entity_id=$1 ORDER BY created_at,id`, [canonicalId])).rows;
-    result.sources = (await queryable.query(`SELECT source_name,source_external_id,source_url,last_seen_at FROM public.directory_entity_sources WHERE entity_id=$1 ORDER BY source_name,source_url`, [canonicalId])).rows;
+    result.contact_methods = (await queryable.query(`SELECT id,branch_id,contact_type,contact_value,person_name,role_name FROM public.maritime_directory_contact_methods WHERE entity_id=$1 ORDER BY created_at,id`, [canonicalId])).rows;
+    result.sources = (await queryable.query(`SELECT source_name,source_external_id,source_url,last_seen_at FROM public.directory_entity_sources WHERE entity_id=$1 AND source_name<>'ShipServ' ORDER BY source_name,source_url`, [canonicalId])).rows;
   }
-  return result;
+  return result.directory_types.includes('supplier') ? redactSupplierSource(result) : result;
 };
 
 export const listMaritimeEntities = async (query, queryable = pool) => {

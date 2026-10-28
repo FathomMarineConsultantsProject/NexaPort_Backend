@@ -14,7 +14,13 @@ router.get('/suppliers/:id',async(req,res)=>{try{
   const result=await pool.query(`SELECT e.id,e.company_name,e.nexaport_company_id,e.city,e.country,e.website
     FROM public.maritime_directory_entities e WHERE e.id=$1 AND e.is_active=true AND e.review_status='approved'
     AND EXISTS(SELECT 1 FROM public.maritime_directory_entity_types t WHERE t.entity_id=e.id AND t.directory_type='supplier')`,[req.params.id]);
-  return result.rows[0]?res.json({success:true,data:result.rows[0]}):res.status(404).json({success:false,message:'Supplier not found.'});
+  if (!result.rows[0]) return res.status(404).json({success:false,message:'Supplier not found.'});
+  const supplier=result.rows[0];
+  if (supplier.website) {
+    try { if (/(^|\.)shipserv\.com$/i.test(new URL(supplier.website).hostname)) supplier.website=null; }
+    catch { supplier.website=null; }
+  }
+  return res.json({success:true,data:supplier});
 }catch{return res.status(500).json({success:false,message:'Supplier profile unavailable.'})}});
 router.get('/:id',async(req,res)=>{ try { if (!/^[0-9a-f-]{36}$/i.test(req.params.id)) return res.status(400).json({success:false,message:'Invalid product ID.'}); const page=Math.max(1,Math.min(10000,Number.parseInt(req.query.page,10)||1)),limit=Math.max(1,Math.min(100,Number.parseInt(req.query.limit,10)||25)); const data=await getCatalogProduct(req.params.id,{page,limit}); return data?res.json({success:true,data}):res.status(404).json({success:false,message:'Product not found.'}); } catch { return res.status(500).json({success:false,message:'Catalogue product unavailable.'}); } });
 export default router;
