@@ -4,7 +4,7 @@ const publicWebsite = value => {
   if (!value) return null;
   try {
     const url = new URL(value);
-    return ['http:', 'https:'].includes(url.protocol) && !/(^|\.)shipserv\.com$/i.test(url.hostname) ? url.href : null;
+    return ['http:', 'https:'].includes(url.protocol) && !/(^|\.)(shipserv\.com|e-shipsupply\.com|e-shipsupply\.net)$/i.test(url.hostname) ? url.href : null;
   } catch { return null; }
 };
 const localImage = value => typeof value === 'string' && /^\/catalog\/images\/[0-9a-f]{32}\.png$/i.test(value) ? value : null;
@@ -37,6 +37,23 @@ export async function searchCatalog(query, db=pool, page=1) {
     array_agg(DISTINCT i.display_value) FILTER (WHERE i.id IS NOT NULL) AS identifiers,(h.rank<=1) AS exact_match
     FROM hits h JOIN public.catalog_products p ON p.id=h.id LEFT JOIN public.product_identifiers i ON i.product_id=p.id
     GROUP BY p.id,h.rank ORDER BY h.rank,p.name,p.id LIMIT 50 OFFSET $3`,[q,normalized,(page-1)*50,namespaceFilter,namespace?.[2]||q]);
+  if (result.rows.length) {
+    const counts=await db.query(`SELECT r.product_id, count(DISTINCT e.id)::int AS verified_supplier_count
+      FROM public.supplier_product_relationships r
+      JOIN public.catalog_suppliers s ON s.id=r.supplier_id
+      JOIN public.directory_entity_sources src ON src.source_name='ShipServ'
+        AND (src.source_url=s.profile_url OR (s.tnid IS NOT NULL AND s.tnid<>'208652' AND src.source_external_id=s.tnid))
+      JOIN public.maritime_directory_entities e ON e.id=src.entity_id AND e.is_active=true AND e.review_status='approved'
+      JOIN public.maritime_directory_entity_types t ON t.entity_id=e.id AND t.directory_type='supplier'
+      WHERE r.product_id=ANY($1::uuid[]) AND r.relationship_type IN ('supplier_listing','verified_offer')
+        AND r.review_status IN ('accepted_local_extraction','reviewed_verified')
+        AND r.evidence_classification IN ('supplier_catalogue_listing','supplier_catalogue_part','explicit_brochure_offer','reviewed_self_branded_offer')
+        AND (SELECT count(DISTINCT x.entity_id) FROM public.directory_entity_sources x WHERE x.source_name='ShipServ'
+          AND (x.source_url=s.profile_url OR (s.tnid IS NOT NULL AND s.tnid<>'208652' AND x.source_external_id=s.tnid)))=1
+      GROUP BY r.product_id`,[result.rows.map(row=>row.id)]);
+    const byProduct=new Map(counts.rows.map(row=>[String(row.product_id),Number(row.verified_supplier_count)]));
+    result.rows=result.rows.map(row=>({...row,verified_supplier_count:byProduct.get(String(row.id))||0}));
+  }
   const total=result.rows[0]?.total_matches||0;
   const related=await db.query(`SELECT m.id,m.namespace,m.display_identifier,m.evidence_state,
     s.name AS supplier_name,s.location AS supplier_location,count(*) OVER()::int AS total_matches
@@ -92,10 +109,11 @@ export async function getCatalogProduct(id,{page=1,limit=25}={},db=pool) {
           AND exact.relationship_type IN ('supplier_listing','verified_offer')
           AND exact.review_status IN ('accepted_local_extraction','reviewed_verified'))
     GROUP BY s.id ORDER BY s.name,s.id LIMIT 25`,[id])).rows;
-  const publicOfferings=offerings.map(({supplier_website,...row})=>({
-    ...row,website:publicWebsite(row.website || supplier_website)
+  const publicOfferings=offerings.map(({supplier_website,email,phone,address,...row})=>({
+    ...row,website:publicWebsite(row.website)
   }));
   return redactSource({...product,image_url:localImage(product.image_url),identifiers:identifiers.rows,categories:categories.rows,
+    verified_supplier_count:matched.length,verifiedSuppliers:publicOfferings.filter(row=>row.canonical_entity_id).slice((page-1)*limit,page*limit),
     supplierCount:matched.length,sourceSupplierCount:offerings.length,
     suppliers:publicOfferings.filter(row=>row.canonical_entity_id).slice((page-1)*limit,page*limit),sourceSuppliers:publicOfferings.filter(row=>!row.canonical_entity_id),
     relatedProductSources:related,

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { searchCatalog,getCatalogProduct } from '../src/services/catalogSearchService.js';
 
 test('identifier search keeps ambiguous product matches separate',async()=>{
-  const db={query:async(sql,values)=>{if(sql.includes('catalog_candidate_source_mentions')){assert.equal(values[0],'ABC123');return {rows:[{id:'review-1',evidence_state:'document_host_only',total_matches:1}]}}assert.match(sql,/product_identifiers/);assert.equal(values[1],'ABC123');return {rows:[{id:'one',name:'Pump A',exact_match:true},{id:'two',name:'Pump B',exact_match:true}]}}};
+  const db={query:async(sql,values)=>{if(sql.includes('catalog_candidate_source_mentions')){assert.equal(values[0],'ABC123');return {rows:[{id:'review-1',evidence_state:'document_host_only',total_matches:1}]}}if(sql.includes('count(DISTINCT e.id)'))return {rows:[]};assert.match(sql,/product_identifiers/);assert.equal(values[1],'ABC123');return {rows:[{id:'one',name:'Pump A',exact_match:true},{id:'two',name:'Pump B',exact_match:true}]}}};
   const result=await searchCatalog('abc 123',db);assert.equal(result.rows.length,2);assert.equal(result.relatedSources.length,1);assert.equal(result.relatedPagination.total,1);
 });
 test('product detail pages verified canonical suppliers and separates external evidence',async()=>{
@@ -14,6 +14,7 @@ test('product detail pages verified canonical suppliers and separates external e
 test('six-digit search passes leading zeros and prioritizes the canonical code record',async()=>{
   const db={query:async(sql,values)=>{
     if(sql.includes('catalog_candidate_source_mentions'))return {rows:[]};
+    if(sql.includes('count(DISTINCT e.id)'))return {rows:[]};
     assert.equal(values[1],'000119');
     assert.match(sql,/p\.impa_code=\$2/);
     assert.match(sql,/NOT EXISTS\(SELECT 1 FROM public\.catalog_products canonical/);
@@ -22,6 +23,15 @@ test('six-digit search passes leading zeros and prioritizes the canonical code r
   const result=await searchCatalog('000119',db);
   assert.equal(result.rows[0].impa_code,'000119');
   assert.equal(result.pagination.total,1);
+});
+test('search counts distinct approved suppliers and retains a true zero',async()=>{
+  const db={query:async(sql)=>{
+    if(sql.includes('catalog_candidate_source_mentions'))return {rows:[]};
+    if(sql.includes('count(DISTINCT e.id)'))return {rows:[{product_id:'one',verified_supplier_count:2}]};
+    return {rows:[{id:'one',name:'Valve',total_matches:2},{id:'two',name:'Pump',total_matches:2}]};
+  }};
+  const result=await searchCatalog('parts',db);
+  assert.deepEqual(result.rows.map(row=>row.verified_supplier_count),[2,0]);
 });
 test('product API projection omits source links while retaining exact supplier parts',async()=>{
   const db={query:async(sql)=>{
@@ -35,4 +45,15 @@ test('product API projection omits source links while retaining exact supplier p
   assert.equal(result.image_url,null);
   assert.equal(result.sourceSuppliers[0].website,null);
   assert.doesNotMatch(JSON.stringify(result),/shipserv/i);
+});
+test('supplier contact projection never falls back to marketplace profile data',async()=>{
+  const db={query:async(sql)=>{
+    if(sql.includes('FROM public.catalog_products WHERE id=$1'))return {rows:[{id:'product',name:'Valve'}]};
+    if(sql.includes('FROM public.catalog_suppliers s'))return {rows:[{id:'supplier',canonical_entity_id:'entity',canonical_company_name:'Company',supplier_website:'https://www.shipserv.com/supplier/1',email:'source@example.com',phone:'123',website:'https://e-shipsupply.com/supplier/1',relationships:[{evidenceClassification:'supplier_catalogue_part'}]}]};
+    return {rows:[]};
+  }};
+  const row=(await getCatalogProduct('product',{},db)).verifiedSuppliers[0];
+  assert.equal(row.website,null);
+  assert.equal(row.email,undefined);
+  assert.equal(row.phone,undefined);
 });

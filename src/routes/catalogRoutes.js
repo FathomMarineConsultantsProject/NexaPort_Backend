@@ -17,7 +17,7 @@ router.get('/suppliers/:id',async(req,res)=>{try{
   if (!result.rows[0]) return res.status(404).json({success:false,message:'Supplier not found.'});
   const supplier=result.rows[0];
   if (supplier.website) {
-    try { if (/(^|\.)shipserv\.com$/i.test(new URL(supplier.website).hostname)) supplier.website=null; }
+    try { if (/(^|\.)(shipserv\.com|e-shipsupply\.com|e-shipsupply\.net)$/i.test(new URL(supplier.website).hostname)) supplier.website=null; }
     catch { supplier.website=null; }
   }
   return res.json({success:true,data:supplier});
