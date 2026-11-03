@@ -15,7 +15,7 @@ const redactSource = value => {
   return value;
 };
 
-export async function searchCatalog(query, db=pool, page=1) {
+export async function searchCatalog(query, db=pool, page=1, {sort='relevance',verifiedOnly=false}={}) {
   const q=String(query||'').trim().slice(0,120);
   if (!q) return {rows:[],pagination:{page,total:0,pages:0},relatedSources:[],relatedPagination:{page,total:0,pages:0}};
   const namespace=/^(IMPA|MODEL|PART|SKU)\s+(.+)$/i.exec(q);
@@ -25,35 +25,39 @@ export async function searchCatalog(query, db=pool, page=1) {
     CASE WHEN p.impa_code=$2 AND ($4::text IS NULL OR $4='IMPA') THEN -1
          WHEN EXISTS(SELECT 1 FROM public.product_identifiers x WHERE x.product_id=p.id AND x.display_value=$5 AND ($4::text IS NULL OR x.namespace=$4)) THEN 0
          WHEN EXISTS(SELECT 1 FROM public.product_identifiers x WHERE x.product_id=p.id AND x.normalized_value=$2 AND ($4::text IS NULL OR x.namespace=$4)) THEN 1
-         WHEN lower(p.name)=lower($1) THEN 2 ELSE 3 END AS rank
+         WHEN lower(p.name)=lower($1) THEN 2
+         WHEN lower(p.name) LIKE lower($1)||'%' THEN 3 ELSE 4 END AS rank
     FROM public.catalog_products p
     WHERE (EXISTS(SELECT 1 FROM public.product_identifiers x WHERE x.product_id=p.id AND x.normalized_value=$2 AND ($4::text IS NULL OR x.namespace=$4))
        OR EXISTS(SELECT 1 FROM public.product_identifiers x WHERE x.product_id=p.id AND lower(coalesce(p.manufacturer,'')||' '||x.display_value)=lower($1))
-       OR p.source_key=$1 OR lower(p.name) LIKE lower($1)||'%')
+       OR p.source_key=$1 OR lower(p.name) LIKE '%'||lower($1)||'%')
       AND (NOT ($2 ~ '^[0-9]{6}$' AND ($4::text IS NULL OR $4='IMPA'))
         OR p.impa_code=$2
-        OR NOT EXISTS(SELECT 1 FROM public.catalog_products canonical WHERE canonical.impa_code=$2)))
-    SELECT p.id,p.impa_code,p.impa_identity_state,p.name,p.uom,COUNT(*) OVER()::int AS total_matches,
-    array_agg(DISTINCT i.display_value) FILTER (WHERE i.id IS NOT NULL) AS identifiers,(h.rank<=1) AS exact_match
-    FROM hits h JOIN public.catalog_products p ON p.id=h.id LEFT JOIN public.product_identifiers i ON i.product_id=p.id
-    GROUP BY p.id,h.rank ORDER BY h.rank,p.name,p.id LIMIT 50 OFFSET $3`,[q,normalized,(page-1)*50,namespaceFilter,namespace?.[2]||q]);
-  if (result.rows.length) {
-    const counts=await db.query(`SELECT r.product_id, count(DISTINCT e.id)::int AS verified_supplier_count
+        OR NOT EXISTS(SELECT 1 FROM public.catalog_products canonical WHERE canonical.impa_code=$2))),
+    verified_counts AS (SELECT r.product_id, count(DISTINCT e.id)::int AS verified_supplier_count
       FROM public.supplier_product_relationships r
+      JOIN hits h ON h.id=r.product_id
       JOIN public.catalog_suppliers s ON s.id=r.supplier_id
       JOIN public.directory_entity_sources src ON src.source_name='ShipServ'
         AND (src.source_url=s.profile_url OR (s.tnid IS NOT NULL AND s.tnid<>'208652' AND src.source_external_id=s.tnid))
       JOIN public.maritime_directory_entities e ON e.id=src.entity_id AND e.is_active=true AND e.review_status='approved'
       JOIN public.maritime_directory_entity_types t ON t.entity_id=e.id AND t.directory_type='supplier'
-      WHERE r.product_id=ANY($1::uuid[]) AND r.relationship_type IN ('supplier_listing','verified_offer')
+      WHERE r.relationship_type IN ('supplier_listing','verified_offer')
         AND r.review_status IN ('accepted_local_extraction','reviewed_verified')
         AND r.evidence_classification IN ('supplier_catalogue_listing','supplier_catalogue_part','explicit_brochure_offer','reviewed_self_branded_offer')
         AND (SELECT count(DISTINCT x.entity_id) FROM public.directory_entity_sources x WHERE x.source_name='ShipServ'
           AND (x.source_url=s.profile_url OR (s.tnid IS NOT NULL AND s.tnid<>'208652' AND x.source_external_id=s.tnid)))=1
-      GROUP BY r.product_id`,[result.rows.map(row=>row.id)]);
-    const byProduct=new Map(counts.rows.map(row=>[String(row.product_id),Number(row.verified_supplier_count)]));
-    result.rows=result.rows.map(row=>({...row,verified_supplier_count:byProduct.get(String(row.id))||0}));
-  }
+      GROUP BY r.product_id)
+    SELECT p.id,p.impa_code,p.impa_identity_state,p.name,p.uom,COUNT(*) OVER()::int AS total_matches,
+      array_agg(DISTINCT i.display_value) FILTER (WHERE i.id IS NOT NULL) AS identifiers,
+      (h.rank<=1) AS exact_match,COALESCE(vc.verified_supplier_count,0) AS verified_supplier_count
+    FROM hits h JOIN public.catalog_products p ON p.id=h.id
+    LEFT JOIN verified_counts vc ON vc.product_id=p.id
+    LEFT JOIN public.product_identifiers i ON i.product_id=p.id
+    WHERE NOT $7::boolean OR COALESCE(vc.verified_supplier_count,0)>0
+    GROUP BY p.id,h.rank,vc.verified_supplier_count
+    ORDER BY CASE WHEN $6='most' THEN COALESCE(vc.verified_supplier_count,0) END DESC,
+      h.rank,p.name,p.id LIMIT 50 OFFSET $3`,[q,normalized,(page-1)*50,namespaceFilter,namespace?.[2]||q,sort==='most'?'most':'relevance',Boolean(verifiedOnly)]);
   const total=result.rows[0]?.total_matches||0;
   const related=await db.query(`SELECT m.id,m.namespace,m.display_identifier,m.evidence_state,
     s.name AS supplier_name,s.location AS supplier_location,count(*) OVER()::int AS total_matches
@@ -99,7 +103,6 @@ export async function getCatalogProduct(id,{page=1,limit=25}={},db=pool) {
   const qualifying=new Set(['supplier_catalogue_listing','supplier_catalogue_part','explicit_brochure_offer','reviewed_self_branded_offer']);
   const hasListing=row=>row.relationships?.some(relationship=>qualifying.has(relationship.evidenceClassification));
   const offerings=listed.filter(hasListing);
-  const matched=offerings.filter(row=>row.canonical_entity_id);
   const related=(await db.query(`SELECT s.id,s.name,s.location,s.country,
     jsonb_build_array(jsonb_build_object('type','related','evidenceClassification','related_supplier')) AS relationships
     FROM public.catalog_suppliers s JOIN public.supplier_product_relationships r ON r.supplier_id=s.id
@@ -112,10 +115,12 @@ export async function getCatalogProduct(id,{page=1,limit=25}={},db=pool) {
   const publicOfferings=offerings.map(({supplier_website,email,phone,address,...row})=>({
     ...row,website:publicWebsite(row.website)
   }));
+  const verifiedPublic=[...new Map(publicOfferings.filter(row=>row.canonical_entity_id)
+    .map(row=>[String(row.canonical_entity_id),row])).values()];
   return redactSource({...product,image_url:localImage(product.image_url),identifiers:identifiers.rows,categories:categories.rows,
-    verified_supplier_count:matched.length,verifiedSuppliers:publicOfferings.filter(row=>row.canonical_entity_id).slice((page-1)*limit,page*limit),
-    supplierCount:matched.length,sourceSupplierCount:offerings.length,
-    suppliers:publicOfferings.filter(row=>row.canonical_entity_id).slice((page-1)*limit,page*limit),sourceSuppliers:publicOfferings.filter(row=>!row.canonical_entity_id),
+    verified_supplier_count:verifiedPublic.length,verifiedSuppliers:verifiedPublic.slice((page-1)*limit,page*limit),
+    supplierCount:verifiedPublic.length,sourceSupplierCount:offerings.length,
+    suppliers:verifiedPublic.slice((page-1)*limit,page*limit),sourceSuppliers:publicOfferings.filter(row=>!row.canonical_entity_id),
     relatedProductSources:related,
-    pagination:{page,limit,total:matched.length,pages:Math.ceil(matched.length/limit)}});
+    pagination:{page,limit,total:verifiedPublic.length,pages:Math.ceil(verifiedPublic.length/limit)}});
 }
