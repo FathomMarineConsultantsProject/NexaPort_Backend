@@ -43,7 +43,9 @@ router.get('/status', async (_req, res) => {
         AND offering_scope <> 'unknown' AND publication_rights_status='documented'
         AND publication_rights_scope='commercial_publication')::int AS publication_ready
       FROM public.supplier_catalogue_source_policies`)).rows[0] : { recorded: 0, publication_ready: 0 };
-    const scope = process.env.DB_NAME === 'shipserv_test' && ['127.0.0.1', 'localhost'].includes(process.env.DB_HOST) ? 'isolated_test' : 'unverified';
+    const scope = process.env.DB_NAME === 'shipserv_test' && ['127.0.0.1', 'localhost'].includes(process.env.DB_HOST)
+      ? 'isolated_test' : process.env.DB_NAME === 'nexaportdb' && !['127.0.0.1', 'localhost'].includes(process.env.DB_HOST)
+        ? 'production' : 'unverified';
     res.json({ database: { ...rows[0], pending_review: reviews, source_policies: policies, scope }, worker, scheduler: { status: 'not_configured' } });
   } catch (error) { res.status(503).json({ database: { status: 'unavailable', code: error.code || 'database_error' }, worker, scheduler: { status: 'not_configured' } }); }
 });

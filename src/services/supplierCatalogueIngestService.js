@@ -49,8 +49,13 @@ export async function ingestSupplierBatch(db, entries, { dryRun = true, batchId 
             const supplierId = suppliers[0].id;
             resolvedSupplierId = supplierId;
             await client.query('SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))', [String(products[0].id), String(supplierId)]);
-            const existing = (await client.query('SELECT id FROM public.supplier_product_relationships WHERE product_id=$1 AND supplier_id=$2 LIMIT 1', [products[0].id, supplierId])).rows[0];
-            if (existing) {
+            const existing = (await client.query(`SELECT id,product_id FROM public.supplier_product_relationships
+              WHERE supplier_id=$2 AND (product_id=$1 OR product_id IN
+                (SELECT product_id FROM public.product_identifiers WHERE namespace='IMPA' AND normalized_value=$3))
+              ORDER BY CASE WHEN product_id=$1 THEN 0 ELSE 1 END LIMIT 2`, [products[0].id, supplierId, code])).rows[0];
+            if (existing && String(existing.product_id) !== String(products[0].id)) {
+              Object.assign(result, { status: 'needs_review', reason: 'legacy_shadow_relationship_requires_reconciliation', relationshipId: existing.id });
+            } else if (existing) {
               let evidenceAdded = false;
               if (!dryRun) {
                 const evidence = await client.query(`INSERT INTO public.catalog_relationship_evidence (relationship_id,source_url,document_sha256,page_number,evidence_text,extraction_version) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING RETURNING relationship_id`, [existing.id, row.sourceUrl, row.documentSha256, row.pageNumber ?? 0, row.evidenceText, row.extractionMethod]);

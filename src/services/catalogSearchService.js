@@ -91,6 +91,12 @@ export async function getCatalogProduct(id,{page=1,limit=25}={},db=pool) {
       JOIN public.supplier_product_relationships offering ON offering.supplier_id=s.id AND offering.product_id=$1
         AND offering.relationship_type IN ('supplier_listing','verified_offer')
         AND offering.review_status IN ('accepted_local_extraction','reviewed_verified')
+        AND NOT EXISTS (SELECT 1 FROM public.supplier_catalogue_source_policies policy
+          WHERE policy.verified_supplier_id=s.id AND policy.source_url=offering.evidence_url
+            AND (policy.publication_rights_status<>'documented'
+              OR policy.publication_rights_scope IS DISTINCT FROM 'commercial_publication'
+              OR policy.offering_confirmation_status<>'documented'
+              OR policy.offering_scope='unknown'))
       LEFT JOIN LATERAL (SELECT min(src.entity_id::text)::uuid AS entity_id FROM public.directory_entity_sources src
         WHERE src.source_name='ShipServ' AND
           (src.source_url=s.profile_url OR (s.tnid IS NOT NULL AND s.tnid<>'208652' AND src.source_external_id=s.tnid))
