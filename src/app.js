@@ -35,6 +35,7 @@ import { publicClaimInvitationRoutes, claimInvitationRoutes, adminClaimInvitatio
 import adminProfileClaimsRoutes from "./routes/adminProfileClaimsRoutes.js";
 import templateRoutes from "./routes/templateRoutes.js";
 import reportRoutes from "./routes/reportRoutes.js";
+import supplierCatalogueRoutes from "./routes/supplierCatalogueRoutes.js";
 import inspectionWorkflowRoutes from "./routes/inspectionWorkflowRoutes.js";
 import {
   accreditationSchemeRouter,
@@ -90,6 +91,7 @@ app.use("/api/client-onboarding", clientOnboardingRoutes);
 app.use("/api/admin/client-registrations", adminClientRegistrationRoutes);
 app.use("/api/admin/maritime-directory", maritimeDirectoryRoutes);
 app.use("/api/catalog", catalogRoutes);
+app.use("/api/internal/supplier-catalogue", supplierCatalogueRoutes);
 app.use("/api/company", maritimeCompanyRoutes);
 app.use("/api/public/companies", publicCompanyRoutes);
 app.use("/api/company-claims", companyClaimRoutes);
